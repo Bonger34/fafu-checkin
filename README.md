@@ -186,6 +186,12 @@ A：多为网络问题，会自动重试；若持续出现，可能是系统接�
 
 ## 🛠️ 开发与发布
 
+### 开发文档
+
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 技术文档：系统知识（签名 / token / 接口）、
+  模块架构、调试手册（已知坑）、重新逆向指南
+- [docs/HANDOFF.md](docs/HANDOFF.md) — 交接文档：项目现状与协作约定
+
 ### 环境要求
 
 推荐 **WSL2（Ubuntu）** / Linux / macOS；Windows 下也可使用 Git Bash（注意换行符与文件权限）。
