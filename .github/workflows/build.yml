@@ -1,7 +1,7 @@
 name: Build
 
-# 自动构建模块 zip，并作为 workflow artifact 提供下载（保留 90 天）。
-# 发布由维护者手动完成：下载构建产物 → 按下方提示执行 gh release create。
+# 自动构建开发版模块 zip，并作为 workflow artifact 提供下载（保留 90 天）。
+# 产物名带 commit 标识，可追溯；发布由维护者手动完成（见 README「开发与发布」）。
 on:
   push:
     branches: [ main ]
@@ -16,6 +16,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: 获取短 SHA
+        id: vars
+        run: echo "short_sha=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - name: Shell 语法检查
         run: |
@@ -33,12 +37,12 @@ jobs:
       - name: 元数据校验（module.prop / update.json）
         run: python3 scripts/check_metadata.py
 
-      - name: 构建模块 zip
-        run: sh build.sh
+      - name: 构建模块 zip（开发版）
+        run: sh build.sh dev
 
       - name: 生成发布说明草稿（供手动发布使用）
         run: |
-          VER=$(sed -n 's/^version=//p' module.prop | head -n 1)
+          VER=$(sed -n 's/^version=//p' module.prop | head -n1)
           awk -v hdr="## ${VER}" '
             $0 == hdr { capture = 1; next }
             capture && /^## / { exit }
@@ -53,7 +57,7 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: fafu-checkin
+          name: fafu-checkin-dev-${{ steps.vars.outputs.short_sha }}
           path: |
             dist/*.zip
             dist/release-notes.md
@@ -61,25 +65,28 @@ jobs:
 
       - name: 输出手动发布提示
         run: |
-          VER=$(sed -n 's/^version=//p' module.prop | head -n 1)
+          VER=$(sed -n 's/^version=//p' module.prop | head -n1)
           {
-            echo "### 📦 构建完成：${VER}"
+            echo "### 📦 构建完成：${VER} (dev.${{ steps.vars.outputs.short_sha }})"
             echo ""
-            echo "Artifact \`fafu-checkin\` 包含：模块 zip 与发布说明草稿（release-notes.md）。"
+            echo "Artifact 包含：开发版 zip（带 commit 标识）与发布说明草稿。"
             echo ""
             echo "**手动发布步骤：**"
             echo ""
             echo '```sh'
-            echo "# 1. 打 tag 并推送"
+            echo "# 1. 发布构建（干净文件名，与 update.json 的 zipUrl 对应）"
+            echo "sh build.sh"
+            echo ""
+            echo "# 2. 打 tag 并推送"
             echo "git tag -a ${VER} -m \"${VER}：一句话摘要\""
             echo "git push origin ${VER}"
             echo ""
-            echo "# 2. 创建 Release（说明用 release-notes.md）"
-            echo "gh release create ${VER} ./fafu-checkin-${VER}.zip \\"
+            echo "# 3. 创建 Release（说明用 release-notes.md）"
+            echo "gh release create ${VER} ./dist/fafu-checkin-${VER}.zip \\"
             echo "  --title \"${VER}：一句话摘要\" \\"
-            echo "  --notes-file release-notes.md"
+            echo "  --notes-file dist/release-notes.md"
             echo ""
-            echo "# 3. 同步 update.json 并推送"
+            echo "# 4. 同步 update.json 并推送"
             echo "python3 scripts/sync_update_json.py ${VER} <versionCode> \\"
             echo "  \"https://github.com/\${GITHUB_REPOSITORY}/releases/download/${VER}/fafu-checkin-${VER}.zip\""
             echo "git commit -am \"chore(release): 同步 update.json 至 ${VER}\" && git push"

@@ -197,12 +197,23 @@ sudo apt update && sudo apt install -y git zip
 # 克隆与构建
 git clone https://github.com/Bonger34/fafu-checkin.git
 cd fafu-checkin
-sh build.sh          # 输出 dist/fafu-checkin-<版本>.zip
+sh build.sh          # 发布构建 → dist/fafu-checkin-<版本>.zip
+sh build.sh dev      # 开发构建 → dist/fafu-checkin-<版本>-dev.<commit>.zip
 ```
 
 > 提示：仓库已通过 [`.gitattributes`](.gitattributes) 强制 **LF 换行**，请勿改回 CRLF
 > （会导致脚本在设备上无法执行）；在 Windows 下打包建议使用 WSL，以保留脚本的可执行权限
 > （安装脚本也会自动修正权限，作为兜底）。
+
+### 两种构建模式
+
+| 命令 | 产物名 | 用途 |
+|---|---|---|
+| `sh build.sh` | `fafu-checkin-v1.1.6.zip` | **发布**（文件名与 `update.json` 的 `zipUrl` 对应） |
+| `sh build.sh dev` | `fafu-checkin-v1.1.6-dev.5c1a6a4.zip` | **日常测试**（带 commit 标识，可追溯） |
+
+CI 的自动构建使用 **dev 模式**：产物名带短 commit（如 `fafu-checkin-dev-5c1a6a4`），
+便于在多次 push 之间区分；正式发布时使用干净的发布构建产物。
 
 ### 安装到设备
 
