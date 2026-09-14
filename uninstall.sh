@@ -1,13 +1,15 @@
 #!/system/bin/sh
 # ============================================================
 # 数字FAFU 晚查寝自动签到 —— 卸载脚本
-# 模块被卸载时执行：停止守护进程、关闭残留页面、清理模块生成的全部文件
+# 模块被卸载时执行：停止守护进程、关闭残留页面、清理运行时文件
+# （运行时文件均位于模块目录内；模块目录随后会被管理器整体移除，
+#   此处再显式清理一次，确保不留任何残留）
 # ============================================================
 
-LOG="/data/adb/fafu_checkin.log"
-PIDF="/data/adb/.fafu_checkin.pid"
-DONE="/data/adb/.fafu_checkin_done"
-CONF="/data/adb/fafu-checkin.conf"
+MODDIR=${0%/*}
+[ -f "$MODDIR/fafu_checkin.sh" ] || MODDIR="/data/adb/modules/fafu-checkin"
+
+PIDF="$MODDIR/.fafu_checkin.pid"
 
 # 1) 停止守护进程（先优雅终止，超时强杀）
 if [ -f "$PIDF" ]; then
@@ -39,5 +41,6 @@ if command -v dumpsys >/dev/null 2>&1 && command -v am >/dev/null 2>&1; then
   done
 fi
 
-# 3) 清理模块运行期间生成的全部文件（日志 / 状态 / 标记 / 配置）
-rm -f "$LOG" "$PIDF" "$DONE" "$CONF"
+# 3) 清理运行时文件（模块目录随后由管理器整体移除，此处为显式兜底）
+rm -f "$MODDIR/fafu_checkin.log" "$MODDIR/.fafu_checkin.pid" "$MODDIR/.fafu_checkin_done" \
+      "$MODDIR/fafu-checkin.conf" "$MODDIR/fafu-checkin.state" "$MODDIR/fafu_checkin.status"

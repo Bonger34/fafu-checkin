@@ -1,17 +1,14 @@
 #!/system/bin/sh
 # ============================================================
-# 数字FAFU 晚查寝自动签到 —— 操作按钮脚本
+# 数字FAFU 晚查寝自动签到 —— 操作按钮
 # 在 KernelSU / Magisk 管理器中点击模块「操作」按钮时执行：
-#   显示运行状态 → 立即检查/补签一次 → 输出最近日志
+#   切换服务开关（启用 ⇄ 停用）
+#     · 启用：恢复后台服务与自动签到
+#     · 停用：停止后台服务，不再进行任何网络请求
+#   模块描述会同步显示开关状态与最近签到时间
 # ============================================================
 
 MODDIR=${0%/*}
 [ -f "$MODDIR/fafu_checkin.sh" ] || MODDIR="/data/adb/modules/fafu-checkin"
 
-sh "$MODDIR/fafu_checkin.sh" status
-echo ""
-echo "===== 执行一次检查 ====="
-sh "$MODDIR/fafu_checkin.sh" once
-echo ""
-echo "===== 最近日志 ====="
-tail -n 6 /data/adb/fafu_checkin.log 2>/dev/null
+sh "$MODDIR/fafu_checkin.sh" toggle

@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ============================================================
-# 数字FAFU 晚查寝自动签到 —— 核心脚本 v1.0.0
+# 数字FAFU 晚查寝自动签到 —— 核心脚本 v1.1.0
 # 可独立运行，也可作为 KernelSU / Magisk 模块的一部分运行
 #
 # 功能：
@@ -8,24 +8,31 @@
 #   2) 白天保活 07:00~21:25：每 15 分钟轻量调用接口，保持会话不过期
 #   3) 会话失效自动刷新：熄屏/锁屏下静默进行（屏幕不亮、不唤醒）
 #   4) 刷新后自动清理页面（am stack remove，不留残留、不甩回桌面）
-#   5) 全部系统命令 fd 加固（规避 KernelSU 下 SELinux 的 binder fd 限制）
+#   5) 服务开关：一键启用/停用（操作按钮或命令），停用期间无任何网络请求
+#   6) 动态描述：模块描述显示开关状态与签到日期时间（绝对日期，守护进程退出后信息不失真）
+#   7) 全部系统命令 fd 加固（规避 KernelSU 下 SELinux 的 binder fd 限制）
 #
 # 用法：
-#   sh fafu_checkin.sh [start|stop|status|once|refresh|keepalive]
-#     start      启动守护进程（默认；后台运行、单实例）
-#     stop       停止守护进程
-#     status     查看运行状态与 token 状态
+#   sh fafu_checkin.sh [start|stop|status|once|refresh|keepalive|toggle|enable|disable]
+#     start      启动守护进程（若已停用则忽略）
+#     stop       停止守护进程（不改变开关状态）
+#     status     查看开关 / 服务 / token 状态
 #     once       立即检查一次并签到（幂等）
 #     refresh    手动刷新 token（测试用）
 #     keepalive  手动执行一次保活检查
+#     toggle     切换服务开关（启用 ⇄ 停用）
+#     enable     启用服务
+#     disable    停用服务
 #
-# 配置文件（可选）：/data/adb/fafu-checkin.conf
+# 配置文件（可选）：模块目录内 fafu-checkin.conf
 #   KEEPALIVE=0   关闭白天保活（仅保留 21:30 自动签到）
 #
-# 状态文件：
-#   日志 /data/adb/fafu_checkin.log
-#   锁   /data/adb/.fafu_checkin.pid
-#   标记 /data/adb/.fafu_checkin_done
+# 运行时文件（全部位于模块目录内，随模块卸载一并清除）：
+#   日志 $MODDIR/fafu_checkin.log
+#   进程 $MODDIR/.fafu_checkin.pid
+#   标记 $MODDIR/.fafu_checkin_done
+#   开关 $MODDIR/fafu-checkin.state
+#   签到 $MODDIR/fafu_checkin.status
 # ============================================================
 
 export PATH="/system/bin:/system/xbin:/data/adb/ksu/bin:/data/adb/magisk:$PATH"
@@ -46,6 +53,12 @@ BB=/data/adb/ksu/bin/busybox
 [ -x "$BB" ] || BB=/data/adb/magisk/busybox
 [ -x "$BB" ] || BB=busybox
 
+# ---- ksud（KernelSU 用户空间工具；用于官方「动态描述」覆盖） ----
+KSUD=/data/adb/ksu/bin/ksud
+[ -x "$KSUD" ] || KSUD=/data/adb/ksud
+[ -x "$KSUD" ] || KSUD=$(command -v ksud 2>/dev/null)
+[ -x "$KSUD" ] || KSUD=""
+
 # 探测 wget 是否支持 -T 超时选项（个别 busybox 构建未启用；不支持则自动省略）
 WGET_T=""
 case "$("$BB" wget --help 2>&1)" in
@@ -58,16 +71,82 @@ API="http://stuhtapi.fafu.edu.cn/health-api"
 PKG="cn.edu.fafu.iportal"
 PAGE="http://stuhealth.fafu.edu.cn/declarew/#/fafu/login"
 LD="/data/data/cn.edu.fafu.iportal/app_webview/Default/Local Storage/leveldb"
-LOG="/data/adb/fafu_checkin.log"
-PIDF="/data/adb/.fafu_checkin.pid"
-DONE="/data/adb/.fafu_checkin_done"
-CONFIG="/data/adb/fafu-checkin.conf"
+# 运行时文件统一存放于模块目录内（不写入 /data/adb/ 根目录）
+LOG="$MODDIR/fafu_checkin.log"
+PIDF="$MODDIR/.fafu_checkin.pid"
+DONE="$MODDIR/.fafu_checkin_done"
+CONFIG="$MODDIR/fafu-checkin.conf"
+MODID="fafu-checkin"
+STATE="$MODDIR/fafu-checkin.state"
+STATUS="$MODDIR/fafu_checkin.status"
 
 # ---- 可选配置（覆盖默认值） ----
 [ -f "$CONFIG" ] && . "$CONFIG"
 KEEPALIVE="${KEEPALIVE:-1}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
+
+# ---- 服务开关 ----
+is_disabled() {
+  [ -f "$STATE" ] && [ "$("$BB" cat "$STATE" 2>/dev/null)" = "disabled" ]
+}
+
+# ---- 签到记录（用于动态描述） ----
+status_get() { # $1=键名（sign_date / sign_time / sign_kind）
+  [ -f "$STATUS" ] || return 0
+  "$BB" grep -m1 "^$1=" "$STATUS" 2>/dev/null | "$BB" cut -d= -f2-
+}
+
+status_set() { # $1=日期 $2=时间(可空) $3=类型(normal/supplement/detected/leave)
+  printf 'sign_date=%s\nsign_time=%s\nsign_kind=%s\n' "$1" "$2" "$3" > "$STATUS"
+}
+
+desc_text() { # 生成当前应显示的模块描述（使用绝对日期，守护进程退出后信息也不会失真）
+  today=$("$BB" date +%Y-%m-%d)
+  d=$(status_get sign_date)
+  t=$(status_get sign_time)
+  k=$(status_get sign_kind)
+  if is_disabled; then
+    if [ -n "$d" ]; then
+      dd=${d#*-}
+      if [ -n "$t" ]; then echo "⏸ 已停用 · 最近签到 $dd $t"; else echo "⏸ 已停用 · 最近签到 $dd"; fi
+    else
+      echo "⏸ 已停用 · 暂无签到记录"
+    fi
+  elif [ "$d" = "$today" ] && [ "$k" = "leave" ]; then
+    echo "🟢 已启用 · 🏖 ${d#*-} 已请假"
+  elif [ "$d" = "$today" ]; then
+    if [ -n "$t" ]; then echo "🟢 已启用 · ✅ ${d#*-} 已签到 $t"; else echo "🟢 已启用 · ✅ ${d#*-} 已签到"; fi
+  else
+    echo "🟢 已启用 · ⏳ ${today#*-} 未签到"
+  fi
+}
+
+set_desc() { # $1=描述文本；优先 KernelSU 官方覆盖，失败则改写 module.prop（Magisk）
+  if [ -n "$KSUD" ]; then
+    if KSU_MODULE="$MODID" "$KSUD" module config set override.description "$1" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  [ -f "$MODDIR/module.prop" ] || return 1
+  "$BB" grep -v '^description=' "$MODDIR/module.prop" > "$MODDIR/module.prop.tmp" 2>/dev/null
+  printf 'description=%s\n' "$1" >> "$MODDIR/module.prop.tmp"
+  mv -f "$MODDIR/module.prop.tmp" "$MODDIR/module.prop" 2>/dev/null
+  chmod 644 "$MODDIR/module.prop" 2>/dev/null
+}
+
+update_desc() { # 计算描述并写入（内容变化时才写）
+  new=$(desc_text)
+  cur=""
+  if [ -n "$KSUD" ]; then
+    cur=$(KSU_MODULE="$MODID" "$KSUD" module config get override.description 2>/dev/null)
+  fi
+  if [ -z "$cur" ] && [ -f "$MODDIR/module.prop" ]; then
+    cur=$("$BB" grep -m1 '^description=' "$MODDIR/module.prop" 2>/dev/null | "$BB" cut -d= -f2-)
+  fi
+  [ "$new" = "$cur" ] && return 0
+  set_desc "$new"
+}
 
 get_token() {
   "$BB" ls -tr "$LD" 2>/dev/null | while IFS= read -r n; do
@@ -214,7 +293,24 @@ run_once() {
 
   # 已签到（且是近期任务）→ 完成
   if [ "$state" != "0" ] && [ $(( now - dline )) -lt 21600000 ]; then
-    log "[$name] 已签到(状态$state)"; return 0
+    log "[$name] 已签到(状态$state)"
+    # 记录检测到的签到信息（仅当今天尚无记录时）
+    d=$(status_get sign_date)
+    if [ "$d" != "$("$BB" date +%Y-%m-%d)" ]; then
+      stime=""
+      sst=$(echo "$resp" | "$BB" grep -o '"signTime":[0-9]*' | "$BB" head -n 1 | "$BB" cut -d: -f2)
+      case "$sst" in
+        ""|*[!0-9]*) : ;;
+        *) stime=$("$BB" date -d "@$((sst / 1000))" +%H:%M 2>/dev/null) ;;
+      esac
+      if [ "$state" = "2" ]; then
+        status_set "$("$BB" date +%Y-%m-%d)" "" "leave"
+      else
+        status_set "$("$BB" date +%Y-%m-%d)" "$stime" "detected"
+      fi
+    fi
+    update_desc
+    return 0
   fi
 
   # 时间窗口外 → 等待重试
@@ -234,11 +330,15 @@ run_once() {
   fi
   if [ $rc -eq 0 ] && ! echo "$resp2" | "$BB" grep -q '"timestamp"'; then
     et=$(echo "$resp" | "$BB" grep -o '"endTime":[0-9]*' | "$BB" head -n 1 | "$BB" cut -d: -f2)
+    td=$("$BB" date +%Y-%m-%d); hm=$("$BB" date +%H:%M)
     if [ -n "$et" ] && [ "$now" -gt "$et" ]; then
       log "✅ 补签成功 [$name]"
+      status_set "$td" "$hm" "supplement"
     else
       log "✅ 签到成功 [$name]"
+      status_set "$td" "$hm" "normal"
     fi
+    update_desc
     return 0
   fi
   log "签到失败: rc=$rc $(echo "$resp2" | "$BB" head -c 120)"; return 1
@@ -316,6 +416,8 @@ cmd_keepalive() {
 cmd_status() {
   echo "====== 数字FAFU 晚查寝自动签到 ======"
   [ -n "$VER" ] && echo "版本: $VER"
+  # 开关状态
+  if is_disabled; then echo "开关: ⏸ 已停用"; else echo "开关: 🟢 已启用"; fi
   # 服务状态
   if [ -f "$PIDF" ]; then
     pid=$("$BB" cat "$PIDF" 2>/dev/null)
@@ -327,10 +429,8 @@ cmd_status() {
   else
     echo "服务: 未运行"
   fi
-  # 旧脚本提示
-  if [ -f /data/adb/service.d/fafu_checkin.sh ]; then
-    echo "提示: 检测到旧独立脚本 /data/adb/service.d/fafu_checkin.sh，建议删除"
-  fi
+  # 描述预览
+  echo "描述: $(desc_text)"
   # token 状态
   tok=$(get_token)
   if [ -z "$tok" ]; then
@@ -345,6 +445,8 @@ cmd_status() {
   fi
   echo "最近日志:"
   "$BB" tail -n 6 "$LOG" 2>/dev/null
+  # 顺带刷新一次动态描述（保证日期与状态最新）
+  update_desc
 }
 
 cmd_stop() {
@@ -365,6 +467,32 @@ cmd_stop() {
   fi
 }
 
+cmd_enable() {
+  echo "enabled" > "$STATE"
+  log "===== 服务已启用（操作按钮/命令） ====="
+  sh "$SELF" start </dev/null >/dev/null 2>&1
+  update_desc
+  echo "🟢 服务已启用"
+  echo "再次点击操作按钮可停用"
+}
+
+cmd_disable() {
+  echo "disabled" > "$STATE"
+  log "===== 服务已停用（操作按钮/命令） ====="
+  cmd_stop </dev/null >/dev/null 2>&1
+  update_desc
+  echo "⏸ 服务已停用"
+  echo "再次点击操作按钮可启用"
+}
+
+cmd_toggle() {
+  if is_disabled; then
+    cmd_enable
+  else
+    cmd_disable
+  fi
+}
+
 # ---- 子命令分发 ----
 CMD="$1"
 case "$CMD" in
@@ -373,12 +501,20 @@ case "$CMD" in
   keepalive) cmd_keepalive; exit 0 ;;
   status)    cmd_status; exit 0 ;;
   stop)      cmd_stop; exit 0 ;;
+  toggle)    cmd_toggle; exit 0 ;;
+  enable)    cmd_enable; exit 0 ;;
+  disable)   cmd_disable; exit 0 ;;
   start|"")  : ;;
-  *)         echo "用法: sh $SELF [start|stop|status|once|refresh|keepalive]"; exit 1 ;;
+  *)         echo "用法: sh $SELF [start|stop|status|once|refresh|keepalive|toggle|enable|disable]"; exit 1 ;;
 esac
 
 # ---- 启动守护进程（后台化 + 单实例） ----
 if [ -z "$FAFU_DAEMON" ]; then
+  if is_disabled; then
+    echo "服务已停用（可点击操作按钮或运行 enable 启用）"
+    update_desc
+    exit 0
+  fi
   if [ -f "$PIDF" ]; then
     oldpid=$("$BB" cat "$PIDF" 2>/dev/null)
     if [ -n "$oldpid" ] && [ -d "/proc/$oldpid" ] && \
@@ -398,7 +534,21 @@ fi
 echo $$ > "$PIDF"
 log "===== 服务启动 (PID $$) 版本=${VER:-未知} wget_timeout=[${WGET_T:-无}] ====="
 
+DESC_TICK=0
 while true; do
+  # 已被停用 → 刷新描述后退出（保持“停用 = 无进程”语义）
+  if is_disabled; then
+    log "检测到服务已停用，守护进程退出"
+    update_desc
+    rm -f "$PIDF"
+    exit 0
+  fi
+  # 描述定时刷新（每约 10 分钟一次；内容变化时才写入）
+  if [ $DESC_TICK -le 0 ]; then
+    update_desc
+    DESC_TICK=10
+  fi
+  DESC_TICK=$((DESC_TICK-1))
   h=$("$BB" date +%H); m=$("$BB" date +%M)
   h=${h#0}; m=${m#0}; [ -z "$h" ] && h=0; [ -z "$m" ] && m=0
   now=$((h * 60 + m))

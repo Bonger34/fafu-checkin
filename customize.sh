@@ -34,5 +34,6 @@ done
 
 ui_print " "
 ui_print "- 安装完成，重启后自动运行"
-ui_print "- 日志: /data/adb/fafu_checkin.log"
+ui_print "- 操作按钮: 启用/停用服务（模块描述动态显示状态）"
+ui_print "- 日志: /data/adb/modules/fafu-checkin/fafu_checkin.log"
 ui_print " "
