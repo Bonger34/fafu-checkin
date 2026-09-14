@@ -194,8 +194,7 @@ sh $M/fafu_checkin.sh once         # 手动签到检查（幂等）
 2. **定位签名逻辑**：搜索 `spliceoken` / `hashStr` / `Authorization`。
    验证：找到 `md5(SECRET+url+ts+nonce)` 形态的表达式。
 3. **解混淆**（jsjiami.com.v7）：字符串表 + RC4 解密器；注意**运行时数组会先被
-   轮转**（自校验循环），静态数组需还原后使用。可参考历史分析脚本
-   （迁移包 `dev-scripts/declarew-analysis/`）。
+   轮转**（自校验循环），静态数组需还原后使用。参考实现与适配步骤见 [`tools/re-analysis/`](../../tools/re-analysis/)。
    验证：解出的 `hashStr` 指向标准 MD5、密钥为 32 位可见字符串。
 4. **验证签名**：用**登录接口**（空 token 签名）测试——
    若返回业务错误（如"authorization code does not exist"）而非 401，签名正确。
@@ -217,7 +216,7 @@ sh build.sh                   # 构建
 ```
 
 功能逻辑测试建议用 **mock 环境**（临时目录 + mock busybox/ksud），
-避免触碰真实 `/data/adb`。历史测试脚本见迁移包 `dev-scripts/`。
+避免触碰真实 `/data/adb`。
 
 ### 5.2 设备
 
