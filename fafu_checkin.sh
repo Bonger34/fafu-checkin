@@ -120,7 +120,7 @@ ka_state_get() { # $1=键名（date / ok / fail / last / last_result）
   "$BB" grep -m1 "^$1=" "$KASTAT" 2>/dev/null | "$BB" cut -d= -f2-
 }
 
-ka_record() { # $1=ok|fail：累加今日计数（跨天自动重置）并更新最近一次状态
+ka_record() { # $1=ok|fail；$2=本次使用的 token（可选，记录到统计文件）
   today=$("$BB" date +%Y-%m-%d)
   d=$(ka_state_get date); ok=$(ka_state_get ok); fail=$(ka_state_get fail)
   [ "$d" = "$today" ] || { ok=0; fail=0; }
@@ -129,8 +129,9 @@ ka_record() { # $1=ok|fail：累加今日计数（跨天自动重置）并更新
     ok)   ok=$((ok+1)) ;;
     fail) fail=$((fail+1)) ;;
   esac
-  printf 'date=%s\nok=%s\nfail=%s\nlast=%s\nlast_result=%s\n' \
-    "$today" "$ok" "$fail" "$("$BB" date '+%Y-%m-%d %H:%M:%S')" "$1" > "$KASTAT"
+  tk="${2:-$(ka_state_get token)}"
+  printf 'date=%s\nok=%s\nfail=%s\nlast=%s\nlast_result=%s\ntoken=%s\n' \
+    "$today" "$ok" "$fail" "$("$BB" date '+%Y-%m-%d %H:%M:%S')" "$1" "$tk" > "$KASTAT"
 }
 
 desc_text() { # 生成当前应显示的模块描述（使用绝对日期，守护进程退出后信息也不会失真）
@@ -277,9 +278,9 @@ refresh_token() { # $1=旧token；$2=允许唤醒重试(1=是,0=否，默认1)�
     fi
   fi
   if [ -n "$t" ] && [ "$t" != "$1" ]; then
-    log "刷新成功: $t"
+    log "刷新成功: $1 → $t"
   else
-    log "刷新未获得新 token（超时）"
+    log "刷新未获得新 token（超时，仍为 $1）"
   fi
   close_page
   if [ "$WAS_ON" = "0" ]; then
@@ -384,29 +385,29 @@ keepalive_ping() {
   [ -n "$tok" ] || return 0
   resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$tok"); rc=$?
   if [ $rc -eq 0 ] && echo "$resp" | "$BB" grep -q '"records"'; then
-    ka_record ok
-    log "保活: ✅ 成功 (今日 $(ka_state_get ok) 成功 / $(ka_state_get fail) 失败)"
+    ka_record ok "$tok"
+    log "保活: ✅ token 有效 $tok (今日 $(ka_state_get ok) 成功 / $(ka_state_get fail) 失败)"
     return 0
   fi
   # 调用未成功：可能 token 已失效，也可能只是网络异常（busybox wget 不输出错误正文，无法区分）
-  ka_record fail
+  ka_record fail "$tok"
   okc=$(ka_state_get ok); failc=$(ka_state_get fail)
   if screen_is_on; then
-    log "保活: ❌ 失败 (今日 $okc 成功 / $failc 失败) — 屏幕亮着，稍后再试"
+    log "保活: ❌ 调用失败 $tok (今日 $okc 成功 / $failc 失败) — 屏幕亮着，稍后再试"
     return 0
   fi
   now2=$("$BB" date +%s)
   if [ $((now2 - KA_LAST_REFRESH)) -lt 1800 ]; then
-    log "保活: ❌ 失败 (今日 $okc 成功 / $failc 失败) — 刷新冷却中，稍后再试"
+    log "保活: ❌ 调用失败 $tok (今日 $okc 成功 / $failc 失败) — 刷新冷却中，稍后再试"
     return 0
   fi
   KA_LAST_REFRESH=$now2
-  log "保活: ❌ 失败 (今日 $okc 成功 / $failc 失败) — 尝试静默刷新"
+  log "保活: ⚠️ 调用失败 $tok (今日 $okc 成功 / $failc 失败) — 尝试静默刷新"
   newt=$(refresh_token "$tok" 0)
   if [ -n "$newt" ] && [ "$newt" != "$tok" ]; then
-    log "保活: 静默刷新成功 $newt"
+    log "保活: ✅ 静默刷新成功 $tok → $newt"
   else
-    log "保活: 静默刷新未成功（可能网络不可用）"
+    log "保活: ❌ 静默刷新未成功（可能网络不可用），token 仍为 $tok"
   fi
   return 0
 }
@@ -482,9 +483,9 @@ cmd_status() {
   else
     resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$tok"); rc=$?
     if [ $rc -eq 0 ] && echo "$resp" | "$BB" grep -q '"records"'; then
-      echo "token: 有效"
+      echo "token: 有效 $tok"
     else
-      echo "token: 失效或网络异常"
+      echo "token: 失效或网络异常 $tok"
     fi
   fi
   echo "最近日志:"

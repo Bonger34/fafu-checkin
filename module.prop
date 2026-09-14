@@ -1,7 +1,7 @@
 id=fafu-checkin
 name=数字FAFU 晚查寝自动签到
-version=v1.1.3
-versionCode=5
+version=v1.1.4
+versionCode=6
 author=Bonger
 description=后台静默保活并自动完成「数字FAFU」晚查寝签到：主窗口 21:30-22:30 自动执行，失败时在补签时段（22:30-23:00）重试，全程无感；操作按钮可一键启用/停用。
 updateJson=https://raw.githubusercontent.com/Bonger34/fafu-checkin/main/update.json
