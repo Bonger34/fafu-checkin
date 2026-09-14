@@ -2,5 +2,5 @@
   "version": "v1.1.3",
   "versionCode": 5,
   "zipUrl": "https://github.com/Bonger34/fafu-checkin/releases/download/v1.1.3/fafu-checkin-v1.1.3.zip",
-  "changelog": "https://github.com/Bonger34/fafu-checkin/releases/tag/v1.1.3"
+  "changelog": "https://raw.githubusercontent.com/Bonger34/fafu-checkin/main/CHANGELOG.md"
 }

@@ -32,7 +32,11 @@
 
 更新源：仓库根目录的 [`update.json`](update.json)（指向最新 Release）。
 
-> 发布新版本时需同步更新 `update.json` 中的 `version` / `versionCode` / `zipUrl` / `changelog`。
+> **发布新版本时**需更新 `update.json` 中的 `version` / `versionCode` / `zipUrl` 三项；
+> `changelog` 固定指向本仓库 `CHANGELOG.md` 的 raw 地址（管理器按 Markdown 渲染），无需随版本改动。
+>
+> 注意：`changelog` 不能填 GitHub Release 网页地址（那是 HTML 页面，管理器会把它当纯文本渲染，
+> 显示成一堆 HTML 源码）；请始终使用 raw 文件地址。
 
 ## 🎛️ 操作按钮（服务开关）
 
