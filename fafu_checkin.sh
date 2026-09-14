@@ -4,7 +4,7 @@
 # 可独立运行，也可作为 KernelSU / Magisk 模块的一部分运行
 #
 # 功能：
-#   1) 签到窗口 21:30~22:55：每分钟检查，未签到自动提交，签完即止
+#   1) 自动签到：主窗口 21:30~22:30 每分钟检查，未签到自动提交；未成功时在补签时段（22:30~23:00）内继续重试
 #   2) 白天保活 07:00~21:25：每 15 分钟轻量调用接口，保持会话不过期
 #   3) 会话失效自动刷新：熄屏/锁屏下静默进行（屏幕不亮、不唤醒）
 #   4) 刷新后自动清理页面（am stack remove，不留残留、不甩回桌面）
@@ -233,7 +233,13 @@ run_once() {
     resp2=$(api "sign_in/$rid/student/sign" "lng=$lng&lat=$lat" "$token"); rc=$?
   fi
   if [ $rc -eq 0 ] && ! echo "$resp2" | "$BB" grep -q '"timestamp"'; then
-    log "✅ 签到成功 [$name]"; return 0
+    et=$(echo "$resp" | "$BB" grep -o '"endTime":[0-9]*' | "$BB" head -n 1 | "$BB" cut -d: -f2)
+    if [ -n "$et" ] && [ "$now" -gt "$et" ]; then
+      log "✅ 补签成功 [$name]"
+    else
+      log "✅ 签到成功 [$name]"
+    fi
+    return 0
   fi
   log "签到失败: rc=$rc $(echo "$resp2" | "$BB" head -c 120)"; return 1
 }
@@ -396,8 +402,8 @@ while true; do
   h=$("$BB" date +%H); m=$("$BB" date +%M)
   h=${h#0}; m=${m#0}; [ -z "$h" ] && h=0; [ -z "$m" ] && m=0
   now=$((h * 60 + m))
-  if [ $now -ge 1290 ] && [ $now -le 1375 ]; then
-    # ---- 签到窗口 21:30~22:55 ----
+  # ---- 主窗口 21:30~22:30；补签时段 22:30~23:00（失败重试，最后一次不晚于 22:59 发起） ----
+  if [ $now -ge 1290 ] && [ $now -le 1379 ]; then
     if [ "$("$BB" cat "$DONE" 2>/dev/null)" != "$("$BB" date +%Y-%m-%d)" ]; then
       run_once; rc=$?
       [ $rc -eq 0 ] && "$BB" date +%Y-%m-%d > "$DONE"

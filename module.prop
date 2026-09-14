@@ -3,4 +3,4 @@ name=数字FAFU 晚查寝自动签到
 version=v1.0.0
 versionCode=1
 author=Bonger
-description=后台静默保活并自动完成「数字FAFU」晚查寝签到：21:30-22:55 自动执行、全程无感；支持 KernelSU / Magisk 操作按钮手动触发。
+description=后台静默保活并自动完成「数字FAFU」晚查寝签到：主窗口 21:30-22:30 自动执行，失败时在补签时段（22:30-23:00）重试，全程无感；支持 KernelSU / Magisk 操作按钮。
