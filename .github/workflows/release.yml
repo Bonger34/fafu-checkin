@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 校验 tag 与 module.prop 版本一致
         run: |
@@ -29,31 +31,56 @@ jobs:
       - name: 构建模块 zip
         run: sh build.sh
 
-      - name: 生成 Release 说明（取自 CHANGELOG 对应小节）
+      - name: 生成发布说明（CHANGELOG 小节 + 安装步骤）
         run: |
           VER="${GITHUB_REF_NAME}"
+          # 1) 提取 CHANGELOG 中对应版本的小节（从 "## vX.Y.Z" 到下一个 "## "）
           awk -v hdr="## ${VER}" '
             $0 == hdr { capture = 1; next }
             capture && /^## / { exit }
             capture { print }
-          ' CHANGELOG.md > release_body.md
-          if [ ! -s release_body.md ]; then
-            printf '### %s\n\n详见仓库 CHANGELOG。\n' "$VER" > release_body.md
-          fi
+          ' CHANGELOG.md > /tmp/section.md
+
+          # 2) 去除小节首尾空行
+          awk 'NF { p = 1 } p' /tmp/section.md | tac | awk 'NF { p = 1 } p' | tac > /tmp/section_clean.md
+
+          # 3) 组装发布说明：更新内容 + 安装步骤 + 链接
           {
+            echo "## 更新内容"
+            echo ""
+            if [ -s /tmp/section_clean.md ]; then
+              cat /tmp/section_clean.md
+            else
+              echo "本次更新详见 [CHANGELOG](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)。"
+            fi
             echo ""
             echo "---"
+            echo ""
             echo "### 📦 安装"
             echo "1. 下载 \`fafu-checkin-${VER}.zip\`"
             echo "2. KernelSU / Magisk 管理器 → 模块 → 从本地安装 → 选择 zip（或管理器内直接更新）"
             echo "3. 重启手机"
-          } >> release_body.md
-          echo "---------- release body ----------"
+            echo ""
+            echo "> 完整说明见 [README](https://github.com/${GITHUB_REPOSITORY}/blob/main/README.md) · 历史更新见 [CHANGELOG](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)"
+          } > release_body.md
+
+          echo "---------- 发布说明 ----------"
           cat release_body.md
+
+      - name: 解析发布标题（取自 tag 注释）
+        id: meta
+        run: |
+          TITLE=$(git tag -l --format='%(contents:subject)' "${GITHUB_REF_NAME}")
+          if [ -z "$TITLE" ]; then
+            TITLE="${GITHUB_REF_NAME}"
+          fi
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+          echo "发布标题: ${TITLE}"
 
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ steps.meta.outputs.title }}
           files: dist/*.zip
           body_path: release_body.md
 

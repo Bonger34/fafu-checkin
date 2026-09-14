@@ -216,20 +216,25 @@ adb push dist/fafu-checkin-*.zip /sdcard/Download/
 
 1. 更新 `module.prop`：`version`（如 `v1.1.7`）与 `versionCode`（+1）
 2. 在 `CHANGELOG.md` 顶部添加对应小节（格式：`## v1.1.7`）
-3. 提交并推送 tag：
+   —— 该小节将作为**发布说明**自动展示在 Release 页面
+3. 提交并推送 tag（建议使用附注 tag，注释会作为 Release 标题）：
 
    ```sh
    git commit -am "v1.1.7: ..."
    git push
-   git tag v1.1.7
+   git tag -a v1.1.7 -m "v1.1.7：一句话摘要"
    git push origin v1.1.7
    ```
 
 GitHub Actions 随后自动完成（见 [`.github/workflows/release.yml`](.github/workflows/release.yml)）：
 
 - 校验 tag 与 `module.prop` 版本一致
-- 构建模块 zip 并创建 Release（说明取自 CHANGELOG 对应小节）
+- 构建模块 zip 并创建 Release
+  （标题取自 tag 注释；说明取自 `CHANGELOG.md` 对应小节，附安装步骤与链接）
 - 同步 `update.json` 至新版本（供管理器检测更新）
+
+> 发布说明以 `CHANGELOG.md` 为唯一来源，无需另行撰写；发布后也可在 GitHub 上手动编辑。
+> 若某版本缺少对应小节，将自动回退为「详见 CHANGELOG」。
 
 > 推送 main / 提交 PR 时会自动运行语法检查、元数据校验与构建测试
 > （[`.github/workflows/check.yml`](.github/workflows/check.yml)）。
