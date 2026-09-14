@@ -6,7 +6,8 @@
 # 功能：
 #   1) 自动签到：主窗口 21:30~22:30 每分钟检查，未签到自动提交；未成功时在补签时段（22:30~23:00）内继续重试
 #   2) 白天保活 07:00~21:25：每 15 分钟轻量调用接口，保持会话不过期；
-#      每次保活结果均写入日志与统计文件（status 可查看今日成功/失败数）
+#      每次保活结果均写入日志与统计文件（status 可查看今日成功/失败数）；
+#      调用失败时自动刷新（熄屏静默无感；亮屏会短暂出现页面数秒，30 分钟冷却）
 #   3) 会话失效自动刷新：熄屏/锁屏下静默进行（屏幕不亮、不唤醒）
 #   4) 刷新后自动清理页面（am stack remove，不留残留、不甩回桌面）
 #   5) 服务开关：一键启用/停用（操作按钮或命令），停用期间无任何网络请求
@@ -392,22 +393,23 @@ keepalive_ping() {
   # 调用未成功：可能 token 已失效，也可能只是网络异常（busybox wget 不输出错误正文，无法区分）
   ka_record fail "$tok"
   okc=$(ka_state_get ok); failc=$(ka_state_get fail)
-  if screen_is_on; then
-    log "保活: ❌ 调用失败 $tok (今日 $okc 成功 / $failc 失败) — 屏幕亮着，稍后再试"
-    return 0
-  fi
   now2=$("$BB" date +%s)
   if [ $((now2 - KA_LAST_REFRESH)) -lt 1800 ]; then
     log "保活: ❌ 调用失败 $tok (今日 $okc 成功 / $failc 失败) — 刷新冷却中，稍后再试"
     return 0
   fi
   KA_LAST_REFRESH=$now2
-  log "保活: ⚠️ 调用失败 $tok (今日 $okc 成功 / $failc 失败) — 尝试静默刷新"
+  if screen_is_on; then
+    ka_mode="刷新（亮屏）"
+  else
+    ka_mode="静默刷新"
+  fi
+  log "保活: ⚠️ 调用失败 $tok (今日 $okc 成功 / $failc 失败) — 尝试$ka_mode"
   newt=$(refresh_token "$tok" 0)
   if [ -n "$newt" ] && [ "$newt" != "$tok" ]; then
-    log "保活: ✅ 静默刷新成功 $tok → $newt"
+    log "保活: ✅ $ka_mode成功 $tok → $newt"
   else
-    log "保活: ❌ 静默刷新未成功（可能网络不可用），token 仍为 $tok"
+    log "保活: ❌ $ka_mode未成功（可能网络不可用），token 仍为 $tok"
   fi
   return 0
 }
