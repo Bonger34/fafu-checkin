@@ -69,7 +69,8 @@ jobs:
           {
             echo "### 📦 构建完成：${VER} (dev.${{ steps.vars.outputs.short_sha }})"
             echo ""
-            echo "Artifact 包含：开发版 zip（带 commit 标识）与发布说明草稿。"
+            echo "Artifact \`fafu-checkin-dev-${{ steps.vars.outputs.short_sha }}\` 包含："
+            echo "开发版 zip（带 commit 标识、已移除 updateJson，不参与更新检测）与发布说明草稿。"
             echo ""
             echo "**手动发布步骤：**"
             echo ""
