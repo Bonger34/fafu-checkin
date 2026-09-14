@@ -32,7 +32,8 @@
 
 更新源：仓库根目录的 [`update.json`](update.json)（指向最新 Release）。
 
-> **发布新版本时**，`update.json` 的 `version` / `versionCode` / `zipUrl` 由 CI 自动同步（见「开发与发布」）；
+> **发布新版本时**需更新 `update.json` 的 `version` / `versionCode` / `zipUrl` 三项
+> （可用 `scripts/sync_update_json.py` 生成，见「开发与发布」）；
 > `changelog` 固定指向本仓库 `CHANGELOG.md` 的 raw 地址（管理器按 Markdown 渲染），无需随版本改动。
 >
 > 注意：`changelog` 不能填 GitHub Release 网页地址（那是 HTML 页面，管理器会把它当纯文本渲染，
@@ -212,32 +213,53 @@ adb push dist/fafu-checkin-*.zip /sdcard/Download/
 
 或等待 CI 发布后在管理器内直接更新。
 
-### 发布新版本（已自动化）
+### 发布新版本（手动发布）
 
-1. 更新 `module.prop`：`version`（如 `v1.1.7`）与 `versionCode`（+1）
-2. 在 `CHANGELOG.md` 顶部添加对应小节（格式：`## v1.1.7`）
-   —— 该小节将作为**发布说明**自动展示在 Release 页面
-3. 提交并推送 tag（建议使用附注 tag，注释会作为 Release 标题）：
+自动化仅负责**构建**，发布由维护者手动执行（便于检查产物与说明）：
 
-   ```sh
-   git commit -am "v1.1.7: ..."
-   git push
-   git tag -a v1.1.7 -m "v1.1.7：一句话摘要"
-   git push origin v1.1.7
-   ```
+**1. 准备版本**
 
-GitHub Actions 随后自动完成（见 [`.github/workflows/release.yml`](.github/workflows/release.yml)）：
+- 更新 `module.prop`：`version`（如 `v1.1.7`）与 `versionCode`（+1）
+- 在 `CHANGELOG.md` 顶部添加对应小节（格式：`## v1.1.7`）——该小节将作为**发布说明**
 
-- 校验 tag 与 `module.prop` 版本一致
-- 构建模块 zip 并创建 Release
-  （标题取自 tag 注释；说明取自 `CHANGELOG.md` 对应小节，附安装步骤与链接）
-- 同步 `update.json` 至新版本（供管理器检测更新）
+**2. 提交并推送**
 
-> 发布说明以 `CHANGELOG.md` 为唯一来源，无需另行撰写；发布后也可在 GitHub 上手动编辑。
-> 若某版本缺少对应小节，将自动回退为「详见 CHANGELOG」。
+```sh
+git commit -am "v1.1.7: ..."
+git push
+```
 
-> 推送 main / 提交 PR 时会自动运行语法检查、元数据校验与构建测试
-> （[`.github/workflows/check.yml`](.github/workflows/check.yml)）。
+推送后 [`.github/workflows/build.yml`](.github/workflows/build.yml) 会自动构建，
+产物在 Actions 运行页的 **Artifacts** 中下载（保留 90 天）。
+
+**3. 手动创建 Release**
+
+在 GitHub 网页创建 Release（选择新建 tag），或使用 gh CLI：
+
+```sh
+# 下载 CI 产物后
+gh release create v1.1.7 ./fafu-checkin-v1.1.7.zip \
+  --title "v1.1.7：一句话摘要" \
+  --notes-file CHANGELOG_SECTION.md    # 内容取自 CHANGELOG 对应小节
+```
+
+**4. 同步 update.json**（供管理器检测更新）
+
+```sh
+python3 scripts/sync_update_json.py v1.1.7 9 \
+  "https://github.com/Bonger34/fafu-checkin/releases/download/v1.1.7/fafu-checkin-v1.1.7.zip"
+git commit -am "chore(release): 同步 update.json 至 v1.1.7"
+git push
+```
+
+> 也可直接用 GitHub 网页手动编辑 `update.json`（仅需改 `version` / `versionCode` / `zipUrl` 三项）。
+
+**CI 职责划分**
+
+| 工作流 | 触发 | 职责 |
+|---|---|---|
+| [build.yml](.github/workflows/build.yml) | push main / 手动 | 语法检查 + 元数据校验 + 构建 zip（产物供下载） |
+| [check.yml](.github/workflows/check.yml) | PR / 手动 | 语法检查 + 元数据校验（快速反馈） |
 
 ## ⚠️ 免责声明
 

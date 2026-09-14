@@ -1,0 +1,87 @@
+name: Build
+
+# 自动构建模块 zip，并作为 workflow artifact 提供下载（保留 90 天）。
+# 发布由维护者手动完成：下载构建产物 → 按下方提示执行 gh release create。
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Shell 语法检查
+        run: |
+          fail=0
+          for f in *.sh; do
+            if sh -n "$f"; then
+              echo "✅ $f"
+            else
+              echo "❌ $f"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: 元数据校验（module.prop / update.json）
+        run: python3 scripts/check_metadata.py
+
+      - name: 构建模块 zip
+        run: sh build.sh
+
+      - name: 生成发布说明草稿（供手动发布使用）
+        run: |
+          VER=$(sed -n 's/^version=//p' module.prop | head -n 1)
+          awk -v hdr="## ${VER}" '
+            $0 == hdr { capture = 1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md > dist/release-notes.md
+          if [ ! -s dist/release-notes.md ]; then
+            echo "（CHANGELOG 中缺少 ${VER} 小节，请在发布时补充说明）" > dist/release-notes.md
+          fi
+          echo "---------- 发布说明草稿（${VER}）----------"
+          cat dist/release-notes.md
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: fafu-checkin
+          path: |
+            dist/*.zip
+            dist/release-notes.md
+          if-no-files-found: error
+
+      - name: 输出手动发布提示
+        run: |
+          VER=$(sed -n 's/^version=//p' module.prop | head -n 1)
+          {
+            echo "### 📦 构建完成：${VER}"
+            echo ""
+            echo "Artifact \`fafu-checkin\` 包含：模块 zip 与发布说明草稿（release-notes.md）。"
+            echo ""
+            echo "**手动发布步骤：**"
+            echo ""
+            echo '```sh'
+            echo "# 1. 打 tag 并推送"
+            echo "git tag -a ${VER} -m \"${VER}：一句话摘要\""
+            echo "git push origin ${VER}"
+            echo ""
+            echo "# 2. 创建 Release（说明用 release-notes.md）"
+            echo "gh release create ${VER} ./fafu-checkin-${VER}.zip \\"
+            echo "  --title \"${VER}：一句话摘要\" \\"
+            echo "  --notes-file release-notes.md"
+            echo ""
+            echo "# 3. 同步 update.json 并推送"
+            echo "python3 scripts/sync_update_json.py ${VER} <versionCode> \\"
+            echo "  \"https://github.com/\${GITHUB_REPOSITORY}/releases/download/${VER}/fafu-checkin-${VER}.zip\""
+            echo "git commit -am \"chore(release): 同步 update.json 至 ${VER}\" && git push"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,8 +1,8 @@
 name: Check
 
+# 仅做校验（语法 + 元数据），不构建、不发布。
+# 构建产物请见 Build 工作流。
 on:
-  push:
-    branches: [ main ]
   pull_request:
   workflow_dispatch:
 
@@ -31,6 +31,3 @@ jobs:
 
       - name: 元数据校验（module.prop / update.json）
         run: python3 scripts/check_metadata.py
-
-      - name: 构建测试
-        run: sh build.sh

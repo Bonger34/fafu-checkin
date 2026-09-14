@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """将 update.json 同步到指定版本。
 
-由 CI 在发布新版本后调用（.github/workflows/release.yml），也可本地使用：
+手动发布流程中使用（见 README「开发与发布」）：
     python3 scripts/sync_update_json.py <tag> <versionCode> <zipUrl>
 """
 import json

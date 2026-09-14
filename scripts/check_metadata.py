@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """校验 module.prop 与 update.json 的格式与约束。
 
-供 CI（.github/workflows/check.yml）与本地开发使用。
+供 CI（.github/workflows/build.yml / check.yml）与本地开发使用。
 """
 import json
 import re
