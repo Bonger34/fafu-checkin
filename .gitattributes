@@ -1,0 +1,15 @@
+# 所有文本文件使用 LF 换行（防止 Windows 检出为 CRLF 导致 shell 脚本无法在设备上执行）
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.py    text eol=lf
+*.prop  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# 二进制文件不做换行转换
+*.zip   binary
+*.png   binary
+*.jpg   binary

@@ -1,0 +1,36 @@
+name: Check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Shell 语法检查
+        run: |
+          fail=0
+          for f in *.sh; do
+            if sh -n "$f"; then
+              echo "✅ $f"
+            else
+              echo "❌ $f"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: 元数据校验（module.prop / update.json）
+        run: python3 scripts/check_metadata.py
+
+      - name: 构建测试
+        run: sh build.sh

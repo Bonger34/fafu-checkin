@@ -32,7 +32,7 @@
 
 更新源：仓库根目录的 [`update.json`](update.json)（指向最新 Release）。
 
-> **发布新版本时**需更新 `update.json` 中的 `version` / `versionCode` / `zipUrl` 三项；
+> **发布新版本时**，`update.json` 的 `version` / `versionCode` / `zipUrl` 由 CI 自动同步（见「开发与发布」）；
 > `changelog` 固定指向本仓库 `CHANGELOG.md` 的 raw 地址（管理器按 Markdown 渲染），无需随版本改动。
 >
 > 注意：`changelog` 不能填 GitHub Release 网页地址（那是 HTML 页面，管理器会把它当纯文本渲染，
@@ -182,6 +182,57 @@ A：多为网络问题，会自动重试；若持续出现，可能是系统接�
 - 动态描述配置由 KernelSU 在卸载流程中自动清除
 
 无需手动清理任何文件，`/data/adb/` 根目录也不会留下任何残留。
+
+## 🛠️ 开发与发布
+
+### 环境要求
+
+推荐 **WSL2（Ubuntu）** / Linux / macOS；Windows 下也可使用 Git Bash（注意换行符与文件权限）。
+
+```sh
+# 一次性准备（WSL2 示例）
+sudo apt update && sudo apt install -y git zip
+
+# 克隆与构建
+git clone https://github.com/Bonger34/fafu-checkin.git
+cd fafu-checkin
+sh build.sh          # 输出 dist/fafu-checkin-<版本>.zip
+```
+
+> 提示：仓库已通过 [`.gitattributes`](.gitattributes) 强制 **LF 换行**，请勿改回 CRLF
+> （会导致脚本在设备上无法执行）；在 Windows 下打包建议使用 WSL，以保留脚本的可执行权限
+> （安装脚本也会自动修正权限，作为兜底）。
+
+### 安装到设备
+
+```sh
+adb push dist/fafu-checkin-*.zip /sdcard/Download/
+# 然后在 KernelSU / Magisk 管理器中「从本地安装」
+```
+
+或等待 CI 发布后在管理器内直接更新。
+
+### 发布新版本（已自动化）
+
+1. 更新 `module.prop`：`version`（如 `v1.1.7`）与 `versionCode`（+1）
+2. 在 `CHANGELOG.md` 顶部添加对应小节（格式：`## v1.1.7`）
+3. 提交并推送 tag：
+
+   ```sh
+   git commit -am "v1.1.7: ..."
+   git push
+   git tag v1.1.7
+   git push origin v1.1.7
+   ```
+
+GitHub Actions 随后自动完成（见 [`.github/workflows/release.yml`](.github/workflows/release.yml)）：
+
+- 校验 tag 与 `module.prop` 版本一致
+- 构建模块 zip 并创建 Release（说明取自 CHANGELOG 对应小节）
+- 同步 `update.json` 至新版本（供管理器检测更新）
+
+> 推送 main / 提交 PR 时会自动运行语法检查、元数据校验与构建测试
+> （[`.github/workflows/check.yml`](.github/workflows/check.yml)）。
 
 ## ⚠️ 免责声明
 
