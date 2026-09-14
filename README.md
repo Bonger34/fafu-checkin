@@ -8,7 +8,7 @@
 
 - **自动签到**：每天 21:30 ~ 22:30 每分钟检查，未签到自动提交，签完即止
 - **补签兜底**：若主窗口未成功，会自动在补签时段（22:30 ~ 23:00）内继续重试，最大限度避免漏签
-- **静默保活**：07:00 ~ 21:25 每 15 分钟轻量调用一次接口，保持登录状态不过期
+- **静默保活**：07:00 ~ 21:25 每 15 分钟轻量调用一次接口，保持登录状态不过期；每次结果均写入日志与统计（`status` 可查看今日成功/失败数）
 - **静默刷新**：登录状态失效时自动在后台刷新，熄屏状态下屏幕不会亮起
 - **无感运行**：全程后台，不弹出页面、不残留任务、不打断使用
 - **操作按钮**：点击模块「操作」按钮，一键启用 / 停用服务（即时生效，无需重启）
@@ -69,7 +69,8 @@
 cat /data/adb/modules/fafu-checkin/fafu_checkin.log
 
 # 手动命令（需要 root）
-sh /data/adb/modules/fafu-checkin/fafu_checkin.sh status    # 查看开关 / 服务 / token 状态
+sh /data/adb/modules/fafu-checkin/fafu_checkin.sh status    # 查看开关 / 服务 / 保活 / token 状态
+sh /data/adb/modules/fafu-checkin/fafu_checkin.sh keepalive # 手动执行一次保活检查
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh toggle    # 切换服务开关（启用 ⇄ 停用）
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh enable    # 启用服务
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh disable   # 停用服务
@@ -111,6 +112,15 @@ A：不会。每次先查询签到状态，已签到自动跳过。
 
 A：不会。保活只是轻量接口请求；仅当登录状态失效且屏幕熄灭时才静默刷新一次。
 
+**Q：怎么确认保活一直在正常工作？**
+
+A：两种方式：
+- 运行 `status` 命令，会显示保活状态，例如 `保活: 最近 12:15:30 ✅ · 今日 24 成功 / 0 失败`；
+- 查看日志，每次保活都有一条记录（`保活: ✅ 成功 (今日 24 成功 / 0 失败)`），
+  若某个时段缺少记录，说明服务可能中断（可结合 `status` 的服务运行状态排查）。
+
+日志超过 256KB 会自动轮转（保留最近 1000 行），无需手动清理。
+
 **Q：需要手机在签到范围内吗？**
 
 A：本模块适用于不校验位置的签到任务。如学校要求定位，请遵守相关规定。
@@ -137,9 +147,10 @@ A：多为网络问题，会自动重试；若持续出现，可能是系统接�
 
 | 文件（模块目录内） | 说明 |
 |------|------|
-| `fafu_checkin.log` | 运行日志 |
+| `fafu_checkin.log` | 运行日志（每次保活/签到均记录；超 256KB 自动轮转） |
 | `fafu-checkin.state` | 服务开关状态 |
 | `fafu_checkin.status` | 最近签到记录（用于动态描述） |
+| `fafu_keepalive.status` | 保活统计（今日成功/失败次数、最近一次时间） |
 | `.fafu_checkin.pid` | 守护进程 PID |
 | `.fafu_checkin_done` | 当日签到完成标记 |
 

@@ -1,11 +1,12 @@
 #!/system/bin/sh
 # ============================================================
-# 数字FAFU 晚查寝自动签到 —— 核心脚本 v1.1.0
+# 数字FAFU 晚查寝自动签到 —— 核心脚本
 # 可独立运行，也可作为 KernelSU / Magisk 模块的一部分运行
 #
 # 功能：
 #   1) 自动签到：主窗口 21:30~22:30 每分钟检查，未签到自动提交；未成功时在补签时段（22:30~23:00）内继续重试
-#   2) 白天保活 07:00~21:25：每 15 分钟轻量调用接口，保持会话不过期
+#   2) 白天保活 07:00~21:25：每 15 分钟轻量调用接口，保持会话不过期；
+#      每次保活结果均写入日志与统计文件（status 可查看今日成功/失败数）
 #   3) 会话失效自动刷新：熄屏/锁屏下静默进行（屏幕不亮、不唤醒）
 #   4) 刷新后自动清理页面（am stack remove，不留残留、不甩回桌面）
 #   5) 服务开关：一键启用/停用（操作按钮或命令），停用期间无任何网络请求
@@ -33,6 +34,7 @@
 #   标记 $MODDIR/.fafu_checkin_done
 #   开关 $MODDIR/fafu-checkin.state
 #   签到 $MODDIR/fafu_checkin.status
+#   保活 $MODDIR/fafu_keepalive.status
 # ============================================================
 
 export PATH="/system/bin:/system/xbin:/data/adb/ksu/bin:/data/adb/magisk:$PATH"
@@ -79,12 +81,23 @@ CONFIG="$MODDIR/fafu-checkin.conf"
 MODID="fafu-checkin"
 STATE="$MODDIR/fafu-checkin.state"
 STATUS="$MODDIR/fafu_checkin.status"
+KASTAT="$MODDIR/fafu_keepalive.status"
 
 # ---- 可选配置（覆盖默认值） ----
 [ -f "$CONFIG" ] && . "$CONFIG"
 KEEPALIVE="${KEEPALIVE:-1}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
+
+rotate_log() { # 日志超过 256KB 时保留最近 1000 行（防止长期运行无限增长）
+  [ -f "$LOG" ] || return 0
+  sz=$("$BB" wc -c < "$LOG" 2>/dev/null | "$BB" tr -dc '0-9')
+  [ -n "$sz" ] || return 0
+  [ "$sz" -gt 262144 ] || return 0
+  "$BB" tail -n 1000 "$LOG" > "$LOG.rot" 2>/dev/null || return 0
+  "$BB" mv -f "$LOG.rot" "$LOG" 2>/dev/null
+  log "日志已轮转（保留最近 1000 行）"
+}
 
 # ---- 服务开关 ----
 is_disabled() {
@@ -99,6 +112,25 @@ status_get() { # $1=键名（sign_date / sign_time / sign_kind）
 
 status_set() { # $1=日期 $2=时间(可空) $3=类型(normal/supplement/detected/leave)
   printf 'sign_date=%s\nsign_time=%s\nsign_kind=%s\n' "$1" "$2" "$3" > "$STATUS"
+}
+
+# ---- 保活统计（记录每次保活结果，供日志与 status 查询） ----
+ka_state_get() { # $1=键名（date / ok / fail / last / last_result）
+  [ -f "$KASTAT" ] || return 0
+  "$BB" grep -m1 "^$1=" "$KASTAT" 2>/dev/null | "$BB" cut -d= -f2-
+}
+
+ka_record() { # $1=ok|fail：累加今日计数（跨天自动重置）并更新最近一次状态
+  today=$("$BB" date +%Y-%m-%d)
+  d=$(ka_state_get date); ok=$(ka_state_get ok); fail=$(ka_state_get fail)
+  [ "$d" = "$today" ] || { ok=0; fail=0; }
+  ok=${ok:-0}; fail=${fail:-0}
+  case "$1" in
+    ok)   ok=$((ok+1)) ;;
+    fail) fail=$((fail+1)) ;;
+  esac
+  printf 'date=%s\nok=%s\nfail=%s\nlast=%s\nlast_result=%s\n' \
+    "$today" "$ok" "$fail" "$("$BB" date '+%Y-%m-%d %H:%M:%S')" "$1" > "$KASTAT"
 }
 
 desc_text() { # 生成当前应显示的模块描述（使用绝对日期，守护进程退出后信息也不会失真）
@@ -346,30 +378,30 @@ run_once() {
 
 KA_LAST=0
 KA_LAST_REFRESH=0
-KA_OK_DATE=""
 
 keepalive_ping() {
   tok=$(get_token)
   [ -n "$tok" ] || return 0
   resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$tok"); rc=$?
   if [ $rc -eq 0 ] && echo "$resp" | "$BB" grep -q '"records"'; then
-    if [ "$KA_OK_DATE" != "$("$BB" date +%Y-%m-%d)" ]; then
-      KA_OK_DATE=$("$BB" date +%Y-%m-%d)
-      log "保活正常: token 有效"
-    fi
+    ka_record ok
+    log "保活: ✅ 成功 (今日 $(ka_state_get ok) 成功 / $(ka_state_get fail) 失败)"
     return 0
   fi
   # 调用未成功：可能 token 已失效，也可能只是网络异常（busybox wget 不输出错误正文，无法区分）
+  ka_record fail
+  okc=$(ka_state_get ok); failc=$(ka_state_get fail)
   if screen_is_on; then
-    log "保活: 调用未成功，屏幕亮着，稍后再试"
+    log "保活: ❌ 失败 (今日 $okc 成功 / $failc 失败) — 屏幕亮着，稍后再试"
     return 0
   fi
   now2=$("$BB" date +%s)
   if [ $((now2 - KA_LAST_REFRESH)) -lt 1800 ]; then
+    log "保活: ❌ 失败 (今日 $okc 成功 / $failc 失败) — 刷新冷却中，稍后再试"
     return 0
   fi
   KA_LAST_REFRESH=$now2
-  log "保活: 调用未成功，尝试静默刷新"
+  log "保活: ❌ 失败 (今日 $okc 成功 / $failc 失败) — 尝试静默刷新"
   newt=$(refresh_token "$tok" 0)
   if [ -n "$newt" ] && [ "$newt" != "$tok" ]; then
     log "保活: 静默刷新成功 $newt"
@@ -428,6 +460,18 @@ cmd_status() {
     fi
   else
     echo "服务: 未运行"
+  fi
+  # 保活状态（最近一次结果 + 今日统计）
+  ka_last=$(ka_state_get last)
+  if [ -z "$ka_last" ]; then
+    echo "保活: 暂无记录"
+  else
+    if [ "$(ka_state_get last_result)" = "ok" ]; then ka_mark="✅"; else ka_mark="❌"; fi
+    if [ "$(ka_state_get date)" = "$("$BB" date +%Y-%m-%d)" ]; then
+      echo "保活: 最近 $ka_last $ka_mark · 今日 $(ka_state_get ok) 成功 / $(ka_state_get fail) 失败"
+    else
+      echo "保活: 最近 $ka_last $ka_mark（今日暂无记录）"
+    fi
   fi
   # 描述预览
   echo "描述: $(desc_text)"
@@ -535,6 +579,7 @@ echo $$ > "$PIDF"
 log "===== 服务启动 (PID $$) 版本=${VER:-未知} wget_timeout=[${WGET_T:-无}] ====="
 
 DESC_TICK=0
+ROT_TICK=0
 while true; do
   # 已被停用 → 刷新描述后退出（保持“停用 = 无进程”语义）
   if is_disabled; then
@@ -549,6 +594,12 @@ while true; do
     DESC_TICK=10
   fi
   DESC_TICK=$((DESC_TICK-1))
+  # 日志轮转（每小时检查一次）
+  if [ $ROT_TICK -le 0 ]; then
+    rotate_log
+    ROT_TICK=60
+  fi
+  ROT_TICK=$((ROT_TICK-1))
   h=$("$BB" date +%H); m=$("$BB" date +%M)
   h=${h#0}; m=${m#0}; [ -z "$h" ] && h=0; [ -z "$m" ] && m=0
   now=$((h * 60 + m))

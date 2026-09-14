@@ -42,5 +42,6 @@ if command -v dumpsys >/dev/null 2>&1 && command -v am >/dev/null 2>&1; then
 fi
 
 # 3) 清理运行时文件（模块目录随后由管理器整体移除，此处为显式兜底）
-rm -f "$MODDIR/fafu_checkin.log" "$MODDIR/.fafu_checkin.pid" "$MODDIR/.fafu_checkin_done" \
-      "$MODDIR/fafu-checkin.conf" "$MODDIR/fafu-checkin.state" "$MODDIR/fafu_checkin.status"
+rm -f "$MODDIR/fafu_checkin.log" "$MODDIR/fafu_checkin.log.rot" "$MODDIR/.fafu_checkin.pid" \
+      "$MODDIR/.fafu_checkin_done" "$MODDIR/fafu-checkin.conf" "$MODDIR/fafu-checkin.state" \
+      "$MODDIR/fafu_checkin.status" "$MODDIR/fafu_keepalive.status"
