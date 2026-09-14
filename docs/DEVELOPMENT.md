@@ -207,7 +207,7 @@ sh $M/fafu_checkin.sh once         # 手动签到检查（幂等）
 
 ## 五、测试方法
 
-### 5.1 本地（沙箱 / WSL）
+### 5.1 本地（Linux / WSL）
 
 ```sh
 sh -n *.sh                    # 语法
