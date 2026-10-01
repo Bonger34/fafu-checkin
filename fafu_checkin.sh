@@ -348,10 +348,25 @@ open_page() {
     -a com.huawei.works.action.shortcut -c android.shortcut.conversation \
     -d "$PAGE" --ei src 202 </dev/null >/dev/null 2>&1
 }
+# 说明：「把用户原来的 App 提回前台」这条路径已实测否定，故不再保留相关代码。
+# 设备实测（小米 13 Ultra / Android 17 / SDK 37）：
+#   - open_page 会把打卡页作为**新任务**启动，必然抢前台（无法后台打开：
+#     start-activity 没有任何"不抢焦点"标志）
+#   - --activity-reorder-to-front 被接受（回显 flg=0x20000）但**无效**：
+#     只给 -n 组件名、以及加 MAIN+LAUNCHER 两种写法都**新建了任务**，
+#     从未复用已有任务，因此无法用它把原 App 拉回前台
+#   - am task / am stack 的子命令已不可用，故也没有其它"移动任务到前台"的入口
+#   - 有效的替代：am stack remove <打卡页任务> 会把页面移出前台，前台自动回到原 App
+#     （会留下不可见的残留记录，无实际影响）
+# 因此现在的策略是：拿到新 token 后**立即**移除打卡页任务，让中断时间尽量短。
 
 close_page() {
-  # 优先用 am stack remove 移除 App 任务；失败则回桌面兜底
+  # 移除打卡页所在任务，让页面退场。
   # 注意：循环变量名不要用 t（会与调用方 refresh_token 的 token 变量冲突）
+  #
+  # 历史：这里原有一条「回桌面兜底」（am start ... HOME）。它假定用户原本在桌面，
+  # 于是在移除不彻底时把正在用手机的用户直接甩到桌面 —— 设备实测确认过。
+  # 已移除该兜底：清理不彻底最多让页面留在后台，绝不再主动切换用户的前台。
   ids=$(app_task_ids)
   for tid in $ids; do am stack remove "$tid" </dev/null >/dev/null 2>&1; done
   sleep 2
@@ -362,12 +377,7 @@ close_page() {
     sleep 2
     C=$(act_count)
   fi
-  if [ "$C" -gt 0 ]; then
-    log "任务移除未彻底(残留$C)，回桌面兜底"
-    am start -a android.intent.action.MAIN -c android.intent.category.HOME </dev/null >/dev/null 2>&1
-    sleep 2
-    C=$(act_count)
-  fi
+  [ "$C" -gt 0 ] && log "页面移除未彻底(残留$C)，保留在后台（不再回桌面）"
   log "页面关闭检查: 残留活动=$C"
 }
 
@@ -375,7 +385,22 @@ refresh_token() { # $1=旧token；$2=允许唤醒重试(1=是,0=否，默认1)�
   log "刷新 token（静默优先）"
   WAS_ON=0
   screen_is_on && WAS_ON=1
-  # 阶段1：不亮屏直接启动（熄屏/锁屏下屏幕不亮）
+  # 开页预警：屏幕已亮时，本次确实会打开打卡页 → 先通知再开，别让页面毫无解释地跳出来。
+  # （熄屏时不开预警：用户看不见，且静默开页本就不打扰。）
+  # 冷却用于防突发：一次刷新失败可能连锁触发多次 refresh_token，避免连续弹同一条。
+  if [ "${WAS_ON:-0}" = "1" ] && [ -n "$SU_MODE" ]; then
+    now_s=$("$BB" date +%s)
+    _last=$("$BB" cat "$NTLAST" 2>/dev/null | "$BB" tr -dc '0-9')
+    [ -n "$_last" ] || _last=0
+    if [ $((now_s - _last)) -ge "$NOTIFY_COOLDOWN" ]; then
+      echo "$now_s" > "$NTLAST" 2>/dev/null
+      _NT_TITLE="🔄 正在刷新登录状态"
+      _NT_TEXT="$(notify_lead) 秒后自动打开打卡页（用于刷新登录），完成后自动关闭，无需操作"
+      notify "fafu-warn-$PL"
+      sleep "$(notify_lead)"   # 留出阅读时间；提前量由 NOTIFY_LEAD 配置，默认 5 秒
+    fi
+  fi
+  # 阶段1：打开打卡页（熄屏/锁屏下屏幕不亮）
   open_page
   i=0; t=""
   while [ $i -lt 10 ]; do
@@ -384,23 +409,16 @@ refresh_token() { # $1=旧token；$2=允许唤醒重试(1=是,0=否，默认1)�
     [ -n "$t" ] && [ "$t" != "$1" ] && break
     i=$((i+1))
   done
+  # 一到手就把页面移出前台：前台会自动回到用户原来的 App，尽量缩短中断时间。
+  # 拿不到新 token 时不提前关页，保持与原先一致的兜底时序（走完阶段2再关）。
+  if [ -n "$t" ] && [ "$t" != "$1" ]; then
+    log "已取得新 token，提前移除打卡页（前台交还用户）"
+    close_page
+  fi
   # 阶段2：失败则唤醒屏幕重试（保活场景禁止，避免吵醒用户）
   if [ -z "$t" ] || [ "$t" = "$1" ]; then
     if [ "$2" != "0" ]; then
       log "静默刷新未成功，尝试唤醒屏幕重试"
-      # 兜底唤醒预警：只在「屏幕已亮 + 确实会打开打卡页」时发（熄屏静默路径不打扰）
-      if [ "${WAS_ON:-0}" = "1" ] && [ -n "$SU_MODE" ]; then
-        now_s=$("$BB" date +%s)
-        _last=$("$BB" cat "$NTLAST" 2>/dev/null | "$BB" tr -dc '0-9')
-        [ -n "$_last" ] || _last=0
-        if [ $((now_s - _last)) -ge "$NOTIFY_COOLDOWN" ]; then
-          echo "$now_s" > "$NTLAST" 2>/dev/null
-          _NT_TITLE="🔄 正在刷新登录状态"
-          _NT_TEXT="$(notify_lead) 秒后自动打开打卡页（用于刷新登录），完成后自动关闭，无需操作"
-          notify "fafu-warn-$PL"
-        fi
-      fi
-      sleep "$(notify_lead)"
       [ "$WAS_ON" = "1" ] || input keyevent 224 </dev/null >/dev/null 2>&1
       wm dismiss-keyguard </dev/null >/dev/null 2>&1
       i=0
