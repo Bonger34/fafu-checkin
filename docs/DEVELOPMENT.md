@@ -260,6 +260,7 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 M=/data/adb/modules/fafu-checkin
 cat $M/fafu_checkin.log            # 全量日志
 sh $M/fafu_checkin.sh status       # 开关/服务/保活/token 一览
+sh $M/fafu_checkin.sh notify       # 发一条测试通知（确认通知链路是否真的能送到）
 sh $M/fafu_checkin.sh keepalive    # 手动保活（直接看 token 是否有效）
 sh $M/fafu_checkin.sh once         # 手动签到检查（幂等）
 ```

@@ -23,10 +23,11 @@
 #      以及熄屏过久导致的 Doze 延迟投递。
 #
 # 用法：
-#   sh fafu_checkin.sh [start|stop|status|once|refresh|keepalive|toggle|enable|disable]
+#   sh fafu_checkin.sh [start|stop|status|notify|once|refresh|keepalive|toggle|enable|disable]
 #     start      启动守护进程（若已停用则忽略）
 #     stop       停止守护进程（不改变开关状态）
 #     status     查看开关 / 服务 / token 状态
+#     notify     发一条测试通知，确认通知链路是否真的能送到
 #     once       立即检查一次并签到（幂等）
 #     refresh    手动刷新 token（测试用）
 #     keepalive  手动执行一次保活检查
@@ -34,10 +35,8 @@
 #     enable     启用服务
 #     disable    停用服务
 #
-#   通知无需命令触发，由守护进程自动发送；要手动验证通知能否送达，执行：
-#     su -c sh /data/adb/modules/fafu-checkin/fafu_checkin.sh once
-#   它会触发一次签到检查并按结果弹通知（21:30~22:59 会真正提交签到，其余时段
-#   多为「已签到 / 已请假 / 拿不到任务」）。
+#   日常使用无需手动触发通知：签到结果、三个未签时点、打开打卡页前的预警
+#   都由守护进程自动发送。
 #
 # 配置文件（可选）：模块目录内 fafu-checkin.conf
 #   KEEPALIVE=0     关闭白天保活（仅保留 21:30 自动签到）
@@ -629,6 +628,27 @@ cmd_keepalive() {
   fi
 }
 
+cmd_notify() { # 发一条测试通知，用来确认通知链路是否真的能送到
+  if [ "$NOTIFY" != "1" ]; then
+    echo "通知已关闭（配置 NOTIFY=0）"
+    return 1
+  fi
+  if [ -z "$SU_MODE" ]; then
+    echo "降权不可用：找不到可用的 su 写法，通知无法发送"
+    echo "（先确认 $SU_BIN 存在；可试 su -c /system/bin/id -u 是否输出 2000）"
+    return 1
+  fi
+  _NT_TITLE="🔔 通知测试"
+  _NT_TEXT="如果你看到这条，说明通知链路正常（$("$BB" date '+%m-%d %H:%M')）"
+  if notify "fafu-test-$PL"; then
+    echo "已发送（降权写法: $SU_MODE）"
+    echo "没收到时依次查：系统设置里 Shell 的通知权限、勿扰模式、以及是否被 ROM 拦截"
+    return 0
+  fi
+  echo "发送失败（降权写法: $SU_MODE）"
+  return 1
+}
+
 cmd_status() {
   echo "====== 数字FAFU 晚查寝自动签到 ======"
   [ -n "$VER" ] && echo "版本: $VER"
@@ -726,19 +746,20 @@ CMD="$1"
 # 通知降权探测：必须在分发之前执行——各通知类子命令都会在分支里直接 exit，
 # 放在 case 之后会成为永远执行不到的死代码（曾踩过）。最长阻塞 1 秒。
 case "$CMD" in
-  start|""|once|refresh|keepalive) probe_su ;;
+  start|""|once|refresh|keepalive|notify) probe_su ;;
 esac
 case "$CMD" in
   once)      run_once; exit $? ;;
   refresh)   cmd_refresh; exit 0 ;;
   keepalive) cmd_keepalive; exit 0 ;;
+  notify)    cmd_notify; exit $? ;;
   status)    cmd_status; exit 0 ;;
   stop)      cmd_stop; exit 0 ;;
   toggle)    cmd_toggle; exit 0 ;;
   enable)    cmd_enable; exit 0 ;;
   disable)   cmd_disable; exit 0 ;;
   start|"")  : ;;
-  *)         echo "用法: sh $SELF [start|stop|status|once|refresh|keepalive|toggle|enable|disable]"; exit 1 ;;
+  *)         echo "用法: sh $SELF [start|stop|status|notify|once|refresh|keepalive|toggle|enable|disable]"; exit 1 ;;
 esac
 
 # ---- 启动守护进程（后台化 + 单实例） ----

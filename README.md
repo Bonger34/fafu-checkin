@@ -76,6 +76,7 @@ cat /data/adb/modules/fafu-checkin/fafu_checkin.log
 
 # 手动命令（需要 root）
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh status    # 查看开关 / 服务 / 保活 / token 状态
+sh /data/adb/modules/fafu-checkin/fafu_checkin.sh notify    # 发一条测试通知（确认通知能否送达）
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh keepalive # 手动执行一次保活检查
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh toggle    # 切换服务开关（启用 ⇄ 停用）
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh enable    # 启用服务
