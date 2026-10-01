@@ -102,13 +102,12 @@ SU_BIN="${SU_BIN:-/system/bin/su}"         # su 路径（可用环境变量覆�
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 
-# ---- 降权身份探测（通知必须以 shell 身份发送；见 docs/DEVELOPMENT.md 通知机制一节） ----
-# 探测结果写入全局 $SU_MODE，供 notify() 使用。
-# 注意：rc=0 完全不能证明命令真的执行了——KernelSU 的 su 用 Rust getopts 且默认
-# StopAtFirstFree，`-`（长度 1）会被当作 free 参数终止选项解析，于是 `su - shell -c CMD`
-# 实际 exec 出一个交互式登录 shell、把 CMD 当多余参数丢掉；`</dev/null` 下它立刻 EOF
-# 退出 0。若只看退出码就会记成「可用」，之后每条通知都变成「rc=0 但什么都没发生」。
-# 因此这里必须验证**命令真的执行了、且身份真的降到了 shell（uid 2000）**。
+# ---- 降权身份探测（通知必须以 shell 身份发送） ----
+# 不能用退出码判断可用性：KernelSU 的 su 用 Rust getopts 且默认 StopAtFirstFree，
+# 长度为 1 的 `-` 会被当作 free 参数终止选项解析，于是 `su - shell -c CMD` 实际 exec
+# 出交互式登录 shell、把 CMD 丢掉，`</dev/null` 下立刻 EOF 退出 0 —— 只看退出码就会
+# 记成「可用」，之后每条通知都变成「rc=0 但什么都没发生」。故必须验证命令真的执行了、
+# 且身份真的降到了 shell：读 `id -u` 的输出，要求等于 2000。
 probe_su() {
   SU_MODE=""
   [ "$NOTIFY" = "1" ] || return 0
@@ -184,16 +183,21 @@ ka_record() { # $1=ok|fail；$2=本次使用的 token（可选，记录到统计
     "$today" "$ok" "$fail" "$("$BB" date '+%Y-%m-%d %H:%M:%S')" "$1" "$tk" > "$KASTAT"
 }
 
+state_text() { # $1=signState 数值 → 自解释的中文（日志与通知都不该让读者去查状态码表）
+  case "$1" in
+    1) echo "已签到" ;;
+    2) echo "已请假" ;;
+    *) echo "未知状态($1)" ;;
+  esac
+}
+
 # ---- 通知（纯增量能力：任何失败都不得影响签到主流程） ----
-# 全部以 shell 身份发送。root 身份发出的通知会被部分 ROM（实测 HyperOS 2）静默丢弃：
-# 命令返回 rc=0，但通知不会出现在通知栏。
-#
-# 三条硬约束（源自 cmd notification post 的实现）：
-#   1) 通知 id 恒为 2020，只能靠 tag 区分事件；同 tag 会覆盖（静默更新，无新提示音）
-#   2) channel 恒为 shell_cmd，重要性/声音/图标均不可调
-#   3) 不支持 ongoing / autoCancel / 按钮，通知会一直留在通知栏直到被覆盖或手动划掉
-#
-# tag 策略：含日期的「按日滚动」，同事件次日覆盖前一天 → 通知栏条数恒有上限，不会累积。
+# 以 shell 身份降权发送；root 身份发出的通知会被部分 ROM 静默丢弃（rc=0 但不显示）。
+# 三条硬约束（cmd notification post 的实现）：
+#   1) 通知 id 恒为 2020，只能靠 tag 区分事件；同 tag 会覆盖（静默更新）
+#   2) channel 恒为 shell_cmd，重要性 / 声音 / 图标均不可调
+#   3) 不支持 ongoing / autoCancel / 按钮
+# tag 用含日期的「按日滚动」，同事件次日覆盖前一天，通知栏条数恒有上限。
 SU_MODE=""                # 生效的降权写法，由 probe_su() 探测后写入
 _NT_TITLE=""              # 通知标题（调用方设置）
 _NT_TEXT=""               # 通知正文；留空则复用标题（用于 P 预警）
@@ -349,24 +353,11 @@ open_page() {
     -d "$PAGE" --ei src 202 </dev/null >/dev/null 2>&1
 }
 # 说明：「把用户原来的 App 提回前台」这条路径已实测否定，故不再保留相关代码。
-# 设备实测（小米 13 Ultra / Android 17 / SDK 37）：
-#   - open_page 会把打卡页作为**新任务**启动，必然抢前台（无法后台打开：
-#     start-activity 没有任何"不抢焦点"标志）
-#   - --activity-reorder-to-front 被接受（回显 flg=0x20000）但**无效**：
-#     只给 -n 组件名、以及加 MAIN+LAUNCHER 两种写法都**新建了任务**，
-#     从未复用已有任务，因此无法用它把原 App 拉回前台
-#   - am task / am stack 的子命令已不可用，故也没有其它"移动任务到前台"的入口
-#   - 有效的替代：am stack remove <打卡页任务> 会把页面移出前台，前台自动回到原 App
-#     （会留下不可见的残留记录，无实际影响）
-# 因此现在的策略是：拿到新 token 后**立即**移除打卡页任务，让中断时间尽量短。
 
 close_page() {
-  # 移除打卡页所在任务，让页面退场。
+  # 移除打卡页所在任务，让页面退场；清理不彻底就让它留在后台，
+  # 绝不主动切换用户的前台（曾经在这里用回桌面兜底，会把正在用手机的人直接甩到桌面）。
   # 注意：循环变量名不要用 t（会与调用方 refresh_token 的 token 变量冲突）
-  #
-  # 历史：这里原有一条「回桌面兜底」（am start ... HOME）。它假定用户原本在桌面，
-  # 于是在移除不彻底时把正在用手机的用户直接甩到桌面 —— 设备实测确认过。
-  # 已移除该兜底：清理不彻底最多让页面留在后台，绝不再主动切换用户的前台。
   ids=$(app_task_ids)
   for tid in $ids; do am stack remove "$tid" </dev/null >/dev/null 2>&1; done
   sleep 2
@@ -481,7 +472,7 @@ run_once() {
 
   # 已签到（且是近期任务）→ 完成
   if [ "$state" != "0" ] && [ $(( now - dline )) -lt 21600000 ]; then
-    log "[$name] 已签到(状态$state)"
+    log "[$name] $(state_text "$state")"
     # 记录检测到的签到信息（仅当今天尚无记录时）
     d=$(status_get sign_date)
     if [ "$d" != "$("$BB" date +%Y-%m-%d)" ]; then
