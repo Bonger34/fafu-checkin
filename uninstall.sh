@@ -44,4 +44,6 @@ fi
 # 3) 清理运行时文件（模块目录随后由管理器整体移除，此处为显式兜底）
 rm -f "$MODDIR/fafu_checkin.log" "$MODDIR/fafu_checkin.log.rot" "$MODDIR/.fafu_checkin.pid" \
       "$MODDIR/.fafu_checkin_done" "$MODDIR/fafu-checkin.conf" "$MODDIR/fafu-checkin.state" \
-      "$MODDIR/fafu_checkin.status" "$MODDIR/fafu_keepalive.status"
+      "$MODDIR/fafu_checkin.status" "$MODDIR/fafu_keepalive.status" \
+      "$MODDIR/.fafu_notify_fail" "$MODDIR/.fafu_notify_nosign" \
+      "$MODDIR/.fafu_notify_late" "$MODDIR/.fafu_notify_miss" "$MODDIR/.fafu_notify_last"

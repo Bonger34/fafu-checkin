@@ -98,12 +98,68 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 
 | 文件 | 职责 |
 |---|---|
-| `fafu_checkin.sh` | 核心脚本：守护循环 / 签到 / 保活 / 刷新 / 开关 / 动态描述 |
+| `fafu_checkin.sh` | 核心脚本：守护循环 / 签到 / 保活 / 刷新 / 开关 / 动态描述 / 通知 |
 | `service.sh` | 开机启动（等 `sys.boot_completed` 后拉起守护；已停用则跳过） |
 | `action.sh` | 操作按钮 → 切换服务开关 |
 | `customize.sh` | 安装脚本（设权限） |
 | `uninstall.sh` | 卸载：停进程 / 关页面 / 清理运行时文件 |
 | `update.json` | 更新检测源（`module.prop` 的 `updateJson` 指向它） |
+
+### 2.1.1 通知机制
+
+纯脚本模块没有自己的 App，通知只能借系统 shell 身份发出。机制与约束如下（均为源码/实测结论）：
+
+| 事项 | 结论 |
+|---|---|
+| 发送命令 | `cmd notification post -t "<标题>" "<tag>" "<正文>" -S bigtext` |
+| **执行身份** | **必须降权 shell**：`su - shell -c '...'`。root 身份发出的通知在部分 ROM 上被静默丢弃（实测 HyperOS 2 / 小米 13 Ultra：命令 `rc=0`，通知栏无任何显示），换 shell 身份后正常出现 |
+| **降权探测必须验语义** | `su - shell -c CMD` 在 **KernelSU** 上会让 `-c` 落空：它用 Rust `getopts` 且默认 `StopAtFirstFree`，长度 1 的 `-` 是 free 参数、在那里就停止解析，最终 exec 出**交互式登录 shell**、把 CMD 当多余参数丢掉；`</dev/null` 下立刻 EOF 退出 **0**。只看退出码会记成「可用」，之后每条通知都变成「rc=0 但什么都没发生」。故 `probe_su` 用 `$c 'id -u'` 的输出必须等于 **2000**，并依次尝试 `su - shell -c` / `su shell -c` / `su shell /system/bin/sh -c` |
+| 通知 id | **恒为 2020**，不可指定 → 只能靠 `tag` 区分事件；**同 tag 会覆盖**（静默更新，不产生新提示音） |
+| channel | 恒为 `shell_cmd`（名为 "Shell command"、重要性 DEFAULT），**不可调整**声音 / 震动 / 图标 |
+| 通知归属显示 | 显示为 **Shell**（AOSP 自己的 manifest 里也专门申请 `SUBSTITUTE_NOTIFICATION_APP_NAME` 来给自己的通知改名） |
+| ongoing / autoCancel / 按钮 | **均不支持**。通知会一直留在通知栏，直到被同 tag 覆盖或被手动划掉 |
+| `POST_NOTIFICATIONS` 权限 | shell 命令路径自身不检查该权限，只校验调用方 uid ∈ {0(root), 2000(shell)} |
+| 送达验证 | **`rc=0` 不能证明通知真的出现了**——这正是必须降权的原因。只能靠目视确认 |
+| Doze 延迟 | 熄屏久了系统进入 Doze，通知投递会被批处理延迟，**22:00 / 22:30 的时间敏感提醒可能晚到**，不要当成精确闹钟 |
+
+**tag 策略**：含日期的「按日滚动」（如 `fafu-sign-20260914`），同事件次日覆盖前一天 → 通知栏条数恒有上限，不会累积。
+
+**实现约定**：
+
+- 文案模板集中在 `_msg_*()` 系列函数里，正文**不含引号与命令替换**，可安全直接展开；
+- 所有发送统一走 `notify()` / `notify_once()`，外层用单引号包住 `su - shell -c` 的命令（`$SU_MODE '...'`），
+  这样正文里的双引号不会破坏引号配对——**这是本功能最容易写错的地方**；
+- `probe_su()` 在启动与手动子命令时探测一次降权写法（依次尝试 `su - shell -c`、`su shell -c`、
+  `su shell /system/bin/sh -c`，**以 `id -u` 输出等于 2000 为准**），结果写入 `$SU_MODE` 并记入启动日志 `notify=[...]`；
+  由 `start` 派生的守护进程通过 `FAFU_SU_MODE` 继承该结果，不重复探测；
+- 探测必须排在子命令 `case` **之前**——各分支会直接 `exit`，放后面就是永远执行不到的死代码；
+- 「首次失败」类通知用 `$NFAIL`，「未签到提醒」**三个时点各用一个标记文件**（`$NNOSIGN` / `$NLATE` / `$NMISS`）：
+  共用标记会让 22:00 那条把 23:00 那条「今晚未能自动签到」永久挡住；
+- `notify_once()` **先发送、成功后才落标记**：反过来的话一次瞬时失败会让该类提醒整天不再出现；
+- 预警冷却基准落在 `$NTLAST` 文件里，**不能放普通变量**：`refresh_token` 总在 `$( )` 子 shell 中调用，
+  变量赋值会随子 shell 丢弃，导致冷却永不生效；
+- `PL`（日期 tag）在主循环中每轮重算，避免守护进程常驻跨日后 tag 仍停在启动那天；
+- 预警使用的提前量 `NOTIFY_LEAD` **只在屏幕已亮时生效**（`notify_lead()` 自带判断），
+  熄屏路径不做无意义的等待。
+
+> 已实测可用的降权写法（小米 13 Ultra / HyperOS 2 / SDK 37）：`su - shell -c '...'` 与 `su shell -c '...'` **均可**，
+> 探测会优先选前者。注意 `su` 由各 root 管理器自行实现，不同设备行为可能不同，故不硬编码。
+
+**为什么是 `cmd notification post`（而非 APK 或 `app_process`）**：
+
+本模块是纯 Shell，**不携带任何 APK/dex**——这是安装轻、更新简单、卸载无残留的前提，也是本方案要守住的东西。
+`cmd notification post` 的能力被 AOSP 硬编码限死（见上表：id 恒定、channel 恒定、无 ongoing），
+而 `app_process` 跑 Java 能拿到完整的 `Notification.Builder`。**因此一个只看代码的读者会认为后者才是正确选择**——
+下面记录被否决的方案与否决理由，避免重复提议：
+
+| 被否决的方案 | 否决理由 |
+|---|---|
+| `app_process` + `ActivityThread.systemMain()`（参考 KernelSUGrantToast） | 能力完整（可自定义 id / channel / 图标 / ongoing），但要往模块里塞 APK、安装时抽出 `classes.dex` 与 `.so` 再删掉 APK，并引入 `HiddenApiBypass` 解除隐藏 API 限制。对「只发几条固定文案的提醒」而言代价过大，且破坏上面的无 APK 前提 |
+| `am broadcast -a android.intent.action.SHOW_TOAST` | 查不到任何 AOSP 源码或官方文档支持该 action 存在（检索到的资料指向的都是 `cmd notification post`），**不可移植，不予采用** |
+| `service call notification ...` | 依赖逐版本、逐 ROM 不同的 binder transaction code，且 Android 12+ 对 transaction code 增加了校验，脆弱性过高 |
+
+> 若日后确实需要 ongoing / 按钮等能力，只能整体转向 `app_process`：那是模块结构与构建方式的改动，不是改几行，
+> 因此这个选择的切换成本很高——改之前请先读完本节与上面的限制表。
 
 ### 2.2 运行时行为
 
@@ -136,6 +192,15 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 **服务开关**：状态文件 `fafu-checkin.state`（`enabled` / `disabled`）。
 停用 = 停进程 + 开机不启动 + 无网络请求。
 
+**通知**（`notify` / `notify_once`，模板见 `_msg_*`）：
+
+- 触发：签到成功 / 补签成功 / 检测到已签到 / 检测到请假 / **当日首次**签到失败 /
+  **当日首次**获取任务失败 / 22:00 与 22:30 与 23:00 未签提醒 / 兜底唤醒前预警
+- 去重：失败类与未签提醒用标记文件做「一日一次」；同 tag 的通知相互覆盖（同日同事件不会堆积）
+- 预警条件：**屏幕已亮**且距上次打扰型通知超过 `NOTIFY_COOLDOWN`（默认 300 秒）才发；
+  熄屏静默刷新路径**不发**任何预警（用户看不见，发了也无意义）
+- 机制约束与坑见 §2.1.1
+
 ### 2.3 运行时文件（均在模块目录内）
 
 | 文件 | 内容 |
@@ -146,6 +211,9 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 | `fafu_keepalive.status` | 保活统计（今日成功/失败、最近 token） |
 | `.fafu_checkin.pid` | 守护进程 PID |
 | `.fafu_checkin_done` | 当日签到完成标记 |
+| `.fafu_notify_fail` | 当日「失败类通知」已发标记（`notify_once` 去重） |
+| `.fafu_notify_nosign` / `.fafu_notify_late` / `.fafu_notify_miss` | 22:00 / 22:30 / 23:00 三个未签时点各自的已发标记 |
+| `.fafu_notify_last` | 预警通知冷却基准（unix 秒；必须落盘，见 §2.1.1） |
 
 ---
 
@@ -173,6 +241,8 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 | 页面清理 | 用 `am stack remove <任务ID>`（先 `dumpsys activity activities` 提取），失败回桌面 |
 | 描述对比 | `ksud module config get` 无值时回退读 `module.prop`，避免重复写入 |
 | 冷却机制 | 保活刷新 30 分钟冷却，防止网络异常时频繁触发 |
+| 通知引号 | `su - shell -c '...'` 外层必须用**单引号**包住，正文里的双引号才不会破坏引号配对；含引号或命令替换的正文不要直接内嵌展开 |
+| 通知身份 | root 身份发通知会返回 `rc=0` 但不显示（实测 HyperOS 2），必须降权 `su - shell -c`；见 §2.1.1 |
 
 ### 3.4 排查入口
 
@@ -223,6 +293,16 @@ sh build.sh                   # 构建
 功能逻辑测试建议用 **mock 环境**（临时目录 + mock busybox/ksud），
 避免触碰真实 `/data/adb`。
 
+**通知功能的验收测试**：`.scratch/notify/tests/notify-test.sh`（本地文件，`.scratch/` 不入库；
+改动通知逻辑时请重跑）。它对真实源码做两层断言，**92 项，改动后应保持全绿**：
+
+- **静态断言**：调用点、tag、guard、条件与**关键行序**（例如探测必须排在子命令 `case` 之前）；
+- **函数级断言**：`source` 真实的通知代码段、把 `$SU_MODE` 指向记录函数，
+  断言最终交给 `su` 的命令字符串，并覆盖冷却读写与「发送失败不落标记」。
+
+它的**边界**要说清楚：`su` / `cmd notification post` 的真实送达、Doze 延迟、
+以及真实 `run_once` 的端到端行为都**不在**覆盖范围内——这些只能上机目视验证（见 §5.3）。
+
 ### 5.2 设备
 
 ```sh
@@ -236,6 +316,20 @@ sh /data/adb/modules/fafu-checkin/fafu_checkin.sh status
 - 保活：观察日志出现 `保活: ✅ token 有效`（每 15 分钟）
 - 签到：21:30 后日志出现 `✅ 签到成功`；若走补签会标记 `✅ 补签成功`
 - 描述：重开管理器模块页，确认描述与 `status` 输出一致
+
+**通知（只能目视验证，`rc=0` 不作数）**，按顺序做：
+
+1. **先验地基**——哪条写法真能用：
+   ```sh
+   su - shell -c 'id -u'                 # 期望 2000；若 KernelSU 上让 -c 落空则无输出
+   su shell -c 'id -u'
+   su shell /system/bin/sh -c 'id -u'
+   ```
+2. **跑一次真通知**：`sh /data/adb/modules/fafu-checkin/fafu_checkin.sh once`，
+   确认通知栏出现、标题 emoji 正常；日志里应有
+   `通知链路: 降权写法 [...] 可用（id -u = 2000）`，启动行有 `notify=[...]`。
+3. **测 Doze 延迟**：熄屏放置 30 分钟后触发一次，记录实际送达时间。
+   若延迟超过 10 分钟，22:00 那条「还剩 30 分钟」的时点就需要重算。
 
 **验证记录（2026-09-14，首次全流程）**：32 次保活全部成功（0 失败）→ 21:30:14 自动签到成功
 （服务端 `signState=1`、`isSupplement=0`）→ 动态描述更新为 `🟢 已启用 · ✅ 09-14 已签到 21:30`；
