@@ -10,13 +10,17 @@
 #      调用失败时自动刷新：熄屏下静默进行；屏幕亮着时延后（避免打扰），
 #      留待熄屏后静默刷新，或由 21:30 签到流程一并处理
 #   3) 会话失效自动刷新：熄屏/锁屏下静默进行（屏幕不亮、不唤醒）
-#   4) 刷新后自动清理页面（am stack remove，不留残留、不甩回桌面）
+#   4) 刷新后自动清理页面（am stack remove）：拿到新 token 即移除打卡页，前台随即交还用户；
+#      清理不彻底就让它留在后台，绝不主动切换用户的前台
 #   5) 服务开关：一键启用/停用（操作按钮或命令），停用期间无任何网络请求
 #   6) 动态描述：模块描述显示开关状态与签到日期时间（绝对日期，守护进程退出后信息不失真）
 #   7) 全部系统命令 fd 加固（规避 KernelSU 下 SELinux 的 binder fd 限制）
-#   8) 通知提醒：签到成功 / 已签到 / 请假 / 首次失败 / 22:00·22:30·23:00 三次未签提醒 /
-#      兜底唤醒前预警。必须降权 shell 身份发送（root 身份发出的通知会被部分 ROM 静默丢弃）；
-#      通知失败绝不影响签到主流程
+#   8) 通知提醒：签到成功 / 补签成功 / 已签到 / 已请假 / 首次签到失败 / 首次获取任务失败 /
+#      22:00·22:30·23:00 三次未签提醒 / 打开打卡页前的预警（仅屏幕已亮时发）。
+#      通知以 shell 身份降权发送（root 身份发出的会被部分 ROM 静默丢弃）；
+#      通知失败绝不影响签到主流程。
+#      收不到通知时依次查：启动日志的 notify=[...]、系统设置里 Shell 的通知权限、
+#      以及熄屏过久导致的 Doze 延迟投递。
 #
 # 用法：
 #   sh fafu_checkin.sh [start|stop|status|once|refresh|keepalive|toggle|enable|disable]
@@ -30,10 +34,15 @@
 #     enable     启用服务
 #     disable    停用服务
 #
+#   通知无需命令触发，由守护进程自动发送；要手动验证通知能否送达，执行：
+#     su -c sh /data/adb/modules/fafu-checkin/fafu_checkin.sh once
+#   它会触发一次签到检查并按结果弹通知（21:30~22:59 会真正提交签到，其余时段
+#   多为「已签到 / 已请假 / 拿不到任务」）。
+#
 # 配置文件（可选）：模块目录内 fafu-checkin.conf
 #   KEEPALIVE=0     关闭白天保活（仅保留 21:30 自动签到）
-#   NOTIFY=0        关闭通知提醒
-#   NOTIFY_LEAD=5   兜底唤醒前的预警提前量（秒）；0 = 不加延时
+#   NOTIFY=0        关闭全部通知
+#   NOTIFY_LEAD=5   打卡页打开前的预警提前量（秒）；0 = 不加延时。仅屏幕已亮时生效
 #
 # 运行时文件（全部位于模块目录内，随模块卸载一并清除）：
 #   日志 $MODDIR/fafu_checkin.log
@@ -42,6 +51,11 @@
 #   开关 $MODDIR/fafu-checkin.state
 #   签到 $MODDIR/fafu_checkin.status
 #   保活 $MODDIR/fafu_keepalive.status
+#   通知 $MODDIR/.fafu_notify_fail      当日失败类通知已发
+#        $MODDIR/.fafu_notify_nosign    22:00 未签提醒已发
+#        $MODDIR/.fafu_notify_late      22:30 窗口切换提醒已发
+#        $MODDIR/.fafu_notify_miss      23:00 最终未签提醒已发
+#        $MODDIR/.fafu_notify_last      预警冷却基准（unix 秒）
 # ============================================================
 
 export PATH="/system/bin:/system/xbin:/data/adb/ksu/bin:/data/adb/magisk:$PATH"
