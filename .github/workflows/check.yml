@@ -1,6 +1,6 @@
 name: Check
 
-# 仅做校验（语法 + 元数据），不构建、不发布。
+# 仅做校验（语法 + 元数据 + 断言），不构建、不发布。
 # 构建产物请见 Build 工作流。
 on:
   pull_request:
@@ -19,7 +19,9 @@ jobs:
       - name: Shell 语法检查
         run: |
           fail=0
-          for f in *.sh; do
+          # 库层目录（lib/）在重构中引入；目录还不存在时通配符为空，不影响检查
+          for f in *.sh lib/*.sh tools/*.sh tests/*.sh; do
+            [ -f "$f" ] || continue
             if sh -n "$f"; then
               echo "✅ $f"
             else
@@ -31,3 +33,9 @@ jobs:
 
       - name: 元数据校验（module.prop / update.json）
         run: python3 scripts/check_metadata.py
+
+      - name: 层序检查（一层只能引用更早加载的层）
+        run: sh tools/check-layer-order.sh
+
+      - name: 运行断言（不需要手机 / root / 网络）
+        run: sh tools/run-tests.sh

@@ -104,6 +104,8 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 | `customize.sh` | 安装脚本（设权限） |
 | `uninstall.sh` | 卸载：停进程 / 关页面 / 清理运行时文件 |
 | `update.json` | 更新检测源（`module.prop` 的 `updateJson` 指向它） |
+| `tools/run-tests.sh` · `tests/` | 断言总入口与用例（§5.1；不打进模块 zip） |
+| `tools/check-layer-order.sh` | 层序守卫（一层只能引用更早加载的层） |
 
 ### 2.1.1 通知机制
 
@@ -186,7 +188,7 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 
 1. 静默优先：不亮屏直接打开打卡页 → 轮询 leveldb 等新 token（每 3 秒，最长 30 秒）
 2. 失败且允许唤醒时：`input keyevent 224` + `wm dismiss-keyguard` 后重试
-3. 收尾：`am stack remove` 清理页面任务（失败回桌面兜底）
+3. 收尾：`am stack remove` 清理页面任务（清理不彻底就留在后台，**不**主动切换用户前台；见 §2.1.1）
 
 **动态描述**（`update_desc` / `desc_text`）：
 
@@ -248,7 +250,7 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 |---|---|
 | 变量冲突 | `close_page` 的循环变量不能用 `t`（会覆盖 `refresh_token` 的返回值） |
 | 熄屏检测 | `dumpsys power` 直接调用（busybox 无 dumpsys）；检测失败按"亮屏"处理 |
-| 页面清理 | 用 `am stack remove <任务ID>`（先 `dumpsys activity activities` 提取），失败回桌面 |
+| 页面清理 | 用 `am stack remove <任务ID>`（先 `dumpsys activity activities` 提取）；清理不彻底就留在后台，绝不主动切换用户前台 |
 | 描述对比 | `ksud module config get` 无值时回退读 `module.prop`，避免重复写入 |
 | 冷却机制 | 保活刷新 30 分钟冷却，防止网络异常时频繁触发 |
 | 通知引号 | `su - shell -c '...'` 外层必须用**单引号**包住，正文里的双引号才不会破坏引号配对；含引号或命令替换的正文不要直接内嵌展开 |
@@ -293,26 +295,38 @@ sh $M/fafu_checkin.sh once         # 手动签到检查（幂等）
 
 ## 五、测试方法
 
-### 5.1 本地（Linux / WSL）
+### 5.1 本地（不需要手机 / root / 网络）
 
 ```sh
-sh -n *.sh                    # 语法
-python3 scripts/check_metadata.py   # 元数据
-sh build.sh                   # 构建
+sh -n *.sh lib/*.sh tools/*.sh tests/*.sh   # 语法（lib/ 在重构中引入，暂不存在时跳过）
+python3 scripts/check_metadata.py           # 元数据
+sh tools/check-layer-order.sh               # 层序守卫（一层只能引用更早加载的层）
+sh tools/run-tests.sh                       # 全部断言
+sh tools/run-tests.sh ^layer                # 只跑某个套件（^ 前缀匹配）
+sh build.sh                                 # 构建
 ```
 
-功能逻辑测试建议用 **mock 环境**（临时目录 + mock busybox/ksud），
-避免触碰真实 `/data/adb`。
+**断言总入口 `tools/run-tests.sh`**（`tests/` 下的用例文件；harness 见 `tests/harness.sh`）：
 
-**通知功能的验收测试**：`.scratch/notify/tests/notify-test.sh`（本地文件，`.scratch/` 不入库；
-改动通知逻辑时请重跑）。它对真实源码做两层断言，**92 项，改动后应保持全绿**：
+- 基线：**135 项**（`layer` 27 + `notify` 108），改动后应保持全绿；任一项失败时脚本以非 0 退出；
+- 断言只描述**外部行为**——返回码、状态文件产物、交给系统执行的命令字符串、
+  「某个时刻会发生什么」；不绑行号、不绑函数内部结构，重构搬代码不应制造假红灯；
+- 用例通过 `tests/harness.sh` **直接加载真实的库**（`TEST_LIB_FILES`；重构过渡期用
+  `TEST_BOUNDARY` 只截取库段），而不是从源码里抽取片段再拼接；
+- 时间源通过 `BB_OVERRIDE` + `tests/mock/busybox` 注入（把 `"$BB" date` 拨到任意时刻），
+  降权写法通过 `SU_MODE`、通知命令通过 `NOTIFY_CMD` 注入——不新增专用测试后门；
+- 本机没有独立 `sh`：把 busybox 放到 `tools/busybox/`（该目录不入库），或用
+  `TEST_BUSYBOX=<路径>` 指定；CI 直接用 ubuntu 的系统 `sh`（断言脚本保持 POSIX 兼容）。
 
-- **静态断言**：调用点、tag、guard、条件与**关键行序**（例如探测必须排在子命令 `case` 之前）；
-- **函数级断言**：`source` 真实的通知代码段、把 `$SU_MODE` 指向记录函数，
-  断言最终交给 `su` 的命令字符串，并覆盖冷却读写与「发送失败不落标记」。
+**用例的两个套件**：
 
-它的**边界**要说清楚：`su` / `cmd notification post` 的真实送达、Doze 延迟、
-以及真实 `run_once` 的端到端行为都**不在**覆盖范围内——这些只能上机目视验证（见 §5.3）。
+- `tests/layer-order.sh`：层序守卫自证——用临时的**反向引用样本**验证守卫确实会失败
+  （证明它不是永远为真的摆设），并钉住白名单、坏清单（缺文件 / 重复 / 空）的行为；
+- `tests/notify.sh`：通知的调用点、文案模板、tag、冷却、去重、降权命令构造，
+  以及少数**相对顺序**不变量（探测排在子命令分发之前、开页预警排在 `open_page` 之前）。
+
+**覆盖不到的边界**（只能上机目视验证，见 §5.3）：`su` / `cmd notification post` 的真实送达、
+Doze 投递延迟、真实 `run_once` 的端到端行为。
 
 ### 5.2 设备
 
