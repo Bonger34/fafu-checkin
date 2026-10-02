@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================
-# mock busybox —— 只接管「环境事实」这三处，其余 applet 透传给真实 busybox
+# mock busybox —— 只接管「环境事实」这四处，其余 applet 透传给真实 busybox
 #
 # 为什么需要它：被测脚本一律用 "$BB" 调用 applet，把 BB_OVERRIDE 指到
 # 「转发到本文件的包装脚本」就等于给整条链路换环境，不必改动被测源码。
@@ -8,12 +8,15 @@
 # 并把本文件当一个 sh 脚本跑起来）——**不要**把 BB_OVERRIDE 直接指向本文件：
 # 本文件自身可执行时 BB_REAL 为空，会自我递归。
 #
-# 接管的三处（都是「本机没有 / 不可控」的环境事实，不是被测行为本身；
-# 三个控制变量都不设时本文件完全等价于「透传给真实 busybox」）：
+# 接管的四处（都是「本机没有 / 不可控」的环境事实，不是被测行为本身；
+# 四个控制变量都不设时本文件完全等价于「透传给真实 busybox」）：
 #   1) 取当前时间（MOCK_DATE_CTL）；
 #   2) /dev/urandom（MOCK_RANDOM_CTL）—— 本机（Windows）没有这个设备，
 #      签名随机数会退化成空串；
-#   3) wget（MOCK_WGET_DIR）—— 记录「最终交给系统执行的命令行」并注入响应体 / 失败 / 超时。
+#   3) wget（MOCK_WGET_DIR）—— 记录「最终交给系统执行的命令行」并注入响应体 / 失败 / 超时；
+#   4) 设备命令 am / input / wm / dumpsys（MOCK_DEVICE_DIR）—— 本机没有 Android，
+#      它们只在 /system/bin 下（不是 busybox applet）：记录命令行与 fd 见证，并注入
+#      屏幕 / 活动输出。PATH 上的同名包装器由 tests/device.sh 生成（见下面的说明）。
 #
 # 环境变量（由包装脚本与用例设置）：
 #   BB_REAL        真实 busybox 的路径（必需；Windows 上是 busybox.exe）
@@ -23,10 +26,12 @@
 #   MOCK_DATE_FMT  仅输出一个格式串时的回退格式（默认 +%s）
 #   MOCK_RANDOM_CTL 随机数替身的序号文件（设了才接管，且每次调用都不同）
 #   MOCK_WGET_DIR  wget 替身的控制目录（设了才接管；见下面的说明）
+#   MOCK_DEVICE_DIR 设备命令替身的控制目录（设了才接管；见下面的说明）
 #
 # 当前用例：多数只走「透传」这一半；tests/skeleton.sh 用 MOCK_DATE_CTL 真的拨钟
 # （验 base 层的时间源），跨日/时点用例同样直接设它；tests/api.sh 用 MOCK_WGET_DIR
-# 断言网络调用的命令行与响应注入。
+# 断言网络调用的命令行与响应注入；tests/device.sh 用 MOCK_DEVICE_DIR 断言设备命令
+# 的命令行与 fd 加固。
 # ============================================================
 BB_REAL="${BB_REAL:-busybox}"
 MOCK_DATE_FMT="${MOCK_DATE_FMT:-+%s}"
@@ -95,6 +100,49 @@ if [ "$1" = "wget" ] && [ -n "${MOCK_WGET_DIR:-}" ]; then
     exit "${_rc:-0}"
   fi
   exit 0
+fi
+
+# ---- 设备命令：仅当 MOCK_DEVICE_DIR 被设置时接管 ----
+# am / input / wm / dumpsys 在真机上是 /system/bin 下的独立程序（不是 busybox applet），
+# 被测层通过 PATH 调用它们。要用替身顶掉它们，就得在 PATH 上放同名文件——
+# tests/device.sh 的 dv_setup 会把四个包装器放进 $DV_WORK/bin 并把它排到 PATH 最前，
+# 包装器再调本文件（busybox 替身）的对应 applet；包装器的生成见 dv_tools。
+#
+# 控制文件（用例与驱动脚本用相对路径，CWD 是驱动脚本所在目录）：
+#   power.txt     dumpsys power 的输出（屏幕状态判定的夹具）
+#   activity.txt  dumpsys activity activities 的输出（任务枚举的夹具）
+#   rc            设备命令的退出码（缺省 0）
+#   calls         命令行记录（stdout 追加）：行首一列是 fd 见证，其后是 `|` 分隔的逐个参数
+#
+# 行首那一列是 stdout 的 fd 见证（见 tests/device.sh 「能力收口与 fd 加固」一节的说明）：
+#   `-` = 没接到普通文件（重定向到 dev/null、或管道，都算「命令自身不写任何文件」）；
+#   `file` = 接到了普通文件（危险：KernelSU 的 SELinux 会拒绝向 /data/adb 下文件传 binder fd）。
+# 它只在 fd 真的指向普通文件时报警，所以是「加固是否还在」的负向守卫，
+# 而不是「加固写法」的证明——写法由 tests/device.sh 的静态命令位判据钉住。
+if [ -n "${MOCK_DEVICE_DIR:-}" ]; then
+  _mock_dev_applet=""
+  _mock_dev_fixture=""
+  case "$1" in
+    am|input|wm) _mock_dev_applet="$1" ;;
+    dumpsys)
+      # 两个子命令（power / activity activities）分开注入；未注入时输出为空
+      case "$2" in
+        power)    _mock_dev_applet="dumpsys"; _mock_dev_fixture="power.txt" ;;
+        activity) _mock_dev_applet="dumpsys"; _mock_dev_fixture="activity.txt" ;;
+      esac
+      ;;
+  esac
+  if [ -n "$_mock_dev_applet" ]; then
+    _mock_dev_fd="-"
+    if [ -f /dev/stdout ]; then _mock_dev_fd="file"; fi
+    { printf '%s' "$_mock_dev_fd"; for _a in "$@"; do printf '|%s' "$_a"; done; printf '\n'; } \
+      >> "$MOCK_DEVICE_DIR/calls" 2>/dev/null
+    if [ -n "$_mock_dev_fixture" ]; then
+      [ -f "$MOCK_DEVICE_DIR/$_mock_dev_fixture" ] && cat "$MOCK_DEVICE_DIR/$_mock_dev_fixture"
+    fi
+    _mock_dev_rc=$(cat "$MOCK_DEVICE_DIR/rc" 2>/dev/null | tr -dc '0-9')
+    exit "${_mock_dev_rc:-0}"
+  fi
 fi
 
 exec "$BB_REAL" "$@"
