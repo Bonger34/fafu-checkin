@@ -12,6 +12,12 @@ Thumbs.db
 # 本地 issue / spec（不入库）
 .scratch/
 
+# 断言运行时的临时产物（用例工作目录）
+tests/.work/
+
+# 本机跑断言用的 busybox（随附本地，不入库）
+tools/busybox/
+
 # Python 缓存
 __pycache__/
 *.pyc
