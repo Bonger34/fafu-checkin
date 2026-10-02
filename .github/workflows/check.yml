@@ -34,6 +34,13 @@ jobs:
       - name: 元数据校验（module.prop / update.json）
         run: python3 scripts/check_metadata.py
 
+      # 断言里的 mock 时间源需要一个真实 busybox 承接其余 applet
+      - name: 准备 busybox（断言的 mock 时间源要用）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq busybox-static
+          busybox | head -n1
+
       - name: 层序检查（一层只能引用更早加载的层）
         run: sh tools/check-layer-order.sh
 

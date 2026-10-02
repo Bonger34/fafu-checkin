@@ -39,6 +39,30 @@ lo_run_wl() {
   LO_RC=$?
 }
 
+# 白名单文件不存在时的回退：守卫应退回内建名单，不能静默把白名单当成空
+lo_case_whitelist_fallback() {
+  lo_fixture
+  lo_layer a.sh <<'A'
+notify() {
+  _ntc="cmd notification post"
+  $SU_MODE "$_ntc"
+}
+A
+  lo_layer b.sh <<'B'
+b_task() {
+  echo x
+}
+B
+  lo_layer c.sh <<'C'
+cmd_run() {
+  notify
+}
+C
+  lo_run_wl "$LO_WORK/tools/根本没这个文件.txt"
+  t_eq "白名单缺失：退回内建名单，检查通过" "$LO_RC" 0
+  lo_hasnt "白名单缺失：没有因为读不到白名单就误报" '违规'
+}
+
 # 断言：真实仓库的白名单确实被守卫引用（守卫通过 + 白名单里有那三项）
 lo_case_repo_whitelist() {
   t_file "仓库带 tools/layer-whitelist.txt" "$T_ROOT/tools/layer-whitelist.txt"
@@ -206,6 +230,7 @@ t_case "layer · 合法层序通过" lo_case_valid_order
 t_case "layer · 反向引用样本必须失败" lo_case_reverse_reference_fails
 t_case "layer · 动态分派走白名单" lo_case_dynamic_dispatch
 t_case "layer · 仓库白名单内容" lo_case_repo_whitelist_in_use
+t_case "layer · 白名单缺失时退回内建" lo_case_whitelist_fallback
 t_case "layer · 坏清单（缺文件 / 重复 / 空）" lo_case_same_file_and_missing
 t_case "layer · 真实仓库清单" lo_case_repo_manifest
 t_case "layer · 真实仓库白名单" lo_case_repo_whitelist
