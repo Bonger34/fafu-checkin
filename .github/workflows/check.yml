@@ -19,7 +19,7 @@ jobs:
       - name: Shell 语法检查
         run: |
           fail=0
-          # 库层目录（lib/）在重构中引入；目录还不存在时通配符为空，不影响检查
+          # 覆盖入口、库层（lib/）、工具与断言脚本
           for f in *.sh lib/*.sh tools/*.sh tests/*.sh; do
             [ -f "$f" ] || continue
             if sh -n "$f"; then

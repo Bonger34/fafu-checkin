@@ -36,6 +36,7 @@ T_NAMES="$*"
 FAILED=0
 ALL_PASS=0
 ALL_FAIL=0
+ALL_SKIP=0
 for f in "$ROOT"/tests/*.sh; do
   [ -f "$f" ] || continue
   case "${f##*/}" in
@@ -46,11 +47,16 @@ for f in "$ROOT"/tests/*.sh; do
   if T_RUN; then :; else FAILED=1; fi
   ALL_PASS=$((ALL_PASS + T_PASS))
   ALL_FAIL=$((ALL_FAIL + T_FAIL))
+  ALL_SKIP=$((ALL_SKIP + T_SKIP))
 done
 
 echo ""
 echo "=============================================="
-echo " 合计：$ALL_PASS 通过 / $ALL_FAIL 失败（共 $((ALL_PASS + ALL_FAIL)) 项）"
+if [ "$ALL_SKIP" -gt 0 ]; then
+  echo " 合计：$ALL_PASS 通过 / $ALL_FAIL 失败（共 $((ALL_PASS + ALL_FAIL)) 项）；跳过 $ALL_SKIP 项（本机缺工具）"
+else
+  echo " 合计：$ALL_PASS 通过 / $ALL_FAIL 失败（共 $((ALL_PASS + ALL_FAIL)) 项）"
+fi
 echo "=============================================="
 
 # 总入口的退出码：全部用例通过才 0，便于 CI 与 pre-commit 直接判定

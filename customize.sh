@@ -32,6 +32,16 @@ for f in fafu_checkin.sh service.sh action.sh uninstall.sh; do
   fi
 done
 
+# 库层是只读数据文件：给数据权限即可，不需要可执行位（它们由入口 source 加载）
+for f in "$MODPATH"/lib/*.sh; do
+  [ -f "$f" ] || continue
+  if command -v set_perm >/dev/null 2>&1; then
+    set_perm "$f" 0 0 0644
+  else
+    chmod 644 "$f"
+  fi
+done
+
 ui_print " "
 ui_print "- 安装完成，重启后自动运行"
 ui_print "- 操作按钮: 启用/停用服务（模块描述动态显示状态）"

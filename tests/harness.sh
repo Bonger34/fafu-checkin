@@ -17,6 +17,7 @@ set +e
 
 T_PASS=0
 T_FAIL=0
+T_SKIP=0
 
 # 仓库根目录：本文件位于 <root>/tests/
 T_ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,12 +25,13 @@ T_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # busybox 定位与 tools/ 共用（避免本机与 CI 各用一套规则）
 . "$T_ROOT/tools/lib.sh"
 
-# ---- 被测源码清单（依赖顺序；必须是库里实际加载的顺序） ----
-# 重构过渡期：库与程序仍在同一个文件里，tests/ 通过 TEST_BOUNDARY 只截取库段。
-# 拆分完成后：把 lib 文件名按入口加载顺序追加到 TEST_LIB_FILES，并清空 TEST_BOUNDARY。
-# 层清单的真源在 tools/check-layer-order.sh（守卫那边），这里不重复维护一份。
-TEST_LIB_FILES="fafu_checkin.sh"
-TEST_BOUNDARY='# ---- 子命令分发 ----'
+# ---- 被测源码清单（= 入口声明的加载顺序；清单真源是入口的 FAFU_LAYERS） ----
+# 守卫（层序）、断言、打包三处都从入口读同一份清单，不各自维护（三份列表必然漂移）。
+TEST_LIB_FILES=$(read_layers "$T_ROOT")
+if [ -z "$TEST_LIB_FILES" ]; then
+  echo "读不出层清单（入口 fafu_checkin.sh 里的 FAFU_LAYERS）——断言无法确定被测源码" >&2
+  exit 1
+fi
 
 # 用例工作目录：临时文件、mock 工具链、驱动脚本都放这里，跑完保留供排查
 T_WORK_ROOT="$T_ROOT/tests/.work"
@@ -112,6 +114,7 @@ T_RUN() {
   # 每个用例文件单独计数：_t_summary 报的是本文件的结果，总入口再累加
   T_PASS=0
   T_FAIL=0
+  T_SKIP=0
   # 用 here-doc 供 stdin（而不是管道）：断言计数在 while 里累加，
   # 管道会让 while 落进子 shell，计数丢失（踩过）
   while IFS='|' read -r c n; do
@@ -143,7 +146,11 @@ _t_banner() {
 _t_summary() {
   echo ""
   echo "=============================================="
-  echo " 结果：$T_PASS 通过 / $T_FAIL 失败（共 $((T_PASS + T_FAIL)) 项）"
+  if [ "$T_SKIP" -gt 0 ]; then
+    echo " 结果：$T_PASS 通过 / $T_FAIL 失败（共 $((T_PASS + T_FAIL)) 项）；跳过 $T_SKIP 项（本机缺工具）"
+  else
+    echo " 结果：$T_PASS 通过 / $T_FAIL 失败（共 $((T_PASS + T_FAIL)) 项）"
+  fi
   echo "=============================================="
   [ "$T_FAIL" -eq 0 ]
 }
@@ -156,6 +163,13 @@ _t_pass() {
 _t_fail() {
   T_FAIL=$((T_FAIL + 1))
   echo "  [FAIL] $1"
+}
+
+# 跳过：用例依赖本机没有的工具（如打包用例需要 zip）。跳过**不算通过**——
+# 计数与通过项分开，避免「本机没跑」被读成「已验证」。
+t_skip() {
+  T_SKIP=$((T_SKIP + 1))
+  echo "  [SKIP] $1"
 }
 
 # ------------------------------------------------------------
@@ -242,34 +256,31 @@ t_call() {
 # 库加载
 # ------------------------------------------------------------
 
-# 拼出被测库字符串放到 $1。
-#
-# 过渡期做法：库段仍在 fafu_checkin.sh 里，按 TEST_BOUNDARY 只取标记之前的部分，
-# 这样断言可以 source 真实的库（而不是从源码里抽取片段再拼接）。
-# 声明了 TEST_BOUNDARY 却在源码里找不到它时必须**明确失败**：静默地整文件加载会把
-# 程序段（子命令分发）也执行一遍，测试会以难以理解的方式炸掉。
-# 分层完成后把 TEST_BOUNDARY 清空即可（那时每个文件本身就是库）。
+# 拼出被测库字符串放到 $1：按加载顺序拼接真实层文件（不是从源码里抽取片段再拼接）。
+# 层的加载顺序取自入口的清单，故这里拼出来的环境与运行时一致。
 t_write_lib() {
-  local out f src n
+  local out f src
   out="$1"
   : > "$out"
   for f in $TEST_LIB_FILES; do
     src="$T_ROOT/$f"
     if [ ! -f "$src" ]; then
-      echo "找不到被测源码：$src（见 tests/harness.sh 的 TEST_LIB_FILES）" >&2
+      echo "找不到被测源码：$src（层清单见入口 fafu_checkin.sh 的 FAFU_LAYERS）" >&2
       return 1
     fi
-    if [ -n "$TEST_BOUNDARY" ]; then
-      if ! grep -qF -e "$TEST_BOUNDARY" -- "$src" 2>/dev/null; then
-        echo "源码里找不到库段边界 [$TEST_BOUNDARY]：$f" >&2
-        echo "（边界改名或已拆层时，请同步 tests/harness.sh 的 TEST_BOUNDARY）" >&2
-        return 1
-      fi
-      n=$(grep -nF -m1 -e "$TEST_BOUNDARY" -- "$src" | cut -d: -f1)
-      sed -n "1,$((n - 1))p" "$src" >> "$out"
-    else
-      cat "$src" >> "$out"
-    fi
+    cat "$src" >> "$out"
   done
+  [ -s "$out" ]
+}
+
+# 拼出「全程序文本」放到 $1：各层 + 入口，顺序与运行时一致。
+# 供静态断言查找函数定义、调用点与**相对顺序**用（只读文本，不执行）。
+t_write_program() {
+  local out
+  out="$1"
+  if ! t_write_lib "$out"; then
+    return 1
+  fi
+  cat "$T_ROOT/fafu_checkin.sh" >> "$out"
   [ -s "$out" ]
 }

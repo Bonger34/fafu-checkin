@@ -3,7 +3,7 @@
 # 层序守卫 —— 检查「一层只能引用更早加载的层」这条依赖不变量
 #
 # 用法：
-#   sh tools/check-layer-order.sh                       # 检查仓库默认清单
+#   sh tools/check-layer-order.sh                       # 检查仓库默认清单（= 入口的加载清单）
 #   LAYER_FILES="a.sh lib/b.sh" sh tools/check-layer-order.sh
 #   LAYER_WHITELIST=path sh tools/check-layer-order.sh
 #
@@ -15,6 +15,7 @@
 #      （tools/layer-whitelist.txt，缺失即失败，不静默当成空名单）。
 #
 # 它是启发式的：只守住肉眼看不出的那条不变量，不做 shell 解析。
+# 函数体里的注释不参与判定（注释里提到更后层的名字不算引用）。
 # 违规时以非 0 退出，并打印「调用者 @ 文件 → 被调用者（定义于更后的 X）」。
 # ============================================================
 
@@ -138,6 +139,7 @@ function scan(fn,   line, i, ch, start, w, nextc, j, k, v, target, prev) {
   line = mask_defs(body)
   gsub(/[;&|()]/, "@", line)      # 归一化命令分隔符
   gsub(/"/, "", line)             # 引号对取词无意义（$_ntc 与 "$_ntc" 等价）
+  gsub(/#[^@]*/, "", line)        # 注释里提到更后层的函数名不算引用（@ 已是行分隔符）
 
   # ---- 第一步：变量 → 被赋的层函数名 ----
   for (k in varmap) delete varmap[k]
@@ -191,12 +193,20 @@ function scan(fn,   line, i, ch, start, w, nextc, j, k, v, target, prev) {
 AWKEOF
 }
 
-# ---- 层清单：本仓库的唯一真源（入口加载顺序就是这里列出的顺序） ----
-# 过渡期（重构进行中）：能力仍都在入口脚本里，故清单只有它一个文件。
-# 拆分完成后改成按入口加载顺序列出全部层文件，例如：
-#   FILES="fafu_checkin.sh lib/base.sh lib/state.sh lib/api.sh ... lib/commands.sh"
-FILES="${LAYER_FILES:-fafu_checkin.sh}"
+# ---- 层清单：从入口脚本的加载清单读出来（唯一真源，避免两份列表漂移） ----
+# 默认按入口 FAFU_LAYERS 的顺序列出 lib/ 下各层；LAYER_FILES 可覆盖，供测试用临时样本。
+FILES="${LAYER_FILES:-$(read_layers "$ROOT")}"
 SEEN=""
+
+# 清单为空 = 入口的加载清单读不出来（改名、格式变了、文件不在）：必须响亮地失败，
+# 不能当成「没有层要检查」而静默通过——那样守卫会变成永远为真的摆设。
+case "$FILES" in
+  *[!\ ]*) : ;;
+  *)
+    echo "层序检查失败：读不出层清单（入口 fafu_checkin.sh 里的 FAFU_LAYERS；或用 LAYER_FILES 指定）" >&2
+    exit 1
+    ;;
+esac
 
 AWK=$(pick_awk)
 

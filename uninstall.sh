@@ -42,6 +42,9 @@ if command -v dumpsys >/dev/null 2>&1 && command -v am >/dev/null 2>&1; then
 fi
 
 # 3) 清理运行时文件（模块目录随后由管理器整体移除，此处为显式兜底）
+#    库层（lib/）不在这里删除：模块目录随后由管理器整体移除即可；
+#    卸载脚本显式删自己的代码，一旦中途失败反而会留下一个半残模块
+#    （入口还在、层没了，正是最难排查的那类故障）。
 rm -f "$MODDIR/fafu_checkin.log" "$MODDIR/fafu_checkin.log.rot" "$MODDIR/.fafu_checkin.pid" \
       "$MODDIR/.fafu_checkin_done" "$MODDIR/fafu-checkin.conf" "$MODDIR/fafu-checkin.state" \
       "$MODDIR/fafu_checkin.status" "$MODDIR/fafu_keepalive.status" \

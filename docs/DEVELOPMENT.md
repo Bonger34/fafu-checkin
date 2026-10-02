@@ -96,16 +96,53 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 
 ### 2.1 文件职责
 
+运行时的模块是「入口 + 库层目录」的多文件形态：入口只做装配与调度，能力实现按职责分 9 层，
+改一个功能只需读一到两层。
+
+**模块内（打进 zip）**
+
 | 文件 | 职责 |
 |---|---|
-| `fafu_checkin.sh` | 核心脚本：守护循环 / 签到 / 保活 / 刷新 / 开关 / 动态描述 / 通知 |
+| `fafu_checkin.sh` | 入口：定位模块目录 → 加载配置 → 按序加载各层 → 命令分发 → 守护主循环 |
+| `lib/base.sh` | 环境与工具：模块/工具链定位、日志与轮转、时间源、原子写、键值读写、JSON 单字段 |
+| `lib/state.sh` | 运行时状态：服务开关、签到记录、保活统计、完成标记、四类通知标记 |
+| `lib/api.sh` | 接口：token 提取、请求签名、HTTP 调用 |
+| `lib/device.sh` | 设备控制：屏幕状态、前端任务枚举、打开/移除打卡页 |
+| `lib/notify.sh` | 通知：降权探测、文案表、发送、每日一次去重、打扰冷却 |
+| `lib/desc.sh` | 模块描述：读状态生成描述文本并写入（KernelSU 覆盖优先，回退改写元数据） |
+| `lib/keepalive.sh` | 刷新 token 与白天保活（15 分钟节流、30 分钟冷却、亮屏延后） |
+| `lib/signin.sh` | 签到决策：取任务 / 解析字段 / 判定该做什么 / 提交并记录（三档返回码） |
+| `lib/commands.sh` | 9 个子命令的实现（分发与降权探测在入口） |
 | `service.sh` | 开机启动（等 `sys.boot_completed` 后拉起守护；已停用则跳过） |
 | `action.sh` | 操作按钮 → 切换服务开关 |
-| `customize.sh` | 安装脚本（设权限） |
+| `customize.sh` | 安装脚本（脚本 0755；库层按只读数据文件 0644） |
 | `uninstall.sh` | 卸载：停进程 / 关页面 / 清理运行时文件 |
 | `update.json` | 更新检测源（`module.prop` 的 `updateJson` 指向它） |
-| `tools/run-tests.sh` · `tests/` | 断言总入口与用例（§5.1；不打进模块 zip） |
+
+**只在仓库里（不打进 zip）**
+
+| 文件 | 职责 |
+|---|---|
+| `build.sh` | 打包：清单含 `lib/`，打完后逐个核对产物，缺文件即构建失败 |
+| `tools/run-tests.sh` · `tests/` | 断言总入口与用例（§5.1） |
 | `tools/check-layer-order.sh` · `tools/layer-whitelist.txt` | 层序守卫与它的动态分派白名单 |
+| `tools/lib.sh` | 共用小函数：busybox 定位、层清单读取（`read_layers`） |
+
+**层结构的约定**（这几条是结构不变量，改结构时先读这里）：
+
+- **加载顺序**（入口 `fafu_checkin.sh` 里的 `FAFU_LAYERS`，唯一真源）：
+  `base → state → api → device → notify → desc → keepalive → signin → commands`。顺序即依赖方向：
+  **一层只能引用更早加载的层**，由 `tools/check-layer-order.sh` 守着（注释里提到更后层的名字不算引用）；
+  断言（`tests/harness.sh`）与打包（`build.sh`）也从入口读这份清单，不另存一份。
+  注意 `keepalive` 必须早于 `signin`——签到决策会调用刷新流程。
+- **缺层即响亮失败**：任一层缺失或不可读时，入口往模块日志写一行
+  `模块不完整：缺少库层 <路径>` 并以非 0 退出。半装（入口在、层少一个）是最难排查的失败模式，
+  宁可启动失败，也不要「某些功能悄悄不工作」。
+- **打包与权限**：`build.sh` 把 `lib/` 一并打进 zip 并逐个核对产物；安装时脚本 0755、库层 0644
+  （库层是 source 进来的数据，不需要可执行位）。
+- **卸载不删库层**：`uninstall.sh` 只停进程、关页面、清理运行时文件，**不**删 `lib/`。模块目录随后
+  由管理器整体移除即可；卸载脚本显式删自己的代码，一旦中途失败反而会留下半残模块
+  （入口还在、层没了）——正是上面那条最难的故障。
 
 ### 2.1.1 通知机制
 
@@ -298,41 +335,49 @@ sh $M/fafu_checkin.sh once         # 手动签到检查（幂等）
 ### 5.1 本地（不需要手机 / root / 网络）
 
 ```sh
-sh -n *.sh lib/*.sh tools/*.sh tests/*.sh   # 语法（lib/ 在重构中引入，暂不存在时跳过）
+sh -n *.sh lib/*.sh tools/*.sh tests/*.sh   # 语法（入口 + 库层 + 工具 + 断言）
 python3 scripts/check_metadata.py           # 元数据
-sh tools/check-layer-order.sh               # 层序守卫（一层只能引用更早加载的层）
+sh tools/check-layer-order.sh               # 层序守卫（清单取自入口的 FAFU_LAYERS）
 sh tools/run-tests.sh                       # 全部断言
 sh tools/run-tests.sh ^layer                # 只跑某个套件（^ 前缀匹配）
-sh build.sh                                 # 构建
+sh build.sh                                 # 构建（含产物文件核对）
 ```
 
 **断言总入口 `tools/run-tests.sh`**（`tests/` 下的用例文件；harness 见 `tests/harness.sh`）：
 
-- 基线：**115 项**（`layer` 28 + `notify` 87），改动后应保持全绿；任一项失败时脚本以非 0 退出；
-  迁移前草稿版的计数（文档写的 92、提交记录里的 95/100）都不可靠——那版测试里有一个 `for`
-  循环因缺换行整段没执行、断言函数复用变量把部分结果静默覆盖；迁移时实测为 104 项。
+- 基线：**170 项**（`layer` 33 + `notify` 87 + `skeleton` 50），改动后应保持全绿；
+  任一项失败时脚本以非 0 退出；迁移前草稿版的计数（文档写的 92、提交记录里的 95/100）都不可靠——
+  那版测试里有一个 `for` 循环因缺换行整段没执行、断言函数复用变量把部分结果静默覆盖；
+  拆层前实测为 115 项。
+  本机（Windows）没有 `zip`/`unzip` 时，`skeleton` 里「打包产物校验」整段（13 条断言）会**跳过**
+  （计数上记为 `跳过 1 项`，不计入通过，避免「本机没跑」被读成「已验证」），此时报 157 项；
+  CI 上全跑，报 170 项；
 - 断言只描述**外部行为**——返回码、状态文件产物、交给系统执行的命令字符串、
   「某个时刻会发生什么」；不绑行号，重构搬代码不应制造假红灯；
-- 用例通过 `tests/harness.sh` **直接加载真实的库**（`TEST_LIB_FILES`；重构过渡期用
-  `TEST_BOUNDARY` 只截取库段，边界找不到时明确失败），而不是从源码里抽取片段再拼接；
+- 用例通过 `tests/harness.sh` **直接加载真实层文件**：清单由 `tools/lib.sh` 的 `read_layers`
+  从入口的 `FAFU_LAYERS` 读出（唯一真源），不再有「从源码里截取库段」的过渡机制；
+  静态断言面对的是「各层 + 入口」按加载顺序拼出的全程序文本（`t_write_program`，只读不执行）；
 - 注入缝沿用运行时既有开关，不加测试专用后门：时间走 `BB_OVERRIDE` + `tests/mock/busybox`
-  （设 `MOCK_DATE_CTL` 即可把 `"$BB" date` 拨到任意时刻；当前断言还没用到拨钟，跨日/时点
-  用例落地时直接设它即可），降权写法走 `SU_MODE`，通知命令走 `NOTIFY_CMD`；
+  （设 `MOCK_DATE_CTL` 即可把 `"$BB" date` 拨到任意时刻，`tests/skeleton.sh` 用它验时间源），
+  降权写法走 `SU_MODE`，通知命令走 `NOTIFY_CMD`；
 - mock 时间源需要一个**真实 busybox** 承接其余 applet：本机把它放到 `tools/busybox/`
   （该目录不入库）或用 `TEST_BUSYBOX=<路径>` 指定，CI 先装 `busybox-static`
   （见 `.github/workflows/`）；三者统一由 `tools/lib.sh` 的 `find_busybox` 定位；
 - 本机（Windows）没有系统 `sh` 时用 `busybox sh tools/run-tests.sh` 跑；
   断言脚本本身保持 POSIX 兼容，CI 直接用系统 `sh`；
 - 按关键字筛选用例时，含非 ASCII 的关键字在 Windows 控制台上会因代码页被改写，
-  优先用 `^layer` / `^notify` 这类纯 ASCII 前缀。
+  优先用 `^layer` / `^notify` / `^skeleton` 这类纯 ASCII 前缀。
 
-**两个套件**：
+**三个套件**：
 
 - `tests/layer-order.sh`：层序守卫自证——用临时的**反向引用样本**验证守卫确实会失败
   （证明它不是永远为真的摆设），并钉住白名单（含缺失时必须明确失败）、坏清单
-  （缺文件 / 重复 / 空）的行为；
+  （缺文件 / 重复 / 空）与「注释不算引用」的行为；
 - `tests/notify.sh`：通知的调用点、文案模板、tag、冷却、去重、降权命令构造，
-  以及少数**相对顺序**不变量（探测排在子命令分发之前、开页预警排在 `open_page` 之前）。
+  以及少数**相对顺序**不变量（探测排在子命令分发之前、开页预警排在 `open_page` 之前）；
+- `tests/skeleton.sh`：base 层原语（键值读写、JSON 单字段、原子写、可拨钟的时间源、日志轮转）、
+  入口装配（缺一层时写日志并以非 0 退出；层齐时子命令分发可用）、打包管道
+  （产物含每个层文件；少一层即构建失败）。
 
 **覆盖不到的边界**（只能上机目视验证，见 §5.3）：`su` / `cmd notification post` 的真实送达、
 Doze 投递延迟、真实 `run_once` 的端到端行为。

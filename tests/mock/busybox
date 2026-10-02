@@ -14,8 +14,8 @@
 #                  +%H:%M / +%H / +%M，其余格式（含 +%s）走真实时间
 #   MOCK_DATE_FMT  仅输出一个格式串时的回退格式（默认 +%s）
 #
-# 当前用例只用到「透传」这一半；拨钟那一半留给需要跨日/时点判定的用例
-# （设置 MOCK_DATE_CTL 即可）。
+# 当前用例：多数只走「透传」这一半；tests/skeleton.sh 用 MOCK_DATE_CTL 真的拨钟
+# （验 base 层的时间源），跨日/时点用例落地时同样直接设它即可。
 # ============================================================
 BB_REAL="${BB_REAL:-busybox}"
 MOCK_DATE_FMT="${MOCK_DATE_FMT:-+%s}"
@@ -41,7 +41,9 @@ if [ "$1" = "date" ] && [ -n "${MOCK_DATE_CTL:-}" ] && [ -f "$MOCK_DATE_CTL" ]; 
     +%H:%M)    echo "${_d#* }" ;;
     +%H)       echo "${_d#* }" | cut -d: -f1 ;;
     +%M)       echo "${_d#* }" | cut -d: -f2 ;;
-    *)         "$BB_REAL" date "$@" ;;
+    # 未接管的格式（含 +%s 与带空格的完整时间戳）走真实时间。
+    # 这里必须先 shift 掉 applet 名：本文件是「busybox 替身」，$1 永远是 applet
+    *)         shift; "$BB_REAL" date "$@" ;;
   esac
   exit 0
 fi

@@ -4,6 +4,7 @@
 # 分三层，都只针对「外部可观察的行为」：
 #   A 静态断言：关键函数/调用点/条件是否还在，以及少数**相对顺序**不变量
 #      （如降权探测必须排在子命令分发之前、开页预警必须排在 open_page 之前）；
+#     面对的是「各层按加载顺序 + 入口」拼出的全程序文本（只读，不执行）；
 #   B 函数级断言：source 真实的库，把降权写法指向记录函数，
 #      断言最终交给系统执行的命令字符串；
 #   C 文案与分支：真实 _msg_* / notify / notify_once 的产物与返回码。
@@ -11,7 +12,18 @@
 # 覆盖不到的（只能上机目视确认）：su / cmd notification post 的真实送达、Doze 投递延迟。
 # ============================================================
 
-TEST_SRC="$T_ROOT/fafu_checkin.sh"
+# 静态断言面对的文本：各层 + 入口，拼接顺序即加载顺序（相对顺序断言因此仍然成立）
+NT_SRC=""
+nt_src() {
+  [ -n "$NT_SRC" ] && { printf '%s' "$NT_SRC"; return 0; }
+  NT_SRC="$T_WORK_ROOT/program.sh"
+  mkdir -p "$T_WORK_ROOT"
+  if ! t_write_program "$NT_SRC"; then
+    echo "无法拼出全程序文本（层清单见入口 fafu_checkin.sh 的 FAFU_LAYERS）" >&2
+    exit 1
+  fi
+  printf '%s' "$NT_SRC"
+}
 
 # -- 供用例使用的临时目录与工具链（用例执行时才创建，避免 source 本文件就有副作用） --
 nt_setup() {
@@ -66,6 +78,7 @@ nt_run() {
 
 nt_case_defs() {
   local f v
+  TEST_SRC=$(nt_src)
   for f in probe_su notify notify_once notify_lead \
            _msg_sign _msg_supp _msg_seen _msg_leave \
            _msg_failsign _msg_failtask _msg_nosign _msg_late _msg_miss; do
@@ -80,6 +93,7 @@ nt_case_defs() {
 
 nt_case_call_sites() {
   local t
+  TEST_SRC=$(nt_src)
   for t in 'notify "fafu-sign-$PL"' 'notify "fafu-supp-$PL"' 'notify "fafu-leave-$PL"' \
            'notify "fafu-warn-$PL"' 'notify_once "fafu-failsign-$PL"' \
            'notify_once "fafu-failtask-$PL"' 'notify_once "fafu-t2200-$PL"' \
@@ -89,6 +103,7 @@ nt_case_call_sites() {
 }
 
 nt_case_warn_order() {
+  TEST_SRC=$(nt_src)
   # 预警必须挂在「本次确实会打开打卡页」上：两种路径都在 open_page 之前。
   # 用函数体定位，不绑行号——重构时可以搬动代码，但不能改变这个相对顺序。
   t_has "P 条件一：屏幕已亮 + 探测可用" "$TEST_SRC" '[ "${WAS_ON:-0}" = "1" ] && [ -n "$SU_MODE" ]'
@@ -96,7 +111,7 @@ nt_case_warn_order() {
     'fafu-warn-' "$(t_call open_page)"
   t_has "冷却基准落盘为文件" "$TEST_SRC" 'NTLAST="$MODDIR/.fafu_notify_last"'
   t_has "冷却读取自文件" "$TEST_SRC" '_last=$("$BB" cat "$NTLAST"'
-  t_has "发出后写回文件" "$TEST_SRC" 'echo "$now_s" > "$NTLAST"'
+  t_has "发出后写回文件" "$TEST_SRC" 'echo "$now_ts" > "$NTLAST"'
   # 契约（设备实测后新增）：拿到新 token 就**提前**关页，让前台尽早回到用户手里。
   # 判据是「提前关页早于兜底唤醒」，用那句日志做锚点而不是注释行。
   t_before "拿到 token 即提前关页（早于兜底唤醒）" "$TEST_SRC" \
@@ -125,6 +140,7 @@ EOF
 }
 
 nt_case_state_text() {
+  TEST_SRC=$(nt_src)
   t_has "存在 state_text() 映射函数" "$TEST_SRC" 'state_text() {'
   t_has "映射：1 → 已签到" "$TEST_SRC" '1) echo "已签到" ;;'
   t_has "映射：2 → 已请假" "$TEST_SRC" '2) echo "已请假" ;;'
@@ -134,6 +150,7 @@ nt_case_state_text() {
 }
 
 nt_case_time_points() {
+  TEST_SRC=$(nt_src)
   t_before "22:00 起判定，23:00 分支在其后" "$TEST_SRC" \
     'if [ $now -ge 1320 ]' 'if [ $now -ge 1380 ]'
   t_has "22:30 分支" "$TEST_SRC" 'elif [ $now -ge 1350 ]'
@@ -142,6 +159,7 @@ nt_case_time_points() {
 }
 
 nt_case_probe_wiring() {
+  TEST_SRC=$(nt_src)
   t_has "已注册 notify 子命令" "$TEST_SRC" 'notify)    cmd_notify; exit $?'
   t_has "存在 cmd_notify() 实现" "$TEST_SRC" 'cmd_notify() {'
   t_has "notify 也执行降权探测（否则 SU_MODE 为空）" "$TEST_SRC" \

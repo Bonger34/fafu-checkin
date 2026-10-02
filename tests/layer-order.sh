@@ -236,12 +236,41 @@ B
   t_ne "坏清单：清单为空时失败" "$LO_RC" 0
 }
 
-# 真实仓库：默认清单必须通过（现在只有入口脚本，拆分后变成入口 + 各层）
+# 注释不是引用：函数体里提到更后层的函数名（例如解释某个变量名的由来）不算调用。
+# 没有这条，守卫会把「说明性注释」判成违规，逼着作者为了过检查而删掉有用的注释。
+lo_case_comment_not_reference() {
+  lo_fixture
+  lo_layer a.sh <<'A'
+early() {
+  # 这里提到 late 只是为了说明某个变量名的由来，并非调用
+  echo "early"
+}
+A
+  lo_layer b.sh <<'B'
+late() {
+  echo "late"
+}
+B
+  lo_layer c.sh <<'C'
+cmd_run() {
+  early
+}
+C
+  lo_run "a.sh b.sh c.sh"
+  t_eq "注释里提到更后层的函数名：不算违规（退出码 0）" "$LO_RC" 0
+  lo_hasnt "注释不产生违规" '违规'
+}
+
+# 真实仓库：默认清单必须通过，且清单来自入口的 FAFU_LAYERS（唯一真源）
 lo_case_repo_manifest() {
   LO_OUT=$(cd "$T_ROOT" && sh tools/check-layer-order.sh 2>&1)
   LO_RC=$?
   t_eq "真实仓库：层序检查通过（退出码 0）" "$LO_RC" 0
   lo_has "真实仓库：报告函数数与层文件数" '层序检查通过'
+  t_eq "真实仓库：清单覆盖全部 9 个层文件" \
+    "$(printf '%s\n' "$LO_OUT" | sed -n 's/^层序检查 · 清单：//p' | wc -w)" 9
+  lo_has "真实仓库：清单含第一层" 'lib/base.sh'
+  lo_has "真实仓库：清单含最后一层" 'lib/commands.sh'
 }
 
 # ---- 注册（顺序即执行顺序） ----
@@ -251,6 +280,7 @@ t_case "layer · 反向引用样本必须失败" lo_case_reverse_reference_fails
 t_case "layer · 动态分派走白名单" lo_case_dynamic_dispatch
 t_case "layer · 白名单缺失时明确失败" lo_case_whitelist_missing
 t_case "layer · 坏清单（缺文件 / 重复 / 空）" lo_case_same_file_and_missing
+t_case "layer · 注释不算引用" lo_case_comment_not_reference
 t_case "layer · 真实仓库清单" lo_case_repo_manifest
 t_case "layer · 真实仓库白名单内容" lo_case_repo_whitelist
 t_case "layer · 违规报告的形态" lo_case_report_shape

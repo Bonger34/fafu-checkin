@@ -11,14 +11,32 @@
 #   - dev 构建用于日常测试（带 commit 标识，可追溯），
 #     并会移除 module.prop 中的 updateJson（不参与管理器更新检测，
 #     避免开发版被提示升级到正式版）；
-#   - 发布构建保留 updateJson，文件名与 update.json 的 zipUrl 对应。
+#   - 发布构建保留 updateJson，文件名与 update.json 的 zipUrl 对应；
+#   - 库层清单从入口脚本的 FAFU_LAYERS 读（唯一真源，与层序守卫、断言同源）；
+#   - 层文件是只读数据：给 644，不带可执行位；
+#   - 打包完成后逐个核对产物里确实有每个文件，缺一个就构建失败——
+#     半装（少一层）是最难排查的失败模式，必须在这里拦住。
 # ============================================================
 set -e
 cd "$(dirname "$0")"
 ROOT="$PWD"
 
+# 打包依赖 Info-ZIP：zip 造包、unzip 核对产物。缺了就先说清楚缺什么，
+# 而不是让 zip/unzip 自己的报错混在构建输出里
+for c in zip unzip; do
+  if ! command -v "$c" >/dev/null 2>&1; then
+    echo "打包失败：找不到 $c（打包与产物核对需要 Info-ZIP 的 zip / unzip）" >&2
+    exit 1
+  fi
+done
+
+. "$ROOT/tools/lib.sh"
+LIBFILES=$(read_layers "$ROOT")
+[ -n "$LIBFILES" ] || { echo "打包失败：读不出层清单（$ROOT/fafu_checkin.sh 里的 FAFU_LAYERS）" >&2; exit 1; }
+
 VER=$(sed -n 's/^version=//p' module.prop | head -n1)
 FILES="module.prop customize.sh service.sh action.sh uninstall.sh fafu_checkin.sh"
+DIRS="lib"
 
 MODE="$1"
 if [ "$MODE" = "dev" ]; then
@@ -33,11 +51,15 @@ if [ "$MODE" = "dev" ]; then
   for f in $FILES; do
     cp -p "$f" "$STAGE/"
   done
+  for d in $DIRS; do
+    cp -pR "$d" "$STAGE/$d"
+  done
   grep -v '^updateJson=' "$STAGE/module.prop" > "$STAGE/module.prop.new"
   mv "$STAGE/module.prop.new" "$STAGE/module.prop"
   # 统一权限（避免受 umask 影响）
   chmod 644 "$STAGE/module.prop"
   chmod 755 "$STAGE"/*.sh
+  chmod 644 "$STAGE"/lib/*.sh
   SRC="$STAGE"
   NOTE="（开发版：已移除 updateJson，不参与更新检测）"
 else
@@ -46,13 +68,25 @@ else
   # 统一权限（避免受 umask 影响）
   chmod 644 "$ROOT/module.prop"
   chmod 755 "$ROOT"/*.sh
+  chmod 644 "$ROOT"/lib/*.sh
   NOTE=""
 fi
 
 mkdir -p "$ROOT/dist"
 rm -f "$OUT"
 
-(cd "$SRC" && zip -X -r "$OUT" $FILES > /dev/null)
+(cd "$SRC" && zip -X -r "$OUT" $FILES $DIRS > /dev/null)
+
+# ---- 校验产物（缺文件即失败，不给「半装」留机会） ----
+ALLFILES="$FILES $LIBFILES"
+LISTING=$(unzip -l "$OUT")
+for f in $ALLFILES; do
+  if ! printf '%s\n' "$LISTING" | grep -q " $f\$"; then
+    echo "打包失败：产物里缺少 $f" >&2
+    exit 1
+  fi
+done
+echo "产物校验通过：$(printf '%s' "$ALLFILES" | wc -w) 个文件（含全部层文件）"
 
 echo "已生成: dist/$(basename "$OUT") $NOTE"
 echo ""
