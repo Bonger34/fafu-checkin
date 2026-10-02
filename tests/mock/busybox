@@ -2,17 +2,20 @@
 # ============================================================
 # mock busybox —— 只接管「取当前时间」，其余 applet 透传给真实 busybox
 #
-# 为什么需要它：被测脚本一律用 "$BB" date ... 取时间，把 $BB_OVERRIDE 指到本文件
-# 就等于给整条链路拨钟，不必改动被测源码（这是测试缝之一：时间源注入）。
+# 为什么需要它：被测脚本一律用 "$BB" date ... 取时间，把 BB_OVERRIDE 指到
+# 「转发到本文件的包装脚本」就等于给整条链路拨钟，不必改动被测源码。
+# 包装脚本由 tests/harness.sh 的 t_bb_wrap 生成（它负责设置下面的 BB_REAL，
+# 并把本文件当一个 sh 脚本跑起来）——**不要**把 BB_OVERRIDE 直接指向本文件：
+# 本文件自身可执行时 BB_REAL 为空，会自我递归。
 #
-# 环境变量（均由用例设置）：
+# 环境变量（由包装脚本与用例设置）：
 #   BB_REAL        真实 busybox 的路径（必需；Windows 上是 busybox.exe）
 #   MOCK_DATE_CTL  形如「2026-10-01 22:05」的文件；只影响 +%Y-%m-%d / +%Y%m%d /
 #                  +%H:%M / +%H / +%M，其余格式（含 +%s）走真实时间
 #   MOCK_DATE_FMT  仅输出一个格式串时的回退格式（默认 +%s）
 #
-# 调用方式由 tests/harness.sh 决定：非 Windows 下是 `sh tests/mock/busybox` 前缀，
-# Windows 下是 `<busybox.exe> sh tests/mock/busybox` 前缀。
+# 当前用例只用到「透传」这一半；拨钟那一半留给需要跨日/时点判定的用例
+# （设置 MOCK_DATE_CTL 即可）。
 # ============================================================
 BB_REAL="${BB_REAL:-busybox}"
 MOCK_DATE_FMT="${MOCK_DATE_FMT:-+%s}"

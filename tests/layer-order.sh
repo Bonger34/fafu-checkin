@@ -3,7 +3,7 @@
 #
 # 光「检查能通过」不能证明守卫有用——它可能是个永远为真的摆设。
 # 本文件用一份**临时的反向引用样本**（更早的层调用更后的层）验证守卫确实会失败，
-# 再用白名单样本、合法反向样本、坏清单样本钉住它的行为边界。
+# 再用白名单样本、变量分派样本、坏清单样本钉住它的行为边界。
 # ============================================================
 
 LO_WORK="$T_WORK_ROOT/layer-order"
@@ -12,8 +12,10 @@ lo_fixture() {
   rm -rf "$LO_WORK"
   mkdir -p "$LO_WORK/tools"
   cp "$T_ROOT/tools/check-layer-order.sh" "$LO_WORK/tools/check-layer-order.sh"
-  # 不放仓库自带白名单：守卫会退回内建名单（_ntc / SU_MODE / cmd），
-  # 需要别的白名单时由用例自己写（"白名单文件缺失时的回退"这条路径也因此被覆盖）
+  cp "$T_ROOT/tools/lib.sh" "$LO_WORK/tools/lib.sh"
+  # 默认给一份空白名单：多数用例不关心白名单，只关心清单与调用方向；
+  # 需要具体白名单的用例自己覆盖，测「白名单缺失」的用例自己删掉。
+  printf '%s\n' '# 空白名单' > "$LO_WORK/tools/layer-whitelist.txt"
   LO_RC=""
   LO_OUT=""
 }
@@ -24,7 +26,7 @@ lo_layer() {
 }
 
 # 以 $LO_WORK 为仓库根跑一次守卫，结果落 $LO_RC / $LO_OUT
-# 白名单取临时仓库里的那份（不存在时守卫会退回内建名单，这条路径也被覆盖到）
+# 白名单取临时仓库里的那份（缺失即失败的行为另有专门用例）
 lo_run() {
   LO_OUT=$(LAYER_ROOT="$LO_WORK" LAYER_FILES="${1:-a.sh b.sh c.sh}" \
     LAYER_WHITELIST="$LO_WORK/tools/layer-whitelist.txt" \
@@ -39,8 +41,9 @@ lo_run_wl() {
   LO_RC=$?
 }
 
-# 白名单文件不存在时的回退：守卫应退回内建名单，不能静默把白名单当成空
-lo_case_whitelist_fallback() {
+# 白名单缺失时的行为：必须明确失败，不能静默当成空名单（那样会把动态分派全判成违规，
+# 或者反过来悄悄放过——两种都让人查不出原因）
+lo_case_whitelist_missing() {
   lo_fixture
   lo_layer a.sh <<'A'
 notify() {
@@ -58,17 +61,10 @@ cmd_run() {
   notify
 }
 C
-  lo_run_wl "$LO_WORK/tools/根本没这个文件.txt"
-  t_eq "白名单缺失：退回内建名单，检查通过" "$LO_RC" 0
-  lo_hasnt "白名单缺失：没有因为读不到白名单就误报" '违规'
-}
-
-# 断言：真实仓库的白名单确实被守卫引用（守卫通过 + 白名单里有那三项）
-lo_case_repo_whitelist() {
-  t_file "仓库带 tools/layer-whitelist.txt" "$T_ROOT/tools/layer-whitelist.txt"
-  t_has "白名单含 _ntc" "$T_ROOT/tools/layer-whitelist.txt" '_ntc'
-  t_has "白名单含 SU_MODE" "$T_ROOT/tools/layer-whitelist.txt" 'SU_MODE'
-  t_has "白名单含 cmd" "$T_ROOT/tools/layer-whitelist.txt" 'cmd'
+  rm -f "$LO_WORK/tools/layer-whitelist.txt"
+  lo_run
+  t_ne "白名单缺失：守卫必须明确失败" "$LO_RC" 0
+  lo_has "白名单缺失：说明缺的是哪个文件" '找不到动态分派白名单'
 }
 
 # 断言：检查输出里出现某字符串
@@ -179,12 +175,36 @@ C
   lo_has "空白名单：报出被分派到更后层的函数" 'cmd_status'
 }
 
-# 仓库自带的白名单：文件必须在，且三项都在（内容本身是人工维护的契约）
-lo_case_repo_whitelist_in_use() {
+# 仓库自带的白名单：文件必须在，且关键项都在（内容本身是人工维护的契约）
+lo_case_repo_whitelist() {
   t_file "仓库带 tools/layer-whitelist.txt" "$T_ROOT/tools/layer-whitelist.txt"
   t_has "白名单含 _ntc（通知命令字符串）" "$T_ROOT/tools/layer-whitelist.txt" '_ntc'
   t_has "白名单含 SU_MODE（降权写法）" "$T_ROOT/tools/layer-whitelist.txt" 'SU_MODE'
-  t_has "白名单含 cmd（命令表分派）" "$T_ROOT/tools/layer-whitelist.txt" 'cmd'
+}
+
+# 守卫报的错必须指出「是谁调用了谁」，否则维护者还得自己去翻源码
+lo_case_report_shape() {
+  lo_fixture
+  lo_layer a.sh <<'A'
+early() {
+  late
+}
+A
+  lo_layer b.sh <<'B'
+late() {
+  echo x
+}
+B
+  lo_layer c.sh <<'C'
+cmd_run() {
+  early
+}
+C
+  lo_run
+  t_ne "报告：必须失败" "$LO_RC" 0
+  lo_has "报告：含调用者与所在层" 'early@a.sh'
+  lo_has "报告：含被调用者与它所属的层" 'late（定义于更后的 b.sh）'
+  lo_has "报告：给出违规处数" '1 处调用方向'
 }
 
 lo_case_same_file_and_missing() {
@@ -229,8 +249,8 @@ lo_case_repo_manifest() {
 t_case "layer · 合法层序通过" lo_case_valid_order
 t_case "layer · 反向引用样本必须失败" lo_case_reverse_reference_fails
 t_case "layer · 动态分派走白名单" lo_case_dynamic_dispatch
-t_case "layer · 仓库白名单内容" lo_case_repo_whitelist_in_use
-t_case "layer · 白名单缺失时退回内建" lo_case_whitelist_fallback
+t_case "layer · 白名单缺失时明确失败" lo_case_whitelist_missing
 t_case "layer · 坏清单（缺文件 / 重复 / 空）" lo_case_same_file_and_missing
 t_case "layer · 真实仓库清单" lo_case_repo_manifest
-t_case "layer · 真实仓库白名单" lo_case_repo_whitelist
+t_case "layer · 真实仓库白名单内容" lo_case_repo_whitelist
+t_case "layer · 违规报告的形态" lo_case_report_shape

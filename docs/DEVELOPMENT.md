@@ -105,7 +105,7 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 | `uninstall.sh` | 卸载：停进程 / 关页面 / 清理运行时文件 |
 | `update.json` | 更新检测源（`module.prop` 的 `updateJson` 指向它） |
 | `tools/run-tests.sh` · `tests/` | 断言总入口与用例（§5.1；不打进模块 zip） |
-| `tools/check-layer-order.sh` | 层序守卫（一层只能引用更早加载的层） |
+| `tools/check-layer-order.sh` · `tools/layer-whitelist.txt` | 层序守卫与它的动态分派白名单 |
 
 ### 2.1.1 通知机制
 
@@ -308,20 +308,25 @@ sh build.sh                                 # 构建
 
 **断言总入口 `tools/run-tests.sh`**（`tests/` 下的用例文件；harness 见 `tests/harness.sh`）：
 
-- 基线：**137 项**（`layer` 29 + `notify` 108），改动后应保持全绿；任一项失败时脚本以非 0 退出；
+- 基线：**136 项**（`layer` 28 + `notify` 108），改动后应保持全绿；任一项失败时脚本以非 0 退出；
 - 断言只描述**外部行为**——返回码、状态文件产物、交给系统执行的命令字符串、
-  「某个时刻会发生什么」；不绑行号、不绑函数内部结构，重构搬代码不应制造假红灯；
+  「某个时刻会发生什么」；不绑行号，重构搬代码不应制造假红灯；
 - 用例通过 `tests/harness.sh` **直接加载真实的库**（`TEST_LIB_FILES`；重构过渡期用
-  `TEST_BOUNDARY` 只截取库段），而不是从源码里抽取片段再拼接；
-- 时间源通过 `BB_OVERRIDE` + `tests/mock/busybox` 注入（把 `"$BB" date` 拨到任意时刻），
-  降权写法通过 `SU_MODE`、通知命令通过 `NOTIFY_CMD` 注入——不新增专用测试后门；
+  `TEST_BOUNDARY` 只截取库段，边界找不到时明确失败），而不是从源码里抽取片段再拼接；
+- 注入缝沿用运行时既有开关，不加测试专用后门：时间走 `BB_OVERRIDE` + `tests/mock/busybox`
+  （设 `MOCK_DATE_CTL` 即可把 `"$BB" date` 拨到任意时刻；当前断言还没用到拨钟，跨日/时点
+  用例落地时直接设它即可），降权写法走 `SU_MODE`，通知命令走 `NOTIFY_CMD`；
 - 本机没有独立 `sh`：把 busybox 放到 `tools/busybox/`（该目录不入库），或用
-  `TEST_BUSYBOX=<路径>` 指定；CI 直接用 ubuntu 的系统 `sh`（断言脚本保持 POSIX 兼容）。
+  `TEST_BUSYBOX=<路径>` 指定；CI 先装 `busybox-static` 再用系统 `sh` 跑
+  （断言脚本保持 POSIX 兼容）；
+- 按关键字筛选用例时，含非 ASCII 的关键字在 Windows 控制台上会因代码页被改写，
+  优先用 `^layer` / `^notify` 这类纯 ASCII 前缀。
 
-**用例的两个套件**：
+**两个套件**：
 
 - `tests/layer-order.sh`：层序守卫自证——用临时的**反向引用样本**验证守卫确实会失败
-  （证明它不是永远为真的摆设），并钉住白名单、坏清单（缺文件 / 重复 / 空）的行为；
+  （证明它不是永远为真的摆设），并钉住白名单（含缺失时必须明确失败）、坏清单
+  （缺文件 / 重复 / 空）的行为；
 - `tests/notify.sh`：通知的调用点、文案模板、tag、冷却、去重、降权命令构造，
   以及少数**相对顺序**不变量（探测排在子命令分发之前、开页预警排在 `open_page` 之前）。
 

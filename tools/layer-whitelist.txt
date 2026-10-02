@@ -1,5 +1,5 @@
 # 动态分派白名单：命令名写在变量里，静态判不出「这一层引用了谁」。
-# tools/check-layer-order.sh 会读这个文件；每行一个变量名，# 之后是注释。
+# tools/check-layer-order.sh 会读这个文件（找不到即失败）；每行一个变量名，# 之后是注释。
 # 加一条就要写清理由——白名单越短，守卫越有用。
 
 # 通知命令字符串（notify 里以 $SU_MODE "$_ntc" 执行）
@@ -7,6 +7,3 @@ _ntc
 
 # 降权写法（su - shell -c 等候选，由 probe_su 探测后写入）
 SU_MODE
-
-# 命令表分派里的处理函数名（commands 层按表分发）
-cmd

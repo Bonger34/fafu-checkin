@@ -21,16 +21,15 @@ T_FAIL=0
 # 仓库根目录：本文件位于 <root>/tests/
 T_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
+# busybox 定位与 tools/ 共用（避免本机与 CI 各用一套规则）
+. "$T_ROOT/tools/lib.sh"
+
 # ---- 被测源码清单（依赖顺序；必须是库里实际加载的顺序） ----
 # 重构过渡期：库与程序仍在同一个文件里，tests/ 通过 TEST_BOUNDARY 只截取库段。
-# 拆分完成后：把 lib 文件名按入口加载顺序追加到 TEST_LIB_FILES，并删掉 TEST_BOUNDARY。
+# 拆分完成后：把 lib 文件名按入口加载顺序追加到 TEST_LIB_FILES，并清空 TEST_BOUNDARY。
+# 层清单的真源在 tools/check-layer-order.sh（守卫那边），这里不重复维护一份。
 TEST_LIB_FILES="fafu_checkin.sh"
 TEST_BOUNDARY='# ---- 子命令分发 ----'
-TEST_LAYERS="base state api device notify desc signin keepalive commands"
-TEST_LAYER_MAX_LINES=150
-
-# 随附 busybox 的候选位置（本地是仓库内 tools/busybox/busybox.exe；CI 直接用系统 sh）
-T_BB_CANDIDATES='tools/busybox/busybox tools/busybox/busybox.exe /data/adb/ksu/bin/busybox /data/adb/magisk/busybox'
 
 # 用例工作目录：临时文件、mock 工具链、驱动脚本都放这里，跑完保留供排查
 T_WORK_ROOT="$T_ROOT/tests/.work"
@@ -39,25 +38,9 @@ T_WORK_ROOT="$T_ROOT/tests/.work"
 # shell / 工具链定位
 # ------------------------------------------------------------
 
-# 查找随附 busybox；只在确实存在可执行文件时输出路径，否则输出空串。
-# 注意不能用 `command -v busybox` 的结果直接当命令用：busybox 的 ash 会把内建 applet
-# 也列出来，在 Windows 上会得到一个 PATH 里并不存在的名字。
+# 查找随附 busybox（实现在 tools/lib.sh，与守卫共用同一套规则）
 t_find_busybox() {
-  local c p q
-  if [ -n "${T_BUSYBOX:-}" ]; then
-    if [ -f "$T_BUSYBOX" ] || [ -x "$T_BUSYBOX" ]; then printf '%s' "$T_BUSYBOX"; fi
-    return 0
-  fi
-  for c in $T_BB_CANDIDATES; do
-    case "$c" in /*) p="$c" ;; *) p="$T_ROOT/$c" ;; esac
-    if [ -f "$p" ]; then
-      printf '%s' "$p"
-      return 0
-    fi
-  done
-  q=$(command -v busybox 2>/dev/null || true)
-  if [ -n "$q" ] && [ -f "$q" ] && [ -x "$q" ]; then printf '%s' "$q"; fi
-  return 0
+  find_busybox
 }
 
 # 输出「以本机 shell 执行某个脚本」的命令前缀
@@ -98,7 +81,8 @@ t_bb_wrap() {
   printf '%s' "$out"
 }
 
-# 「今天」（YYYY-MM-DD）；用真实 busybox 取，避免受 mock 时钟影响
+# 「今天」（YYYY-MM-DD）：用真实 busybox 取，绕开 mock 时钟。
+# 用例用它断言「落到状态文件里的日期就是今天」——断言因此不依赖具体日期。
 t_today() {
   local bb
   bb=$(t_find_busybox)
@@ -227,32 +211,12 @@ t_has() {
   fi
 }
 
-# 文件里出现该扩展正则：t_has_re <说明> <文件> <正则>
-t_has_re() {
-  local n
-  n=$(_t_grep_count "$3" -E "$2")
-  if [ -n "$n" ] && [ "$n" -ge 1 ]; then
-    _t_pass "$1 ($n 处)"
-  else
-    _t_fail "$1（未匹配 [$3]）"
-  fi
-}
-
 # 文件里不该出现该字符串：t_hasnt <说明> <文件> <模式>
 t_hasnt() {
   local n
   n=$(_t_grep_count "$3" -F "$2")
   [ -n "$n" ] || n=0
   if [ "$n" -eq 0 ]; then _t_pass "$1"; else _t_fail "$1（不该出现 [$3]，实际 $n 处）"; fi
-}
-
-# 该 shell 函数已定义：t_fn <说明> <函数名>
-t_fn() {
-  if command -v "$2" >/dev/null 2>&1; then
-    _t_pass "$1"
-  else
-    _t_fail "$1（未定义函数 $2）"
-  fi
 }
 
 # 相对顺序：t_before <说明> <文件> <前模式> <后模式>
@@ -279,8 +243,12 @@ t_call() {
 # ------------------------------------------------------------
 
 # 拼出被测库字符串放到 $1。
-# 过渡期做法：库段仍在 fafu_checkin.sh 里，按 TEST_BOUNDARY 只取标记之前的部分。
-# 这样断言可以 source 真实的库（而不是从源码里抽取片段再拼接），分层完成后改为整文件加载。
+#
+# 过渡期做法：库段仍在 fafu_checkin.sh 里，按 TEST_BOUNDARY 只取标记之前的部分，
+# 这样断言可以 source 真实的库（而不是从源码里抽取片段再拼接）。
+# 声明了 TEST_BOUNDARY 却在源码里找不到它时必须**明确失败**：静默地整文件加载会把
+# 程序段（子命令分发）也执行一遍，测试会以难以理解的方式炸掉。
+# 分层完成后把 TEST_BOUNDARY 清空即可（那时每个文件本身就是库）。
 t_write_lib() {
   local out f src n
   out="$1"
@@ -288,10 +256,15 @@ t_write_lib() {
   for f in $TEST_LIB_FILES; do
     src="$T_ROOT/$f"
     if [ ! -f "$src" ]; then
-      echo "找不到被测源码：$src" >&2
+      echo "找不到被测源码：$src（见 tests/harness.sh 的 TEST_LIB_FILES）" >&2
       return 1
     fi
-    if [ -n "$TEST_BOUNDARY" ] && grep -qF -e "$TEST_BOUNDARY" -- "$src" 2>/dev/null; then
+    if [ -n "$TEST_BOUNDARY" ]; then
+      if ! grep -qF -e "$TEST_BOUNDARY" -- "$src" 2>/dev/null; then
+        echo "源码里找不到库段边界 [$TEST_BOUNDARY]：$f" >&2
+        echo "（边界改名或已拆层时，请同步 tests/harness.sh 的 TEST_BOUNDARY）" >&2
+        return 1
+      fi
       n=$(grep -nF -m1 -e "$TEST_BOUNDARY" -- "$src" | cut -d: -f1)
       sed -n "1,$((n - 1))p" "$src" >> "$out"
     else

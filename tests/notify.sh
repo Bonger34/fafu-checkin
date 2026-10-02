@@ -19,8 +19,6 @@ nt_setup() {
   rm -rf "$T_WORK"
   mkdir -p "$T_WORK"
   T_BB=$(t_find_busybox)
-  # 把「今天」固定下来，让状态文件里的日期与模板日期可比
-  printf '%s' "$(t_today)" > "$T_WORK/today"
   t_bb_wrap "$T_WORK/bin/bb" >/dev/null
   if ! t_write_lib "$T_WORK/part.sh"; then
     echo "无法拼出被测库（见 tests/harness.sh 的 TEST_LIB_FILES）"
@@ -30,15 +28,35 @@ nt_setup() {
   NT_BB="$T_WORK/bin/bb"
 }
 
-# 跑一个驱动脚本；用法：nt_run <名字>，脚本内容从 stdin 读入
+# 生成驱动脚本的公共前导（环境 + 注入点），落到 $T_WORK/_env.sh 供各驱动 source。
+# 约定：调用方先 \`cat > "$T_WORK/_env.sh"\`，再按自己的断言写主体，详见 nt_case_*。
+# 这里集中三件事：把时间/降权/通知命令三个注入点接上、加载真实的库、把日期固定下来。
+nt_write_env() {
+  cat > "$T_WORK/_env.sh" <<ENV
+PATH='/bin:/usr/bin'
+T_ROOT='$T_ROOT'
+T_WORK='$T_WORK'
+
+# 注入点：时间走 $BB_OVERRIDE，降权写法走 SU_MODE，通知命令走 NOTIFY_CMD（本次未用到）
+NOTIFY=1; NOTIFY_LEAD=5; NOTIFY_COOLDOWN=300
+SU_BIN=/bin/true            # 降权探测先看 su 是否存在，这里给一个必然存在的替身
+
+. '$NT_PART'                # 直接加载真实的库（不是从源码里抽片段再拼接）
+SU_MODE=nt_cap              # 把降权写法指向记录函数，即可断言「最终交给系统执行的命令」
+PL=20261001                 # 库顶层会用真实日期初始化 PL，这里改回固定值
+ENV
+}
+
+# 跑一个驱动脚本；用法：nt_run <名字>，主体从 stdin 读入（公共前导自动接在前面）
 nt_run() {
-  _name="$1"
-  cat > "$T_WORK/$_name.sh"
-  ( cd "$T_WORK" && $(t_sh) "./$_name.sh" ) \
-    > "$T_WORK/$_name.out" 2> "$T_WORK/$_name.err"
-  if [ -s "$T_WORK/$_name.err" ]; then
-    echo "  （驱动 $_name 的 stderr）"
-    sed 's/^/    /' "$T_WORK/$_name.err"
+  cat > "$T_WORK/_body.sh"
+  cp "$T_WORK/_env.sh" "$T_WORK/$1.sh"
+  cat "$T_WORK/_body.sh" >> "$T_WORK/$1.sh"
+  ( cd "$T_WORK" && $(t_sh) "./$1.sh" ) \
+    > "$T_WORK/$1.out" 2> "$T_WORK/$1.err"
+  if [ -s "$T_WORK/$1.err" ]; then
+    echo "  （驱动 $1 的 stderr）"
+    sed 's/^/    /' "$T_WORK/$1.err"
   fi
 }
 
@@ -156,18 +174,9 @@ nt_case_probe_wiring() {
 
 nt_case_command() {
   nt_setup
+  nt_write_env
   nt_run cmd <<DRIVER
-PATH='/bin:/usr/bin'
-T_BB='$T_BB'
-T_WORK='$T_WORK'
-PART='$NT_PART'
-NOTIFY=1; NOTIFY_LEAD=5; NOTIFY_COOLDOWN=300; PL=20261001
-LOG="\$T_WORK/x.log"
-SU_BIN=/bin/true
-. "\$PART"
-SU_MODE=nt_cap          # 把降权写法指向记录函数，即可断言「最终交给系统执行的命令」
 nt_cap() { printf '%s\n' "\$1" >> "\$T_WORK/cmd.log"; }
-PL=20261001
 
 _msg_sign;  notify "fafu-sign-\$PL"
 _msg_leave; notify "fafu-leave-\$PL"
@@ -204,18 +213,9 @@ DRIVER
 
 nt_case_templates() {
   nt_setup
+  nt_write_env
   nt_run msg <<DRIVER
-PATH='/bin:/usr/bin'
-T_BB='$T_BB'
-T_WORK='$T_WORK'
-PART='$NT_PART'
-NOTIFY=1; NOTIFY_LEAD=5; NOTIFY_COOLDOWN=300; PL=20261001
-LOG="\$T_WORK/x.log"
-SU_BIN=/bin/true
-. "\$PART"
-SU_MODE=nt_cap
 nt_cap() { printf '%s\n' "\$1" >> "\$T_WORK/msg.log"; }
-PL=20261001
 
 # 逐条模板：先发模板函数、再取标题正文，断言的就是 notify 真正会用的那两个值
 for m in sign supp seen leave failsign failtask nosign late miss; do
@@ -277,13 +277,9 @@ DRIVER
 
 nt_case_lib_load() {
   nt_setup
+  nt_write_env
   nt_run load <<DRIVER
-PATH='/bin:/usr/bin'
-T_BB='$T_BB'
-T_WORK='$T_WORK'
-LOG="\$T_WORK/x.log"
-SU_BIN=/bin/true
-. '$NT_PART'
+# 库加载缝：断言真的能直接加载真实源码，且加载本身没有任何副作用
 for f in probe_su notify notify_once notify_lead desc_text get_token api \
          refresh_token run_once keepalive_ping cmd_status state_text; do
   command -v "\$f" >/dev/null 2>&1 || echo "missing:\$f"

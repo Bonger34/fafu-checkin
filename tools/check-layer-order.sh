@@ -9,8 +9,10 @@
 #
 # 它做什么：
 #   1) 按清单顺序建立「函数 → 所属文件（层）」映射；
-#   2) 扫描每个函数体里出现的命令名，命中「更后层」定义的函数即报违规；
-#   3) 动态分派（命令名写在变量里、命令表分发）无法静态判定，走显式白名单。
+#   2) 扫描每个函数体，命中「更后层」定义的函数即报违规——包括
+#      `handler=cmd_status` 之后 `"$handler"` 这种经变量间接调用的写法；
+#   3) 命令名写在变量里、静态判不出目标的动态分派，走显式白名单
+#      （tools/layer-whitelist.txt，缺失即失败，不静默当成空名单）。
 #
 # 它是启发式的：只守住肉眼看不出的那条不变量，不做 shell 解析。
 # 违规时以非 0 退出，并打印「调用者 @ 文件 → 被调用者（定义于更后的 X）」。
@@ -20,35 +22,23 @@ set -e
 # 仓库根默认取本脚本的上一级；LAYER_ROOT 可覆盖，供测试用临时样本充当仓库
 ROOT="${LAYER_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$ROOT"
+. "$ROOT/tools/lib.sh"
 
-# ---- 层清单：必须与入口的加载顺序一致 ----
+# ---- 层清单：本仓库的唯一真源（入口加载顺序就是这里列出的顺序） ----
 # 过渡期（重构进行中）：能力仍都在入口脚本里，故清单只有它一个文件。
 # 拆分完成后改成按入口加载顺序列出全部层文件，例如：
 #   FILES="fafu_checkin.sh lib/base.sh lib/state.sh lib/api.sh ... lib/commands.sh"
 FILES="${LAYER_FILES:-fafu_checkin.sh}"
 SEEN=""
 
-BB="${TEST_BUSYBOX:-}"
-if [ -z "$BB" ]; then
-  for c in tools/busybox/busybox tools/busybox/busybox.exe; do
-    if [ -f "$c" ]; then BB="$ROOT/$c"; break; fi
-  done
-fi
-if [ -n "$BB" ]; then AWK="$BB awk"; else AWK=awk; fi
+AWK=$(pick_awk)
 
-# ---- 动态分派白名单：每行一个变量名，命中即跳过 ----
+# ---- 动态分派白名单：单一真源是仓库里的文件，缺失即失败（不静默当成空名单） ----
 WL="${LAYER_WHITELIST:-tools/layer-whitelist.txt}"
-WL_TMP=""
 if [ ! -f "$WL" ]; then
-  WL_TMP="$ROOT/tests/.work/layer-whitelist.builtin"
-  mkdir -p "$ROOT/tests/.work"
-  {
-    printf '%s\n' '# 动态分派白名单（命令名写在变量里，静态判不出来）'
-    printf '%s\n' '_ntc'      # 通知命令字符串（notify 里 $SU_MODE "$_ntc"）
-    printf '%s\n' 'SU_MODE'   # 降权写法（su - shell -c 等候选）
-    printf '%s\n' 'cmd'       # 命令表分发里的处理函数名
-  } > "$WL_TMP"
-  WL="$WL_TMP"
+  echo "层序检查失败：找不到动态分派白名单：$WL" >&2
+  echo "（白名单说明哪些变量承载动态分派，静态判不出；仓库里应有一份）" >&2
+  exit 1
 fi
 
 # 清单里的文件先由 shell 确认存在、且不重复出现
@@ -86,7 +76,7 @@ function mask_defs(line,   pre, n, pad, i) {
 BEGIN {
   nf = split(files, fl, " ")
   nfn = 0
-  nv = 0
+  nviol = 0
 
   for (fi = 1; fi <= nf; fi++) {
     while ((getline line < fl[fi]) > 0) {
@@ -147,14 +137,14 @@ BEGIN {
     close(fl[fi])
   }
 
-  if (nv > 0) {
-    for (i = 1; i <= nv; i++) {
-      split(v2[i], a, "\034")
+  if (nviol > 0) {
+    for (i = 1; i <= nviol; i++) {
+      split(viol[i], a, "\034")
       where = (a[2] == "") ? "(文件顶层)" : a[2]
       print "  违规: " a[1] "@" where " → " a[3] "（定义于更后的 " a[4] "）"
     }
     print ""
-    print "层序检查失败：上面 " nv " 处调用方向与加载顺序相反（一层只能引用更早加载的层）。"
+    print "层序检查失败：上面 " nviol " 处调用方向与加载顺序相反（一层只能引用更早加载的层）。"
     print "确实需要跨层回调时，把命令名放进白名单 " wl " 并写清理由。"
     exit 1
   }
@@ -218,8 +208,8 @@ function scan(fn,   line, i, ch, start, w, nextc, j, k, v, target, prev) {
       # 命中条件：目标是已定义的层函数、且属于更后加载的层；
       # 变量名与被指向的函数名都在白名单外；且这确实是命令位而不是赋值右侧
       if ((target in owner) && owner[target] > owner[fn] && !skip[w] && !skip[target] && prev != "=") {
-        nv++
-        v2[nv] = fn "\034" fname[fn] "\034" ((w in varmap) ? w "→" target : target) "\034" fname[target]
+        nviol++
+        viol[nviol] = fn "\034" fname[fn] "\034" ((w in varmap) ? w "→" target : target) "\034" fname[target]
       }
       prev = nextc
     } else {

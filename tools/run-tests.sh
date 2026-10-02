@@ -18,15 +18,10 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 export T_ROOT="$ROOT"
 
+. "$ROOT/tools/lib.sh"
+
 # ---- 定位随附 busybox；找不到就退回系统 sh（CI 路径） ----
-# 只认「仓库内随附」与显式指定的两份，不查 PATH：busybox 的 ash 会把内建 applet
-# 也报成 PATH 上的命令（`command -v busybox` 返回 busybox），据此 exec 会无限自我递归。
-BB="${TEST_BUSYBOX:-}"
-if [ -z "$BB" ]; then
-  for c in tools/busybox/busybox tools/busybox/busybox.exe; do
-    if [ -f "$c" ]; then BB="$ROOT/$c"; break; fi
-  done
-fi
+BB=$(find_busybox)
 
 # 已经在 busybox 的 ash 下（ash 会导出 $BUSYBOX）就不再套壳
 case "${BUSYBOX:-}" in
