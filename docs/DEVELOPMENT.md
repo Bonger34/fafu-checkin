@@ -106,7 +106,7 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 | `fafu_checkin.sh` | 入口：定位模块目录 → 加载配置 → 按序加载各层 → 命令分发 → 守护主循环 |
 | `lib/base.sh` | 环境与工具：模块/工具链定位、日志与轮转、时间源、原子写、键值读写、JSON 单字段 |
 | `lib/state.sh` | 运行时状态的**唯一读写者**：服务开关、签到记录、保活统计、完成标记、四类通知标记、通知冷却基准；对外只给语义函数，文件格式是它的契约 |
-| `lib/api.sh` | 接口：token 提取、请求签名、HTTP 调用 |
+| `lib/api.sh` | 接口：token 提取、请求签名、HTTP 调用（含 wget 超时选项探测）；`http_post` 是全程序唯一的网络出口 |
 | `lib/device.sh` | 设备控制：屏幕状态、前端任务枚举、打开/移除打卡页 |
 | `lib/notify.sh` | 通知：降权探测、文案表、发送、每日一次去重、打扰冷却 |
 | `lib/desc.sh` | 模块描述：读状态生成描述文本并写入（KernelSU 覆盖优先，回退改写元数据） |
@@ -148,6 +148,12 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
   读的是同一份 `disabled` 字面量，格式未变即不受影响；用一条断言
   （`tests/state.sh` 的「state · 收口边界」）钉住「只有 state 层与这一个例外持有状态文件名」。
   日志与 PID 文件不属于这五类状态，仍由 base 层与入口直接持有。
+- **网络调用只经 api 层**：`api()` 负责拼 URL 与签名，**真正发起请求的只有 `http_post()` 一处**
+  （wget 的调用参数、`Authorization` 头、被丢弃的 stderr 都写在它里面）；`-T` 超时选项在
+  api 层**加载时探测一次**（`WGET_T`）供它使用——探测与调用同层，改网络行为不必跨层找。
+  其余层不拼签名、也不直接调网络：`tests/api.sh` 用一条**命令位**判据（行首缩进后的真实调用，
+  注释里提到 wget 不算）钉住「命令位的 `$BB wget`/`curl` 全程序只有一处、且只在 api 层」。
+  这条缝也是测试的注入点：断言里覆盖同名函数就能离线构造响应体 / 失败 / 超时（见 §5.1）。
 - **缺层即响亮失败**：任一层缺失或不可读时，入口往模块日志写一行
   `模块不完整：缺少库层 <路径>` 并以非 0 退出。半装（入口在、层少一个）是最难排查的失败模式，
   宁可启动失败，也不要「某些功能悄悄不工作」。
@@ -299,8 +305,12 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 ### 3.2 busybox wget 行为
 
 - 401 等错误响应**不会输出正文**（拿不到服务端 message）
-- 判定失败要用**退出码**，不要 grep 响应体
-- `-T` 超时选项是编译开关，脚本启动时探测（`WGET_T`），不支持则省略
+- 判定失败要用**退出码**，不要 grep 响应体：`api()` 原样返回 wget 的退出码，
+  调用方只按它分流（超时与「token 失效」在 busybox wget 下根本区分不出来）
+- `-T` 超时选项是编译开关，api 层加载时探测一次（`WGET_T`），不支持则整段省略；
+  探测与调用同在 `lib/api.sh`，改网络行为不必跨层找
+- 请求由 `http_post()` 统一发出（`wget -q -O - --header=Authorization: ... --post-data=''`），
+  它的 stderr 被丢弃——错误正文本来就没有，留着只会污染调用方的 stderr
 
 ### 3.3 其他坑（都已在代码中修复，改动时注意保持）
 
@@ -366,13 +376,13 @@ sh build.sh                                 # 构建（含产物文件核对）
 
 **断言总入口 `tools/run-tests.sh`**（`tests/` 下的用例文件；harness 见 `tests/harness.sh`）：
 
-- 基线：**284 项**（`layer` 33 + `notify` 94 + `skeleton` 43 + `state` 114），改动后应保持全绿；
+- 基线：**329 项**（`api` 45 + `layer` 33 + `notify` 94 + `skeleton` 43 + `state` 114），改动后应保持全绿；
   任一项失败时脚本以非 0 退出；迁移前草稿版的计数（文档写的 92、提交记录里的 95/100）都不可靠——
   那版测试里有一个 `for` 循环因缺换行整段没执行、断言函数复用变量把部分结果静默覆盖；
   拆层前实测为 115 项。
-  本机（Windows）没有 `zip`/`unzip` 时，`skeleton` 里「打包产物校验」整段（6 条断言）会**跳过**
-  （计数上记为 `跳过 1 项`，不计入通过，避免「本机没跑」被读成「已验证」），此时报 278 项；
-  CI 上全跑，报 284 项；
+  本机（Windows）没有 `zip`/`unzip` 时，`skeleton` 里「打包产物校验」整段（13 条断言）会**跳过**
+  （计数上记为 `跳过 1 项`，不计入通过，避免「本机没跑」被读成「已验证」），此时报 329 项；
+  CI 上全跑，报 342 项；
 - 断言只描述**外部行为**——返回码、状态文件产物、交给系统执行的命令字符串、
   「某个时刻会发生什么」；不绑行号，重构搬代码不应制造假红灯。
   需要容忍「空白量可变」时（例如 case 分支的对齐空格）用 `t_has_re`（正则），
@@ -383,23 +393,36 @@ sh build.sh                                 # 构建（含产物文件核对）
 - 注入缝沿用运行时既有开关，不加测试专用后门：时间走 `BB_OVERRIDE` + `tests/mock/busybox`
   （设 `MOCK_DATE_CTL` 即可把 `"$BB" date` 拨到任意时刻，`tests/skeleton.sh` 与 `tests/state.sh`
   用它验时间源与跨日行为；秒位没有可控来源，完整时间戳固定输出 `:00`），
-  降权写法走 `SU_MODE`，通知命令走 `NOTIFY_CMD`；
-- mock 时间源需要一个**真实 busybox** 承接其余 applet：本机把它放到 `tools/busybox/`
+  降权写法走 `SU_MODE`，通知命令走 `NOTIFY_CMD`，
+  **网络走 `http_post`**（覆盖同名函数即可注入响应体 / 退出码，`tests/api.sh` 用它复现
+  「响应异常 / 超时」两条路径），token 目录走 `LD_DIR`（加载时生效；同一驱动内要换目录
+  直接改 `LD`）；
+  要看**真实发出的命令行**时，把 `MOCK_WGET_DIR` 指向一个控制目录，替身 busybox 会逐个记录
+  每次 wget 的参数并按 `help` / `body` / `rc` / `stderr` 四个文件应答（`tests/api.sh` 用它
+  钉住含超时选项与请求头的完整命令行）；
+- mock 替身需要一个**真实 busybox** 承接其余 applet：本机把它放到 `tools/busybox/`
   （该目录不入库）或用 `TEST_BUSYBOX=<路径>` 指定，CI 先装 `busybox-static`
-  （见 `.github/workflows/`）；三者统一由 `tools/lib.sh` 的 `find_busybox` 定位；
+  （见 `.github/workflows/`）；三者统一由 `tools/lib.sh` 的 `find_busybox` 定位。
+  替身只在对应控制变量被设置时接管那处环境事实（完全不设就等价于透传）：时间源
+  `MOCK_DATE_CTL`、`/dev/urandom`（`MOCK_RANDOM_CTL`；Windows 上没有这个设备，
+  签名随机数会退化成空串）、wget（`MOCK_WGET_DIR`）；其余 applet 一律透传；
 - 本机（Windows）没有系统 `sh` 时用 `busybox sh tools/run-tests.sh` 跑；
   断言脚本本身保持 POSIX 兼容，CI 直接用系统 `sh`；
 - 驱动脚本里的路径**一律用相对路径**（`cd` 进临时目录再以 `./x.sh` 运行）：
   Windows 的 `D:/...` 在 sh 里既没有根目录也会被当成分隔符，喂进被测代码会得到 `/mod/...`
   这类残缺路径（踩过）；被测代码在设备上用的仍是绝对路径，这里只是替身环境；
 - 按关键字筛选用例时，含非 ASCII 的关键字在 Windows 控制台上会因代码页被改写，
-  优先用 `^layer` / `^notify` / `^skeleton` / `^state` / `^desc` 这类纯 ASCII 前缀。
+  优先用 `^api` / `^layer` / `^notify` / `^skeleton` / `^state` / `^desc` 这类纯 ASCII 前缀。
 
-**四个套件**：
+**五个套件**：
 
 - `tests/layer-order.sh`：层序守卫自证——用临时的**反向引用样本**验证守卫确实会失败
   （证明它不是永远为真的摆设），并钉住白名单（含缺失时必须明确失败）、坏清单
   （缺文件 / 重复 / 空）与「注释不算引用」的行为；
+- `tests/api.sh`：api 层的三条口径——token 提取（按文件修改时间取最新那份里的最后一个，
+  leveldb 里的 NUL 与诱饵字段都覆盖）、签名串构造（解开 base64 逐段核对公式、随机数、
+  单行、密钥与接口地址未变）、网络注入点（覆盖 `http_post` 注入响应体 / 失败 / 超时，
+  断言 URL、查询串、退出码原样传递，以及真实 wget 命令行与超时选项探测的两条分支）；
 - `tests/notify.sh`：通知的调用点、文案模板、tag、冷却、去重、降权命令构造，
   以及少数**相对顺序**不变量（探测排在子命令分发之前、开页预警排在 `open_page` 之前）；
 - `tests/state.sh`：state 层的读写契约与 desc 层的呈现——五类状态的文件名/字段名/字段顺序/

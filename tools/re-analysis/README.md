@@ -18,7 +18,7 @@
 3. **解码**：用 `p(idx, key)` 逐条解码（`key` 是调用处的第二个参数，如 `t(177,"1d^G")`）；
 4. **验证**：解出的 `hashStr` 应指向标准 MD5；密钥应为 32 位可见字符串
    （当前值见 [docs/DEVELOPMENT.md](../../docs/DEVELOPMENT.md) §1.3）；
-5. **同步模块**：按 §4 更新 `fafu_checkin.sh` 中的 `SECRET` 与接口路径。
+5. **同步模块**：按 §4 更新 `lib/api.sh` 中的 `SECRET` 与接口路径。
 
 ## 验证样例（本实例，可复现）
 

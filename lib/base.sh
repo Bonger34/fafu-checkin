@@ -26,12 +26,6 @@ KSUD=/data/adb/ksu/bin/ksud
 [ -x "$KSUD" ] || KSUD=$(command -v ksud 2>/dev/null)
 [ -x "$KSUD" ] || KSUD=""
 
-# 探测 wget 是否支持 -T 超时选项（个别 busybox 构建未启用；不支持则自动省略）
-WGET_T=""
-case "$("$BB" wget --help 2>&1)" in
-  *"-T"*) WGET_T="-T 20" ;;
-esac
-
 # ---- 运行时文件（全部位于模块目录内，随模块卸载一并清除） ----
 # 日志路径入口会先设一次：库层缺失时 base 还没加载，那条失败日志只能就地写
 LOG="${LOG:-$MODDIR/fafu_checkin.log}"

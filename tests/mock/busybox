@@ -1,12 +1,19 @@
 #!/bin/sh
 # ============================================================
-# mock busybox —— 只接管「取当前时间」，其余 applet 透传给真实 busybox
+# mock busybox —— 只接管「环境事实」这三处，其余 applet 透传给真实 busybox
 #
-# 为什么需要它：被测脚本一律用 "$BB" date ... 取时间，把 BB_OVERRIDE 指到
-# 「转发到本文件的包装脚本」就等于给整条链路拨钟，不必改动被测源码。
+# 为什么需要它：被测脚本一律用 "$BB" 调用 applet，把 BB_OVERRIDE 指到
+# 「转发到本文件的包装脚本」就等于给整条链路换环境，不必改动被测源码。
 # 包装脚本由 tests/harness.sh 的 t_bb_wrap 生成（它负责设置下面的 BB_REAL，
 # 并把本文件当一个 sh 脚本跑起来）——**不要**把 BB_OVERRIDE 直接指向本文件：
 # 本文件自身可执行时 BB_REAL 为空，会自我递归。
+#
+# 接管的三处（都是「本机没有 / 不可控」的环境事实，不是被测行为本身；
+# 三个控制变量都不设时本文件完全等价于「透传给真实 busybox」）：
+#   1) 取当前时间（MOCK_DATE_CTL）；
+#   2) /dev/urandom（MOCK_RANDOM_CTL）—— 本机（Windows）没有这个设备，
+#      签名随机数会退化成空串；
+#   3) wget（MOCK_WGET_DIR）—— 记录「最终交给系统执行的命令行」并注入响应体 / 失败 / 超时。
 #
 # 环境变量（由包装脚本与用例设置）：
 #   BB_REAL        真实 busybox 的路径（必需；Windows 上是 busybox.exe）
@@ -14,9 +21,12 @@
 #                  +%H:%M / +%H / +%M / '+%Y-%m-%d %H:%M:%S'，其余格式（含 +%s）走真实时间。
 #                  秒位没有可控来源，固定成 :00 —— 需要比对秒数的断言请只验格式（两位数字）。
 #   MOCK_DATE_FMT  仅输出一个格式串时的回退格式（默认 +%s）
+#   MOCK_RANDOM_CTL 随机数替身的序号文件（设了才接管，且每次调用都不同）
+#   MOCK_WGET_DIR  wget 替身的控制目录（设了才接管；见下面的说明）
 #
 # 当前用例：多数只走「透传」这一半；tests/skeleton.sh 用 MOCK_DATE_CTL 真的拨钟
-# （验 base 层的时间源），跨日/时点用例落地时同样直接设它即可。
+# （验 base 层的时间源），跨日/时点用例同样直接设它；tests/api.sh 用 MOCK_WGET_DIR
+# 断言网络调用的命令行与响应注入。
 # ============================================================
 BB_REAL="${BB_REAL:-busybox}"
 MOCK_DATE_FMT="${MOCK_DATE_FMT:-+%s}"
@@ -48,6 +58,42 @@ if [ "$1" = "date" ] && [ -n "${MOCK_DATE_CTL:-}" ] && [ -f "$MOCK_DATE_CTL" ]; 
     # 这里必须先 shift 掉 applet 名：本文件是「busybox 替身」，$1 永远是 applet
     *)         shift; "$BB_REAL" date "$@" ;;
   esac
+  exit 0
+fi
+
+# ---- /dev/urandom：本机（Windows）没有这个设备 ----
+# 签名用的随机数取自它；设备不存在时 head 会失败、随机数退化成空串，
+# 「16 位字母数字」这条契约就没法在本地断言。**只在 MOCK_RANDOM_CTL 被设置时接管**
+# （与 wget 同样的口径：不设置就透传真实设备）。替身给出 24 字节内容（全是字母数字，
+# base64 之后仍是字母数字，正好够 tr + head 截出 16 位），序号放在**开头**——
+# 随机数只取 base64 的前 16 位（= 前 12 字节），序号放结尾就变不成不同的值。
+if [ "$1" = "head" ] && [ -n "${MOCK_RANDOM_CTL:-}" ] && [ "$4" = "/dev/urandom" ]; then
+  _seq=$(cat "$MOCK_RANDOM_CTL" 2>/dev/null | tr -dc '0-9')
+  _seq=$(( ${_seq:-0} + 1 ))
+  printf '%s\n' "$_seq" > "$MOCK_RANDOM_CTL" 2>/dev/null
+  printf '%06dmockrandomabcdefgh' "$_seq"
+  exit 0
+fi
+
+# ---- wget：仅当 MOCK_WGET_DIR 被设置时接管 ----
+# 控制文件都在该目录下（用例与驱动脚本用相对路径，CWD 是驱动脚本所在目录）：
+#   help    wget --help 的输出 → 决定 api 层是否探测到 -T 超时选项
+#   body    调用的响应体
+#   rc      调用的退出码（缺省 0）
+#   stderr  调用的报错正文（用来断言调用方确实把它丢掉了）
+#   calls   每次调用的**逐个参数**追加一行（由用例自己清空）
+if [ "$1" = "wget" ] && [ -n "${MOCK_WGET_DIR:-}" ]; then
+  if [ "$2" = "--help" ]; then
+    [ -f "$MOCK_WGET_DIR/help" ] && cat "$MOCK_WGET_DIR/help"
+  else
+    # 参数逐个落盘、用 | 分隔：$* 会把参数边界抹平，「一个含空格的参数」与
+    # 「两个参数」在记录里长得一模一样，命令行断言就悬空了
+    { for _a in "$@"; do printf '%s|' "$_a"; done; printf '\n'; } >> "$MOCK_WGET_DIR/calls" 2>/dev/null
+    cat "$MOCK_WGET_DIR/stderr" >&2 2>/dev/null
+    cat "$MOCK_WGET_DIR/body" 2>/dev/null
+    _rc=$(cat "$MOCK_WGET_DIR/rc" 2>/dev/null | tr -dc '0-9')
+    exit "${_rc:-0}"
+  fi
   exit 0
 fi
 
