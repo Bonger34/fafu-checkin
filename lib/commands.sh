@@ -62,7 +62,7 @@ cmd_status() {
   echo "====== 数字FAFU 晚查寝自动签到 ======"
   [ -n "$VER" ] && echo "版本: $VER"
   # 开关状态
-  if is_disabled; then echo "开关: ⏸ 已停用"; else echo "开关: 🟢 已启用"; fi
+  if svc_is_disabled; then echo "开关: ⏸ 已停用"; else echo "开关: 🟢 已启用"; fi
   # 服务状态
   if [ -f "$PIDF" ]; then
     pid=$("$BB" cat "$PIDF" 2>/dev/null)
@@ -75,13 +75,13 @@ cmd_status() {
     echo "服务: 未运行"
   fi
   # 保活状态（最近一次结果 + 今日统计）
-  ka_last=$(ka_state_get last)
+  ka_last=$(ka_last_time)
   if [ -z "$ka_last" ]; then
     echo "保活: 暂无记录"
   else
-    if [ "$(ka_state_get last_result)" = "ok" ]; then ka_mark="✅"; else ka_mark="❌"; fi
-    if [ "$(ka_state_get date)" = "$("$BB" date +%Y-%m-%d)" ]; then
-      echo "保活: 最近 $ka_last $ka_mark · 今日 $(ka_state_get ok) 成功 / $(ka_state_get fail) 失败"
+    if [ "$(ka_last_result)" = "ok" ]; then ka_mark="✅"; else ka_mark="❌"; fi
+    if ka_is_today; then
+      echo "保活: 最近 $ka_last $ka_mark · 今日 $(ka_ok_count) 成功 / $(ka_fail_count) 失败"
     else
       echo "保活: 最近 $ka_last $ka_mark（今日暂无记录）"
     fi
@@ -125,7 +125,7 @@ cmd_stop() {
 }
 
 cmd_enable() {
-  echo "enabled" > "$STATE"
+  svc_set enabled
   log "===== 服务已启用（操作按钮/命令） ====="
   sh "$SELF" start </dev/null >/dev/null 2>&1
   update_desc
@@ -134,7 +134,7 @@ cmd_enable() {
 }
 
 cmd_disable() {
-  echo "disabled" > "$STATE"
+  svc_set disabled
   log "===== 服务已停用（操作按钮/命令） ====="
   cmd_stop </dev/null >/dev/null 2>&1
   update_desc
@@ -143,7 +143,7 @@ cmd_disable() {
 }
 
 cmd_toggle() {
-  if is_disabled; then
+  if svc_is_disabled; then
     cmd_enable
   else
     cmd_disable

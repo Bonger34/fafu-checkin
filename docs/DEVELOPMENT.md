@@ -105,7 +105,7 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 |---|---|
 | `fafu_checkin.sh` | 入口：定位模块目录 → 加载配置 → 按序加载各层 → 命令分发 → 守护主循环 |
 | `lib/base.sh` | 环境与工具：模块/工具链定位、日志与轮转、时间源、原子写、键值读写、JSON 单字段 |
-| `lib/state.sh` | 运行时状态：服务开关、签到记录、保活统计、完成标记、四类通知标记 |
+| `lib/state.sh` | 运行时状态的**唯一读写者**：服务开关、签到记录、保活统计、完成标记、四类通知标记、通知冷却基准；对外只给语义函数，文件格式是它的契约 |
 | `lib/api.sh` | 接口：token 提取、请求签名、HTTP 调用 |
 | `lib/device.sh` | 设备控制：屏幕状态、前端任务枚举、打开/移除打卡页 |
 | `lib/notify.sh` | 通知：降权探测、文案表、发送、每日一次去重、打扰冷却 |
@@ -135,6 +135,19 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
   **一层只能引用更早加载的层**，由 `tools/check-layer-order.sh` 守着（注释里提到更后层的名字不算引用）；
   断言（`tests/harness.sh`）与打包（`build.sh`）也从入口读这份清单，不另存一份。
   注意 `keepalive` 必须早于 `signin`——签到决策会调用刷新流程。
+- **运行时状态只归 state 层**：模块目录里的运行时文件（开关 / 签到记录 / 保活统计 /
+  完成标记 / 通知标记 / 冷却基准）只有 `lib/state.sh` 读写，其余层与入口一律经它的语义函数：
+  开关 `svc_is_disabled` / `svc_set`，签到记录 `sign_get` / `sign_set`，
+  保活统计 `ka_counts` / `ka_ok_count` / `ka_fail_count` / `ka_last_time` / `ka_last_result` /
+  `ka_is_today` / `ka_note`，完成标记 `done_marked` / `done_mark`，
+  通知标记 `notify_marked` / `notify_mark`（事件名 `fail` / `nosign` / `late` / `miss`），
+  冷却基准 `nt_cooldown`。
+  文件名、字段名、字段顺序、内容格式是**对外契约**（升级后不丢当日记录），
+  「按日滚动」的三处判定（保活统计、完成标记、通知一日一次）也都只在本层发生。
+  **唯一例外是 `service.sh`**：它是开机脚本、不加载库层，只在启动前读一次开关文件——
+  读的是同一份 `disabled` 字面量，格式未变即不受影响；用一条断言
+  （`tests/state.sh` 的「state · 收口边界」）钉住「只有 state 层与这一个例外持有状态文件名」。
+  日志与 PID 文件不属于这五类状态，仍由 base 层与入口直接持有。
 - **缺层即响亮失败**：任一层缺失或不可读时，入口往模块日志写一行
   `模块不完整：缺少库层 <路径>` 并以非 0 退出。半装（入口在、层少一个）是最难排查的失败模式，
   宁可启动失败，也不要「某些功能悄悄不工作」。
@@ -178,10 +191,11 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
   `su shell /system/bin/sh -c`，**以 `id -u` 输出等于 2000 为准**），结果写入 `$SU_MODE` 并记入启动日志 `notify=[...]`；
   由 `start` 派生的守护进程通过 `FAFU_SU_MODE` 继承该结果，不重复探测；
 - 探测必须排在子命令 `case` **之前**——各分支会直接 `exit`，放后面就是永远执行不到的死代码；
-- 「首次失败」类通知用 `$NFAIL`，「未签到提醒」**三个时点各用一个标记文件**（`$NNOSIGN` / `$NLATE` / `$NMISS`）：
+- 「首次失败」类通知用同一个事件名 `fail`（其余三个是 `nosign` / `late` / `miss`），
+  由 state 层映射到各自独立的标记文件：**三个未签时点必须各用一个标记**，
   共用标记会让 22:00 那条把 23:00 那条「今晚未能自动签到」永久挡住；
-- `notify_once()` **先发送、成功后才落标记**：反过来的话一次瞬时失败会让该类提醒整天不再出现；
-- 预警冷却基准落在 `$NTLAST` 文件里，**不能放普通变量**：`refresh_token` 总在 `$( )` 子 shell 中调用，
+- `notify_once()` **先发送、成功后才经 state 层落标记**：反过来的话一次瞬时失败会让该类提醒整天不再出现；
+- 预警冷却基准落盘保存（state 层的 `nt_cooldown`），**不能放普通变量**：`refresh_token` 总在 `$( )` 子 shell 中调用，
   变量赋值会随子 shell 丢弃，导致冷却永不生效；
 - `PL`（日期 tag）在主循环中每轮重算，避免守护进程常驻跨日后 tag 仍停在启动那天；
 - 预警使用的提前量 `NOTIFY_LEAD` **只在屏幕已亮时生效**（`notify_lead()` 自带判断），
@@ -227,12 +241,16 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 2. 失败且允许唤醒时：`input keyevent 224` + `wm dismiss-keyguard` 后重试
 3. 收尾：`am stack remove` 清理页面任务（清理不彻底就留在后台，**不**主动切换用户前台；见 §2.1.1）
 
-**动态描述**（`update_desc` / `desc_text`）：
+**动态描述**（`desc_text` / `update_desc`，均在 `lib/desc.sh`）：
 
-- 内容：开关状态 + 签到日期时间（绝对日期，如 `🟢 已启用 · ✅ 09-14 已签到 21:30`）
+- 内容：开关状态 + 签到日期时间（绝对日期，如 `🟢 已启用 · ✅ 09-14 已签到 21:30`）；
+  数据只经 state 层读（开关 + 最近签到记录），本层不碰任何文件格式
 - 写入：KernelSU 用 `ksud module config set override.description`（官方机制）；
-  Magisk 回退为改写 `module.prop`
-- 触发：签到成功 / 检测到已签 / 开关切换 / 服务启动 / 守护每 10 分钟自检
+  Magisk 回退为改写 `module.prop`——改写前必须校验临时文件非空，
+  否则一次失败的读取会把模块元数据清空（管理器里连模块名都没了）
+- 触发：检测到已签到 / 已请假、签到或补签成功（`signin` 层）／启用、停用、`status`（`commands` 层）／
+  服务启动、已停用退出前、守护每约 10 分钟自检（入口）；调用点共 8 处，由 `tests/state.sh` 的
+  「desc · 触发点」钉住
 
 **服务开关**：状态文件 `fafu-checkin.state`（`enabled` / `disabled`）。
 停用 = 停进程 + 开机不启动 + 无网络请求。
@@ -252,17 +270,20 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 
 ### 2.3 运行时文件（均在模块目录内）
 
-| 文件 | 内容 |
-|---|---|
-| `fafu_checkin.log` | 日志（超 256KB 自动保留最近 1000 行） |
-| `fafu-checkin.state` | 开关状态 |
-| `fafu_checkin.status` | 最近签到记录（描述用） |
-| `fafu_keepalive.status` | 保活统计（今日成功/失败、最近 token） |
-| `.fafu_checkin.pid` | 守护进程 PID |
-| `.fafu_checkin_done` | 当日签到完成标记 |
-| `.fafu_notify_fail` | 当日「失败类通知」已发标记（`notify_once` 去重） |
-| `.fafu_notify_nosign` / `.fafu_notify_late` / `.fafu_notify_miss` | 22:00 / 22:30 / 23:00 三个未签时点各自的已发标记 |
-| `.fafu_notify_last` | 预警通知冷却基准（unix 秒；必须落盘，见 §2.1.1） |
+除日志与 PID 文件外，下表所有文件的读写都收口在 `lib/state.sh`（见 §2.1 的层结构约定）：
+其余层只经它的语义函数访问，不直接碰文件。
+
+| 文件 | 内容 | 写入者 |
+|---|---|---|
+| `fafu_checkin.log` | 日志（超 256KB 自动保留最近 1000 行） | base 层 `log` / `rotate_log` |
+| `.fafu_checkin.pid` | 守护进程 PID | 入口 |
+| `fafu-checkin.state` | 开关状态（`enabled` / `disabled`） | state 层 `svc_set` |
+| `fafu_checkin.status` | 最近签到记录（描述用） | state 层 `sign_set` |
+| `fafu_keepalive.status` | 保活统计（今日成功/失败、最近 token） | state 层 `ka_note` |
+| `.fafu_checkin_done` | 当日签到完成标记 | state 层 `done_mark` |
+| `.fafu_notify_fail` | 当日「失败类通知」已发标记（`notify_once` 去重） | state 层 `notify_mark fail` |
+| `.fafu_notify_nosign` / `.fafu_notify_late` / `.fafu_notify_miss` | 22:00 / 22:30 / 23:00 三个未签时点各自的已发标记 | state 层 `notify_mark nosign` / `late` / `miss` |
+| `.fafu_notify_last` | 预警通知冷却基准（unix 秒；必须落盘，见 §2.1.1） | state 层 `nt_cooldown` |
 
 ---
 
@@ -345,38 +366,48 @@ sh build.sh                                 # 构建（含产物文件核对）
 
 **断言总入口 `tools/run-tests.sh`**（`tests/` 下的用例文件；harness 见 `tests/harness.sh`）：
 
-- 基线：**170 项**（`layer` 33 + `notify` 87 + `skeleton` 50），改动后应保持全绿；
+- 基线：**284 项**（`layer` 33 + `notify` 94 + `skeleton` 43 + `state` 114），改动后应保持全绿；
   任一项失败时脚本以非 0 退出；迁移前草稿版的计数（文档写的 92、提交记录里的 95/100）都不可靠——
   那版测试里有一个 `for` 循环因缺换行整段没执行、断言函数复用变量把部分结果静默覆盖；
   拆层前实测为 115 项。
-  本机（Windows）没有 `zip`/`unzip` 时，`skeleton` 里「打包产物校验」整段（13 条断言）会**跳过**
-  （计数上记为 `跳过 1 项`，不计入通过，避免「本机没跑」被读成「已验证」），此时报 157 项；
-  CI 上全跑，报 170 项；
+  本机（Windows）没有 `zip`/`unzip` 时，`skeleton` 里「打包产物校验」整段（6 条断言）会**跳过**
+  （计数上记为 `跳过 1 项`，不计入通过，避免「本机没跑」被读成「已验证」），此时报 278 项；
+  CI 上全跑，报 284 项；
 - 断言只描述**外部行为**——返回码、状态文件产物、交给系统执行的命令字符串、
-  「某个时刻会发生什么」；不绑行号，重构搬代码不应制造假红灯；
+  「某个时刻会发生什么」；不绑行号，重构搬代码不应制造假红灯。
+  需要容忍「空白量可变」时（例如 case 分支的对齐空格）用 `t_has_re`（正则），
+  不要用 `t_has` 写死空格；
 - 用例通过 `tests/harness.sh` **直接加载真实层文件**：清单由 `tools/lib.sh` 的 `read_layers`
   从入口的 `FAFU_LAYERS` 读出（唯一真源），不再有「从源码里截取库段」的过渡机制；
   静态断言面对的是「各层 + 入口」按加载顺序拼出的全程序文本（`t_write_program`，只读不执行）；
 - 注入缝沿用运行时既有开关，不加测试专用后门：时间走 `BB_OVERRIDE` + `tests/mock/busybox`
-  （设 `MOCK_DATE_CTL` 即可把 `"$BB" date` 拨到任意时刻，`tests/skeleton.sh` 用它验时间源），
+  （设 `MOCK_DATE_CTL` 即可把 `"$BB" date` 拨到任意时刻，`tests/skeleton.sh` 与 `tests/state.sh`
+  用它验时间源与跨日行为；秒位没有可控来源，完整时间戳固定输出 `:00`），
   降权写法走 `SU_MODE`，通知命令走 `NOTIFY_CMD`；
 - mock 时间源需要一个**真实 busybox** 承接其余 applet：本机把它放到 `tools/busybox/`
   （该目录不入库）或用 `TEST_BUSYBOX=<路径>` 指定，CI 先装 `busybox-static`
   （见 `.github/workflows/`）；三者统一由 `tools/lib.sh` 的 `find_busybox` 定位；
 - 本机（Windows）没有系统 `sh` 时用 `busybox sh tools/run-tests.sh` 跑；
   断言脚本本身保持 POSIX 兼容，CI 直接用系统 `sh`；
+- 驱动脚本里的路径**一律用相对路径**（`cd` 进临时目录再以 `./x.sh` 运行）：
+  Windows 的 `D:/...` 在 sh 里既没有根目录也会被当成分隔符，喂进被测代码会得到 `/mod/...`
+  这类残缺路径（踩过）；被测代码在设备上用的仍是绝对路径，这里只是替身环境；
 - 按关键字筛选用例时，含非 ASCII 的关键字在 Windows 控制台上会因代码页被改写，
-  优先用 `^layer` / `^notify` / `^skeleton` 这类纯 ASCII 前缀。
+  优先用 `^layer` / `^notify` / `^skeleton` / `^state` / `^desc` 这类纯 ASCII 前缀。
 
-**三个套件**：
+**四个套件**：
 
 - `tests/layer-order.sh`：层序守卫自证——用临时的**反向引用样本**验证守卫确实会失败
   （证明它不是永远为真的摆设），并钉住白名单（含缺失时必须明确失败）、坏清单
   （缺文件 / 重复 / 空）与「注释不算引用」的行为；
 - `tests/notify.sh`：通知的调用点、文案模板、tag、冷却、去重、降权命令构造，
   以及少数**相对顺序**不变量（探测排在子命令分发之前、开页预警排在 `open_page` 之前）；
+- `tests/state.sh`：state 层的读写契约与 desc 层的呈现——五类状态的文件名/字段名/字段顺序/
+  内容格式逐字节断言（含「旧版本写下的文件仍读得出」）、跨日归零与按日滚动（用拨钟验证）、
+  通知「发送失败不落标记」、描述文案逐字比对、写入契约（改写元数据仍保留其余行、
+  临时文件为空时拒绝写入）与 8 处描述触发点；
 - `tests/skeleton.sh`：base 层原语（键值读写、JSON 单字段、原子写、可拨钟的时间源、日志轮转）、
-  入口装配（缺一层时写日志并以非 0 退出；层齐时子命令分发可用）、打包管道
+  入口装配（缺一层时写日志并以非 0 退出；层齐时子命令分发可用；开关文件往返）、打包管道
   （产物含每个层文件；少一层即构建失败）。
 
 **覆盖不到的边界**（只能上机目视验证，见 §5.3）：`su` / `cmd notification post` 的真实送达、

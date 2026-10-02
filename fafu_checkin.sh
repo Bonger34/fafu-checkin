@@ -59,6 +59,7 @@
 #        $MODDIR/.fafu_notify_late      22:30 窗口切换提醒已发
 #        $MODDIR/.fafu_notify_miss      23:00 最终未签提醒已发
 #        $MODDIR/.fafu_notify_last      预警冷却基准（unix 秒）
+#   除日志与 PID 文件外，上面这些运行时状态的读写都归 lib/state.sh（其余层只经它访问）
 # ============================================================
 
 export PATH="/system/bin:/system/xbin:/data/adb/ksu/bin:/data/adb/magisk:$PATH"
@@ -98,6 +99,9 @@ unset _layer _err
 
 # ---- 子命令分发 ----
 CMD="$1"
+# 今日日期 tag（YYYYMMDD）：通知 tag 与「当日首次」判定都用它。
+# 守护主循环每轮会重算一次——进程常驻，跨日后 tag 不应仍停在启动那天。
+PL=$(today_tag)
 # 通知降权探测：必须在分发之前执行——各通知类子命令都会在分支里直接 exit，
 # 放在 case 之后会成为永远执行不到的死代码（曾踩过）。最长阻塞 1 秒。
 case "$CMD" in
@@ -119,7 +123,7 @@ esac
 
 # ---- 启动守护进程（后台化 + 单实例） ----
 if [ -z "$FAFU_DAEMON" ]; then
-  if is_disabled; then
+  if svc_is_disabled; then
     echo "服务已停用（可点击操作按钮或运行 enable 启用）"
     update_desc
     exit 0
@@ -147,7 +151,7 @@ DESC_TICK=0
 ROT_TICK=0
 while true; do
   # 已被停用 → 刷新描述后退出（保持“停用 = 无进程”语义）
-  if is_disabled; then
+  if svc_is_disabled; then
     log "检测到服务已停用，守护进程退出"
     update_desc
     rm -f "$PIDF"
@@ -165,37 +169,35 @@ while true; do
     ROT_TICK=60
   fi
   ROT_TICK=$((ROT_TICK-1))
-  h=$("$BB" date +%H); m=$("$BB" date +%M)
-  h=${h#0}; m=${m#0}; [ -z "$h" ] && h=0; [ -z "$m" ] && m=0
-  now=$((h * 60 + m))
-  PL=$("$BB" date +%Y%m%d)   # 每轮重算：守护进程常驻，跨日后 tag 不应仍停在启动那天
+  now=$(now_minutes)
+  PL=$(today_tag)   # 每轮重算：守护进程常驻，跨日后 tag 不应仍停在启动那天
   # ---- 未签到提醒：22:00（还剩 30 分钟）/ 22:30（窗口已过，进入补签）/ 23:00（补签窗口关闭） ----
   # 依据签到状态文件判定：当日已解决（已签到/已补签/已检测/已请假）则一律不发，避免假警报
   if [ $now -ge 1320 ]; then
-    sd=$(status_get sign_date); sk=$(status_get sign_kind)
-    if [ "$sd" = "$("$BB" date +%Y-%m-%d)" ] && [ "$sk" != "" ]; then
+    sd=$(sign_get sign_date); sk=$(sign_get sign_kind)
+    if [ "$sd" = "$(today)" ] && [ "$sk" != "" ]; then
       :   # 当日状态已解决（含请假）→ 不提醒
     else
       # 三个时点各自独立标记：越晚的时点信息越关键，不能被更早的那条挡住
       if [ $now -ge 1380 ]; then
-        _msg_miss;   notify_once "fafu-miss-$PL"   "$NMISS"
+        _msg_miss;   notify_once "fafu-miss-$PL"   miss
       elif [ $now -ge 1350 ]; then
-        _msg_late;   notify_once "fafu-t2230-$PL"  "$NLATE"
+        _msg_late;   notify_once "fafu-t2230-$PL"  late
       else
-        _msg_nosign; notify_once "fafu-t2200-$PL"  "$NNOSIGN"
+        _msg_nosign; notify_once "fafu-t2200-$PL"  nosign
       fi
     fi
   fi
   # ---- 主窗口 21:30~22:30；补签时段 22:30~23:00（失败重试，最后一次不晚于 22:59 发起） ----
   if [ $now -ge 1290 ] && [ $now -le 1379 ]; then
-    if [ "$("$BB" cat "$DONE" 2>/dev/null)" != "$("$BB" date +%Y-%m-%d)" ]; then
+    if ! done_marked; then
       run_once; rc=$?
-      [ $rc -eq 0 ] && "$BB" date +%Y-%m-%d > "$DONE"
+      [ $rc -eq 0 ] && done_mark
       [ $rc -eq 2 ] && { sleep 240; continue; }
     fi
   elif [ "$KEEPALIVE" = "1" ] && [ $now -ge 420 ] && [ $now -lt 1285 ]; then
     # ---- 白天保活 07:00~21:25，每 15 分钟一次 ----
-    now_ts=$("$BB" date +%s)
+    now_ts=$(now_s)
     if [ $((now_ts - KA_LAST)) -ge 900 ]; then
       KA_LAST=$now_ts
       keepalive_ping

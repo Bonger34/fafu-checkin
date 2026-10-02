@@ -30,7 +30,7 @@ run_once() {
     if [ $rc -ne 0 ] || ! echo "$resp" | "$BB" grep -q '"records"'; then
       log "获取任务失败: rc=$rc $(echo "$resp" | "$BB" head -c 120)"
       _msg_failtask
-      notify_once "fafu-failtask-$PL" "$NFAIL"
+      notify_once "fafu-failtask-$PL" fail
       return 2
     fi
   fi
@@ -54,8 +54,7 @@ run_once() {
   if [ "$state" != "0" ] && [ $(( now - dline )) -lt 21600000 ]; then
     log "[$name] $(state_text "$state")"
     # 记录检测到的签到信息（仅当今天尚无记录时）
-    d=$(status_get sign_date)
-    if [ "$d" != "$("$BB" date +%Y-%m-%d)" ]; then
+    if [ "$(sign_get sign_date)" != "$(today)" ]; then
       stime=""
       sst=$(echo "$resp" | "$BB" grep -o '"signTime":[0-9]*' | "$BB" head -n 1 | "$BB" cut -d: -f2)
       case "$sst" in
@@ -63,9 +62,9 @@ run_once() {
         *) stime=$("$BB" date -d "@$((sst / 1000))" +%H:%M 2>/dev/null) ;;
       esac
       if [ "$state" = "2" ]; then
-        status_set "$("$BB" date +%Y-%m-%d)" "" "leave"
+        sign_set "$(today)" "" "leave"
       else
-        status_set "$("$BB" date +%Y-%m-%d)" "$stime" "detected"
+        sign_set "$(today)" "$stime" "detected"
       fi
     fi
     update_desc
@@ -97,15 +96,15 @@ run_once() {
   fi
   if [ $rc -eq 0 ] && ! echo "$resp2" | "$BB" grep -q '"timestamp"'; then
     et=$(echo "$resp" | "$BB" grep -o '"endTime":[0-9]*' | "$BB" head -n 1 | "$BB" cut -d: -f2)
-    td=$("$BB" date +%Y-%m-%d); hm=$("$BB" date +%H:%M)
+    td=$(today); hm=$(now_hm)
     if [ -n "$et" ] && [ "$now" -gt "$et" ]; then
       log "✅ 补签成功 [$name]"
-      status_set "$td" "$hm" "supplement"
+      sign_set "$td" "$hm" "supplement"
       _msg_supp
       notify "fafu-supp-$PL"
     else
       log "✅ 签到成功 [$name]"
-      status_set "$td" "$hm" "normal"
+      sign_set "$td" "$hm" "normal"
       _msg_sign
       notify "fafu-sign-$PL"
     fi
@@ -115,6 +114,6 @@ run_once() {
   # 签到提交失败：当日仅首次通知（之后的重试只写日志，避免刷屏）
   log "签到失败: rc=$rc $(echo "$resp2" | "$BB" head -c 120)"
   _msg_failsign
-  notify_once "fafu-failsign-$PL" "$NFAIL"
+  notify_once "fafu-failsign-$PL" fail
   return 1
 }

@@ -219,6 +219,31 @@ sk_case_entry_dispatch() {
   t_has "未知子命令：打印用法" "$SK_WORK/usage.out" "用法: sh "
 }
 
+# 开关文件的往返：夹具按**旧版本写下的格式**写文件，入口必须原样读出来。
+# 这条跨过了「夹具 → 真实入口」两侧，是「格式没变」这件事最直接的一条断言。
+sk_case_entry_switch_file() {
+  local d rc stat
+  sk_setup
+  d=$(sk_stage_module "$SK_WORK/entry3")
+  stat="$d/fafu-checkin.state"
+
+  printf 'disabled\n' > "$stat"
+  ( cd "$d" && BB_OVERRIDE="$SK_WORK/bin/bb" $(t_sh) "./fafu_checkin.sh" status ) \
+    > "$SK_WORK/off.out" 2> "$SK_WORK/off.err"
+  rc=$?
+  t_eq "停用态：status 正常退出" "$rc" 0
+  t_has "停用态：status 报告已停用" "$SK_WORK/off.out" "开关: ⏸ 已停用"
+  t_has "停用态：描述也显示已停用" "$SK_WORK/off.out" "描述: ⏸ 已停用"
+
+  printf 'enabled\n' > "$stat"
+  ( cd "$d" && BB_OVERRIDE="$SK_WORK/bin/bb" $(t_sh) "./fafu_checkin.sh" status ) \
+    > "$SK_WORK/on.out" 2> "$SK_WORK/on.err"
+  rc=$?
+  t_eq "启用态：status 正常退出" "$rc" 0
+  t_has "启用态：status 报告已启用" "$SK_WORK/on.out" "开关: 🟢 已启用"
+  t_has "启用态：描述也显示已启用" "$SK_WORK/on.out" "描述: 🟢 已启用"
+}
+
 # ============================================================
 # 打包：清单、权限、产物校验
 # ============================================================
@@ -273,4 +298,5 @@ t_case "skeleton · base · 时间源可拨钟" sk_case_base_clock
 t_case "skeleton · base · 日志轮转" sk_case_base_rotate
 t_case "skeleton · 入口 · 缺层时明确失败" sk_case_entry_missing_layer
 t_case "skeleton · 入口 · 装配与命令分发" sk_case_entry_dispatch
+t_case "skeleton · 入口 · 开关文件往返（旧格式仍可读）" sk_case_entry_switch_file
 t_case "skeleton · 打包 · 产物含全部层文件" sk_case_package

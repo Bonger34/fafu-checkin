@@ -20,11 +20,9 @@ refresh_token() { # $1=旧token；$2=允许唤醒重试(1=是,0=否，默认1)�
   # （熄屏时不开预警：用户看不见，且静默开页本就不打扰。）
   # 冷却用于防突发：一次刷新失败可能连锁触发多次 refresh_token，避免连续弹同一条。
   if [ "${WAS_ON:-0}" = "1" ] && [ -n "$SU_MODE" ]; then
-    now_ts=$("$BB" date +%s)
-    _last=$("$BB" cat "$NTLAST" 2>/dev/null | "$BB" tr -dc '0-9')
-    [ -n "$_last" ] || _last=0
-    if [ $((now_ts - _last)) -ge "$NOTIFY_COOLDOWN" ]; then
-      echo "$now_ts" > "$NTLAST" 2>/dev/null
+    now_ts=$(now_s)
+    if [ $((now_ts - $(nt_cooldown))) -ge "$NOTIFY_COOLDOWN" ]; then
+      nt_cooldown "$now_ts"
       _NT_TITLE="🔄 正在刷新登录状态"
       _NT_TEXT="$(notify_lead) 秒后自动打开打卡页（用于刷新登录），完成后自动关闭，无需操作"
       notify "fafu-warn-$PL"
@@ -81,19 +79,19 @@ keepalive_ping() {
   [ -n "$tok" ] || return 0
   resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$tok"); rc=$?
   if [ $rc -eq 0 ] && echo "$resp" | "$BB" grep -q '"records"'; then
-    ka_record ok "$tok"
-    log "保活: ✅ token 有效 $tok (今日 $(ka_state_get ok) 成功 / $(ka_state_get fail) 失败)"
+    ka_note ok "$tok"
+    log "保活: ✅ token 有效 $tok (今日 $(ka_ok_count) 成功 / $(ka_fail_count) 失败)"
     return 0
   fi
   # 调用未成功：可能 token 已失效，也可能只是网络异常（busybox wget 不输出错误正文，无法区分）
-  ka_record fail "$tok"
-  okc=$(ka_state_get ok); failc=$(ka_state_get fail)
+  ka_note fail "$tok"
+  okc=$(ka_ok_count); failc=$(ka_fail_count)
   # 屏幕亮着时延后刷新：避免白天出现无解释的页面弹出，留待熄屏（静默刷新）或签到时段处理
   if screen_is_on; then
     log "保活: ❌ 调用失败 $tok (今日 $okc 成功 / $failc 失败) — 屏幕亮着，延后（熄屏或签到时段自动刷新）"
     return 0
   fi
-  now_ts=$("$BB" date +%s)
+  now_ts=$(now_s)
   if [ $((now_ts - KA_LAST_REFRESH)) -lt 1800 ]; then
     log "保活: ❌ 调用失败 $tok (今日 $okc 成功 / $failc 失败) — 刷新冷却中，稍后再试"
     return 0

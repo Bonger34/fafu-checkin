@@ -84,21 +84,32 @@ nt_case_defs() {
            _msg_failsign _msg_failtask _msg_nosign _msg_late _msg_miss; do
     t_has "函数存在：$f()" "$TEST_SRC" "$f()"
   done
-  for v in "SU_MODE=" "_NT_TITLE=" "_NT_TEXT=" "NTLAST=" "PL=" "NFAIL=" \
-           "NNOSIGN=" "NLATE=" "NMISS=" "NOTIFY=" "NOTIFY_LEAD=" \
-           "NOTIFY_COOLDOWN=" "SU_BIN="; do
+  for v in "SU_MODE=" "_NT_TITLE=" "_NT_TEXT=" "PL=" \
+           "NOTIFY=" "NOTIFY_LEAD=" "NOTIFY_COOLDOWN=" "SU_BIN="; do
     t_has "已定义 $v" "$TEST_SRC" "$v"
   done
+  # 通知标记与冷却基准的归属地是 state 层：notify 层只经它访问，不再持有文件路径
+  t_hasnt "notify 层不再持有通知标记路径" "$TEST_SRC" 'NTLAST="$MODDIR'
+  t_has "每日一次的判定经 state 层" "$TEST_SRC" 'notify_marked "$2" && return 0'
+  t_has "发送成功后才经 state 层落标记" "$TEST_SRC" "$(t_call notify_mark '"$2"')"
 }
 
 nt_case_call_sites() {
   local t
   TEST_SRC=$(nt_src)
   for t in 'notify "fafu-sign-$PL"' 'notify "fafu-supp-$PL"' 'notify "fafu-leave-$PL"' \
-           'notify "fafu-warn-$PL"' 'notify_once "fafu-failsign-$PL"' \
-           'notify_once "fafu-failtask-$PL"' 'notify_once "fafu-t2200-$PL"' \
-           'notify_once "fafu-t2230-$PL"' 'notify_once "fafu-miss-$PL"'; do
+           'notify "fafu-warn-$PL"' 'notify_once "fafu-failsign-$PL" fail' \
+           'notify_once "fafu-failtask-$PL" fail' \
+           'notify_once "fafu-t2200-$PL"  nosign' \
+           'notify_once "fafu-t2230-$PL"  late' \
+           'notify_once "fafu-miss-$PL"   miss'; do
     t_has "调用点：$t" "$TEST_SRC" "$t"
+  done
+  # 事件名写错等于当天提醒静默失效：四个事件名必须都在 state 层的映射表里。
+  # 用正则容忍分支缩进（写死空格会让一次排版改动制造假红灯），但要求「事件名 → 变量」这个形状。
+  for e in fail nosign late miss; do
+    t_has_re "state 层把事件 $e 映射到标记文件" "$TEST_SRC" \
+      "^[ ]*$e\\)[ ]*printf '%s' \"\\\$N"
   done
 }
 
@@ -109,9 +120,12 @@ nt_case_warn_order() {
   t_has "P 条件一：屏幕已亮 + 探测可用" "$TEST_SRC" '[ "${WAS_ON:-0}" = "1" ] && [ -n "$SU_MODE" ]'
   t_before "开页预警排在 open_page 之前（静默路径也会预警）" "$TEST_SRC" \
     'fafu-warn-' "$(t_call open_page)"
-  t_has "冷却基准落盘为文件" "$TEST_SRC" 'NTLAST="$MODDIR/.fafu_notify_last"'
-  t_has "冷却读取自文件" "$TEST_SRC" '_last=$("$BB" cat "$NTLAST"'
-  t_has "发出后写回文件" "$TEST_SRC" 'echo "$now_ts" > "$NTLAST"'
+  # 冷却基准必须落盘（refresh_token 在 $( ) 子 shell 里调用它，普通变量赋值会丢）；
+  # 落盘的归属地是 state 层：这里断言的是「经状态层读写」而不是「自己写文件」
+  t_has "冷却基准经 state 层读取" "$TEST_SRC" '$(nt_cooldown)'
+  t_has "冷却基准经 state 层写回" "$TEST_SRC" 'nt_cooldown "$now_ts"'
+  t_has "冷却基准的落盘实现只在 state 层" "$T_ROOT/lib/state.sh" 'NTLAST="$MODDIR/.fafu_notify_last"'
+  t_hasnt "keepalive 层不再自己写冷却文件" "$T_ROOT/lib/keepalive.sh" '> "$NTLAST"'
   # 契约（设备实测后新增）：拿到新 token 就**提前**关页，让前台尽早回到用户手里。
   # 判据是「提前关页早于兜底唤醒」，用那句日志做锚点而不是注释行。
   t_before "拿到 token 即提前关页（早于兜底唤醒）" "$TEST_SRC" \
@@ -155,7 +169,7 @@ nt_case_time_points() {
     'if [ $now -ge 1320 ]' 'if [ $now -ge 1380 ]'
   t_has "22:30 分支" "$TEST_SRC" 'elif [ $now -ge 1350 ]'
   t_has "当日已解决（含请假）不提醒" "$TEST_SRC" \
-    '[ "$sd" = "$("$BB" date +%Y-%m-%d)" ] && [ "$sk" != "" ]'
+    '[ "$sd" = "$(today)" ] && [ "$sk" != "" ]'
 }
 
 nt_case_probe_wiring() {
@@ -179,11 +193,13 @@ nt_case_probe_wiring() {
   t_has "守护进程继承探测结果（不重复探测）" "$TEST_SRC" 'FAFU_SU_MODE'
   t_has "启动日志记录通知链路状态" "$TEST_SRC" 'notify=[${SU_MODE:-不可用}]'
   t_has "S7 回归：PL 在守护主循环内重算（跨日 tag 不滞留）" "$TEST_SRC" \
-    'PL=$("$BB" date +%Y%m%d)' 2
+    'PL=$(today_tag)' 2
   t_has "S4 回归：拒绝用空文件覆盖 module.prop" "$TEST_SRC" '[ -s "$tmp" ]'
-  t_has "22:00 标记" "$TEST_SRC" 'NNOSIGN="$MODDIR/.fafu_notify_nosign"'
-  t_has "22:30 标记" "$TEST_SRC" 'NLATE="$MODDIR/.fafu_notify_late"'
-  t_has "23:00 标记" "$TEST_SRC" 'NMISS="$MODDIR/.fafu_notify_miss"'
+  # 四类通知标记的归属地是 state 层：文件名与事件映射都在那里，这里只钉住这条边界
+  t_has "22:00 标记在 state 层" "$T_ROOT/lib/state.sh" 'NNOSIGN="$MODDIR/.fafu_notify_nosign"'
+  t_has "22:30 标记在 state 层" "$T_ROOT/lib/state.sh" 'NLATE="$MODDIR/.fafu_notify_late"'
+  t_has "23:00 标记在 state 层" "$T_ROOT/lib/state.sh" 'NMISS="$MODDIR/.fafu_notify_miss"'
+  t_has "失败类标记在 state 层" "$T_ROOT/lib/state.sh" 'NFAIL="$MODDIR/.fafu_notify_fail"'
 }
 
 # ============================================================
@@ -203,12 +219,11 @@ WAS_ON=0; lead_off=\$(notify_lead)
 WAS_ON=1
 # NOTIFY=0 时 notify / notify_once 必须零调用
 NOTIFY=0; _msg_miss; notify "fafu-miss-\$PL"; NOTIFY=1
-# 当日标记未写时才发；发送成功后标记落盘
-: > "\$T_WORK/guard"
-_msg_miss; notify_once "fafu-miss-\$PL" "\$T_WORK/guard"
-_msg_miss; notify_once "fafu-miss-\$PL" "\$T_WORK/guard"
+# 当日标记未写时才发；发送成功后标记落盘（标记的归属地是 state 层，这里只传事件名）
+_msg_miss; notify_once "fafu-miss-\$PL" miss
+_msg_miss; notify_once "fafu-miss-\$PL" miss
 printf 'lead_on=%s\nlead_off=%s\n' "\$lead_on" "\$lead_off" > "\$T_WORK/lead.txt"
-printf 'guard=%s\n' "\$(cat "\$T_WORK/guard")" > "\$T_WORK/guard.txt"
+printf 'guard=%s\n' "\$(cat "\$MODDIR/.fafu_notify_miss")" > "\$T_WORK/guard.txt"
 DRIVER
 
   t_lines "三条命令（2 条 notify + 1 条 once）" "$T_WORK/cmd.log" 3
@@ -249,14 +264,15 @@ printf '%s\t%s\n' "\$_NT_TITLE" "\$_NT_TEXT" >> "\$T_WORK/msg.txt"
 notify "fafu-warn-\$PL"
 
 # 发送失败：notify_once 必须返回非 0，且不得落当日标记（否则一次瞬时失败=整天不再提醒）
-rm -f "\$T_WORK/guard"
+printf '%s\n' '2026-10-01 20:00' > "\$T_WORK/clock"
+rm -f "\$MODDIR/.fafu_notify_fail"
 SU_MODE=false
-if _msg_miss && notify_once "fafu-miss2-\$PL" "\$T_WORK/guard"; then
+if _msg_miss && notify_once "fafu-failsign-\$PL" fail; then
   echo 'once_rc=0' >> "\$T_WORK/msg.txt"
 else
   echo 'once_rc=1' >> "\$T_WORK/msg.txt"
 fi
-if [ -f "\$T_WORK/guard" ]; then
+if notify_marked fail; then
   echo 'guard=written' >> "\$T_WORK/msg.txt"
 else
   echo 'guard=absent' >> "\$T_WORK/msg.txt"
@@ -298,12 +314,17 @@ nt_case_lib_load() {
   nt_write_env
   nt_run load <<DRIVER
 # 库加载缝：断言真的能直接加载真实源码，且加载本身没有任何副作用
-for f in probe_su notify notify_once notify_lead desc_text get_token api \
-         refresh_token run_once keepalive_ping cmd_status state_text; do
+for f in probe_su notify notify_once notify_lead desc_text set_desc update_desc \
+         get_token api refresh_token run_once keepalive_ping cmd_status state_text \
+         svc_is_disabled svc_set sign_get sign_set ka_note ka_counts ka_ok_count \
+         ka_fail_count ka_last_time ka_last_result ka_is_today \
+         done_marked done_mark notify_marked notify_mark nt_cooldown; do
   command -v "\$f" >/dev/null 2>&1 || echo "missing:\$f"
 done
 DRIVER
   t_eq "加载后无缺失函数、无 stderr" "$(cat "$T_WORK/load.err")" ""
+  # missing: 是打到 stdout 的：不查这一行的话，「函数改名了」会让这条断言空转
+  t_eq "加载后无缺失函数（stdout 也无 missing:）" "$(grep -c '^missing:' "$T_WORK/load.out")" "0"
   t_hasnt "加载库不会自行跑起来（无输出）" "$T_WORK/load.out" '用法:'
 }
 

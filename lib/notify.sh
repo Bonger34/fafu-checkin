@@ -18,10 +18,10 @@ SU_BIN="${SU_BIN:-/system/bin/su}"         # su 路径（可用环境变量覆�
 SU_MODE=""                # 生效的降权写法，由 probe_su() 探测后写入
 _NT_TITLE=""              # 通知标题（调用方设置）
 _NT_TEXT=""               # 通知正文；留空则复用标题（用于 P 预警）
-# 打扰类通知的冷却基准落盘保存：refresh_token 总在 $( ) 子 shell 里被调用，
+# 通知的落盘状态（每日标记、冷却基准）由 state 层持有：本层只经
+# notify_marked / notify_mark / nt_cooldown 访问，不自己碰那些文件。
+# 冷却基准必须落盘：refresh_token 总在 $( ) 子 shell 里被调用，
 # 若把基准放在普通变量里，赋值会随子 shell 一起丢弃 → 冷却永远不生效
-NTLAST="$MODDIR/.fafu_notify_last"
-PL=$("$BB" date +%Y%m%d)  # 今日 YYYYMMDD，供 tag 与「当日首次」判定
 
 # ---- 降权身份探测（通知必须以 shell 身份发送） ----
 # 不能用退出码判断可用性：KernelSU 的 su 用 Rust getopts 且默认 StopAtFirstFree，
@@ -89,13 +89,13 @@ notify() { # $1=tag；使用全局 _NT_TITLE / _NT_TEXT；返回发送是否成�
   return 1
 }
 
-notify_once() { # $1=tag $2=当日标记文件；仅在**发送成功**时才写标记
+notify_once() { # $1=tag $2=事件名（fail / nosign / late / miss）；仅在**发送成功**时才写标记
   [ "$NOTIFY" = "1" ] || return 0
   [ -n "$SU_MODE" ] || return 0
-  [ "$("$BB" cat "$2" 2>/dev/null)" = "$("$BB" date +%Y-%m-%d)" ] && return 0
+  notify_marked "$2" && return 0
   # 先发送、成功再落标记：否则一次瞬时失败会让这类提醒整天不再出现
   if notify "$1"; then
-    "$BB" date +%Y-%m-%d > "$2" 2>/dev/null
+    notify_mark "$2"
     return 0
   fi
   return 1

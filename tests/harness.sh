@@ -197,10 +197,12 @@ t_file() {
 # 把 grep 结果写进临时文件并输出匹配行数。
 # 不走 $( ) + 管道：本机 busybox（Windows 版）在这种嵌套命令替换下会直接栈溢出崩掉，
 # 写文件是等价且稳定的做法。
-_t_grep_count() { # $1=模式 $2=-F|-E $3=文件
-  local f="$T_WORK_ROOT/.grep.tmp"
+# $3 可选：-F（默认，字面量）或 -E（正则）——需要「空白量可变」这类断言时用正则。
+_t_grep_count() { # $1=模式 $2=-F|-E $3=文件 [$4=-E]
+  local f="$T_WORK_ROOT/.grep.tmp" mode
+  mode="${4:--F}"
   mkdir -p "$T_WORK_ROOT"
-  grep "$2" -e "$1" -- "$3" > "$f" 2>/dev/null
+  grep "$mode" -e "$1" -- "$3" > "$f" 2>/dev/null
   grep -c . "$f" > "$T_WORK_ROOT/.grep.n" 2>/dev/null
   cat "$T_WORK_ROOT/.grep.n" 2>/dev/null
 }
@@ -222,6 +224,19 @@ t_has() {
     _t_pass "$1 ($n 处)"
   else
     _t_fail "$1（未找到 [$3]，实际 $n 处）"
+  fi
+}
+
+# 同上，但模式是**正则**：用在「空白量不该被写死」的地方（例如 case 分支的对齐空格）——
+# 写死空格会让重构排版制造假红灯。
+t_has_re() { # t_has_re <说明> <文件> <正则> [次数]
+  local n
+  n=$(_t_grep_count "$3" -E "$2" -E)
+  [ -n "$n" ] || n=0
+  if [ "$n" -ge 1 ] && { [ -z "${4:-}" ] || [ "$n" = "$4" ]; }; then
+    _t_pass "$1 ($n 处)"
+  else
+    _t_fail "$1（未找到正则 [$3]，实际 $n 处）"
   fi
 }
 

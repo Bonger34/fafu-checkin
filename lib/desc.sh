@@ -1,33 +1,48 @@
 # ============================================================
 # desc 层 —— 模块描述：读状态层生成描述文本，并写入
 #
-# 加载顺序：第 6 层。写入沿用「KernelSU 官方覆盖优先、失败回退改写模块元数据」，
-# 且改写前必须校验：grep 失败会留下空文件，直接 mv 会把 module.prop 清空
-# （模块元数据全丢，管理器里连模块名都没了）。
+# 加载顺序：第 6 层。描述文本只读状态层（开关 + 最近签到记录），本层不碰任何文件格式。
+# 写入沿用「KernelSU 官方覆盖优先、失败回退改写模块元数据」，且改写前必须校验：
+# grep 失败会留下空文件，直接 mv 会把 module.prop 清空（模块元数据全丢，管理器里
+# 连模块名都没了）——故先写临时文件、验非空、再原子改名。
+# 触发点（签到成功 / 检测到已签到或请假 / 开关切换或 status / 服务启动 / 守护进程定时自检）
+# 由调用方决定，本层只提供 update_desc；8 处调用点见 tests/state.sh 的「desc · 触发点」。
 # ============================================================
 
+# 当前生效的描述：KernelSU 覆盖值为空时回退读模块元数据（否则会重复写入同一条描述）
+_desc_current() {
+  local cur
+  if [ -n "$KSUD" ]; then
+    cur=$(KSU_MODULE="$MODID" "$KSUD" module config get override.description 2>/dev/null)
+  fi
+  [ -n "$cur" ] || cur=$(kv_get "$MODDIR/module.prop" description)
+  printf '%s' "$cur"
+}
+
 desc_text() { # 生成当前应显示的模块描述（使用绝对日期，守护进程退出后信息也不会失真）
-  _today=$("$BB" date +%Y-%m-%d)
-  d=$(status_get sign_date)
-  t=$(status_get sign_time)
-  k=$(status_get sign_kind)
-  if is_disabled; then
+  local today_v d t k dd
+  today_v=$(today)
+  d=$(sign_get sign_date)
+  t=$(sign_get sign_time)
+  k=$(sign_get sign_kind)
+  if svc_is_disabled; then
     if [ -n "$d" ]; then
       dd=${d#*-}
       if [ -n "$t" ]; then echo "⏸ 已停用 · 最近签到 $dd $t"; else echo "⏸ 已停用 · 最近签到 $dd"; fi
     else
       echo "⏸ 已停用 · 暂无签到记录"
     fi
-  elif [ "$d" = "$_today" ] && [ "$k" = "leave" ]; then
+  elif [ "$d" = "$today_v" ] && [ "$k" = "leave" ]; then
     echo "🟢 已启用 · 🏖 ${d#*-} 已请假"
-  elif [ "$d" = "$_today" ]; then
+  elif [ "$d" = "$today_v" ]; then
     if [ -n "$t" ]; then echo "🟢 已启用 · ✅ ${d#*-} 已签到 $t"; else echo "🟢 已启用 · ✅ ${d#*-} 已签到"; fi
   else
-    echo "🟢 已启用 · ⏳ ${_today#*-} 未签到"
+    echo "🟢 已启用 · ⏳ ${today_v#*-} 未签到"
   fi
 }
 
 set_desc() { # $1=描述文本；优先 KernelSU 官方覆盖，失败则改写 module.prop（Magisk）
+  local tmp
   if [ -n "$KSUD" ]; then
     if KSU_MODULE="$MODID" "$KSUD" module config set override.description "$1" >/dev/null 2>&1; then
       return 0
@@ -45,14 +60,8 @@ set_desc() { # $1=描述文本；优先 KernelSU 官方覆盖，失败则改写 
 }
 
 update_desc() { # 计算描述并写入（内容变化时才写）
+  local new
   new=$(desc_text)
-  cur=""
-  if [ -n "$KSUD" ]; then
-    cur=$(KSU_MODULE="$MODID" "$KSUD" module config get override.description 2>/dev/null)
-  fi
-  if [ -z "$cur" ] && [ -f "$MODDIR/module.prop" ]; then
-    cur=$("$BB" grep -m1 '^description=' "$MODDIR/module.prop" 2>/dev/null | "$BB" cut -d= -f2-)
-  fi
-  [ "$new" = "$cur" ] && return 0
+  [ "$new" = "$(_desc_current)" ] && return 0
   set_desc "$new"
 }
