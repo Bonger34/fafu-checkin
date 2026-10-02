@@ -308,7 +308,9 @@ sh build.sh                                 # 构建
 
 **断言总入口 `tools/run-tests.sh`**（`tests/` 下的用例文件；harness 见 `tests/harness.sh`）：
 
-- 基线：**136 项**（`layer` 28 + `notify` 108），改动后应保持全绿；任一项失败时脚本以非 0 退出；
+- 基线：**115 项**（`layer` 28 + `notify` 87），改动后应保持全绿；任一项失败时脚本以非 0 退出；
+  迁移前草稿版的计数（文档写的 92、提交记录里的 95/100）都不可靠——那版测试里有一个 `for`
+  循环因缺换行整段没执行、断言函数复用变量把部分结果静默覆盖；迁移时实测为 104 项。
 - 断言只描述**外部行为**——返回码、状态文件产物、交给系统执行的命令字符串、
   「某个时刻会发生什么」；不绑行号，重构搬代码不应制造假红灯；
 - 用例通过 `tests/harness.sh` **直接加载真实的库**（`TEST_LIB_FILES`；重构过渡期用
@@ -316,9 +318,11 @@ sh build.sh                                 # 构建
 - 注入缝沿用运行时既有开关，不加测试专用后门：时间走 `BB_OVERRIDE` + `tests/mock/busybox`
   （设 `MOCK_DATE_CTL` 即可把 `"$BB" date` 拨到任意时刻；当前断言还没用到拨钟，跨日/时点
   用例落地时直接设它即可），降权写法走 `SU_MODE`，通知命令走 `NOTIFY_CMD`；
-- 本机没有独立 `sh`：把 busybox 放到 `tools/busybox/`（该目录不入库），或用
-  `TEST_BUSYBOX=<路径>` 指定；CI 先装 `busybox-static` 再用系统 `sh` 跑
-  （断言脚本保持 POSIX 兼容）；
+- mock 时间源需要一个**真实 busybox** 承接其余 applet：本机把它放到 `tools/busybox/`
+  （该目录不入库）或用 `TEST_BUSYBOX=<路径>` 指定，CI 先装 `busybox-static`
+  （见 `.github/workflows/`）；三者统一由 `tools/lib.sh` 的 `find_busybox` 定位；
+- 本机（Windows）没有系统 `sh` 时用 `busybox sh tools/run-tests.sh` 跑；
+  断言脚本本身保持 POSIX 兼容，CI 直接用系统 `sh`；
 - 按关键字筛选用例时，含非 ASCII 的关键字在 Windows 控制台上会因代码页被改写，
   优先用 `^layer` / `^notify` 这类纯 ASCII 前缀。
 

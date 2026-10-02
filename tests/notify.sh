@@ -289,9 +289,28 @@ DRIVER
   t_hasnt "加载库不会自行跑起来（无输出）" "$T_WORK/load.out" '用法:'
 }
 
-# ---- 注册（顺序即执行顺序） ----
+# ============================================================
+# E. mock 时间源本身
+#
+# mock 只在「找不到真实 busybox」时才报错退出（正常情况下它必须能承接 applet 调用）。
+# 「找不到」这一支在 busybox ash 里测不出来——那里 `command -v busybox` 连清空 PATH
+# 都会命中内建 applet；而 mock 由哪个 shell 跑取决于环境（CI 上是系统 sh）。
+# 所以这里只断言两件与环境无关的事：报错分支确实写在源码里，且正常路径真的可用。
+# ============================================================
 
-t_case "notify · A · 关键函数与变量定义齐全" nt_case_defs
+nt_case_mock_guard() {
+  nt_setup
+  t_file "已生成 mock busybox 包装" "$NT_BB"
+  t_has "包装里带上了真实 busybox 的路径" "$NT_BB" "BB_REAL='"
+  t_has "mock 有「拿不到真实 busybox」的明确报错分支" "$T_ROOT/tests/mock/busybox" 'exit 127'
+  t_has "报错里指出了出路" "$T_ROOT/tests/mock/busybox" 'TEST_BUSYBOX'
+
+  # 正常路径：包装必须真的能取到日期（否则 mock 只是个会报错的摆设）
+  _d=$("$NT_BB" date +%Y-%m-%d 2>/dev/null)
+  t_eq "mock 包装可用：能取到日期（长度 10）" "${#_d}" 10
+}
+
+
 t_case "notify · A · 通知调用点齐全" nt_case_call_sites
 t_case "notify · A · 预警条件、提前量与冷却" nt_case_warn_order
 t_case "notify · A · 状态码译名" nt_case_state_text
@@ -300,3 +319,4 @@ t_case "notify · A · 探测编排与降级" nt_case_probe_wiring
 t_case "notify · B · 真实 notify 生成的命令" nt_case_command
 t_case "notify · C · 文案模板与发送失败分支" nt_case_templates
 t_case "notify · D · 库加载缝" nt_case_lib_load
+t_case "notify · E · mock 时间源的兜底" nt_case_mock_guard

@@ -5,12 +5,13 @@
 # 用法（在本仓库根目录执行）：
 #   sh tools/run-tests.sh              # 跑全部用例
 #   sh tools/run-tests.sh ^layer       # 只跑 layer 套件（^ 表示前缀匹配）
-#   sh tools/run-tests.sh 通知          # 只跑名字里含「通知」的用例
+#   busybox sh tools/run-tests.sh      # 本机（Windows）没有系统 sh 时这样跑
 #
-# shell 选择：
-#   - CI（ubuntu）直接用系统 sh 跑（下面就是普通 POSIX sh），断言文件保持 POSIX 兼容；
-#   - 本机（Windows）没有独立 sh：在 tools/busybox/ 放一个 busybox（该目录不入库），
-#     或用 TEST_BUSYBOX=<路径> 指定；本脚本会用 busybox sh 重新执行自己。
+# shell 与 busybox：
+#   - CI（ubuntu）用系统 sh 跑，断言文件保持 POSIX 兼容；
+#   - 断言里的 mock 时间源需要一个**真实 busybox** 承接其余 applet（见 tests/mock/busybox），
+#     它由 tools/lib.sh 的 find_busybox 定位：显式指定 > 仓库内 tools/busybox/ > 系统安装。
+#     本脚本自己不挑 shell、也不重新执行自己——那会引入「谁在跑谁」的递归坑。
 # ============================================================
 
 set -e
@@ -20,24 +21,9 @@ export T_ROOT="$ROOT"
 
 . "$ROOT/tools/lib.sh"
 
-# ---- 定位随附 busybox；找不到就退回系统 sh（CI 路径） ----
-BB=$(find_busybox)
-
-# 已经在 busybox 的 ash 下（ash 会导出 $BUSYBOX）就不再套壳
-case "${BUSYBOX:-}" in
-  *ash*) BB="" ;;
-esac
-
-if [ -n "$BB" ]; then
-  exec "$BB" sh "$ROOT/tools/run-tests.sh" "$@"
-fi
-
 echo "断言总入口 · 仓库根：$ROOT"
-if [ -n "${BUSYBOX:-}" ]; then
-  echo "shell：busybox sh ($BUSYBOX)"
-else
-  echo "shell：系统 sh"
-fi
+echo "shell：${BUSYBOX:+busybox }sh${BUSYBOX:+（$BUSYBOX）}"
+echo "mock 用的真实 busybox：$(find_busybox || echo '（未找到——用到 mock 的断言会明确报错）')"
 echo ""
 
 . "$ROOT/tests/harness.sh"

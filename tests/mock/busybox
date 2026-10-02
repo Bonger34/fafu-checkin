@@ -20,6 +20,18 @@
 BB_REAL="${BB_REAL:-busybox}"
 MOCK_DATE_FMT="${MOCK_DATE_FMT:-+%s}"
 
+# 拿不到真实 busybox 时明确失败：此时 exec 自己会变成 fork 炸弹，
+# 而「找不到 busybox」在测试日志里表现为「全部断言莫名超时」，极难排查。
+# 判据：PATH 上要有一个**真的 busybox 文件**；若它是 busybox ash 的内建 applet
+# （`command -v` 只回一个名字），那也能用——但名字不是文件，不能当成路径。
+if [ "$BB_REAL" = "busybox" ]; then
+  if ! command -v busybox >/dev/null 2>&1; then
+    echo "mock: 拿不到真实 busybox（BB_REAL 未设置，PATH 里也没有）；" >&2
+    echo "mock: 请设置 TEST_BUSYBOX=<路径>，或把 busybox 放到 tools/busybox/。" >&2
+    exit 127
+  fi
+fi
+
 if [ "$1" = "date" ] && [ -n "${MOCK_DATE_CTL:-}" ] && [ -f "$MOCK_DATE_CTL" ]; then
   _d=$(cat "$MOCK_DATE_CTL")
   _fmt="${2:-$MOCK_DATE_FMT}"

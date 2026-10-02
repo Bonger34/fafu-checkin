@@ -10,7 +10,7 @@
 # 它做什么：
 #   1) 按清单顺序建立「函数 → 所属文件（层）」映射；
 #   2) 扫描每个函数体，命中「更后层」定义的函数即报违规——包括
-#      `handler=cmd_status` 之后 `"$handler"` 这种经变量间接调用的写法；
+#      handler=cmd_status 之后 "$handler" 这种经变量间接调用的写法；
 #   3) 命令名写在变量里、静态判不出目标的动态分派，走显式白名单
 #      （tools/layer-whitelist.txt，缺失即失败，不静默当成空名单）。
 #
@@ -24,43 +24,13 @@ ROOT="${LAYER_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$ROOT"
 . "$ROOT/tools/lib.sh"
 
-# ---- 层清单：本仓库的唯一真源（入口加载顺序就是这里列出的顺序） ----
-# 过渡期（重构进行中）：能力仍都在入口脚本里，故清单只有它一个文件。
-# 拆分完成后改成按入口加载顺序列出全部层文件，例如：
-#   FILES="fafu_checkin.sh lib/base.sh lib/state.sh lib/api.sh ... lib/commands.sh"
-FILES="${LAYER_FILES:-fafu_checkin.sh}"
-SEEN=""
-
-AWK=$(pick_awk)
-
-# ---- 动态分派白名单：单一真源是仓库里的文件，缺失即失败（不静默当成空名单） ----
-WL="${LAYER_WHITELIST:-tools/layer-whitelist.txt}"
-if [ ! -f "$WL" ]; then
-  echo "层序检查失败：找不到动态分派白名单：$WL" >&2
-  echo "（白名单说明哪些变量承载动态分派，静态判不出；仓库里应有一份）" >&2
-  exit 1
-fi
-
-# 清单里的文件先由 shell 确认存在、且不重复出现
-# （同一文件写两遍会让「函数 → 层」映射失真，属配置错误，必须报出来）
-for f in $FILES; do
-  if [ ! -f "$f" ]; then
-    echo "层序检查失败：清单里的文件不存在：$f" >&2
-    exit 1
-  fi
-  case " $SEEN " in
-    *" $f "*)
-      echo "层序检查失败：清单里的文件重复出现：$f" >&2
-      exit 1
-      ;;
-  esac
-  SEEN="$SEEN $f"
-done
-
-echo "层序检查 · 清单：$FILES"
-
-$AWK -v files="$FILES" -v wl="$WL" '
-# 把 `name()` / `name ()` 这类**定义**写法遮掉，避免定义本身被当成调用。
+# ---- awk 程序以文件形式传给 awk（-f），不写成单个参数 ----
+# 程序里有 "\034" 这类带反斜杠的字符串，Windows 版 busybox 解析单个参数时会吃掉引号，
+# 报 "Unexpected end of string"；用 -f 传同一个程序就正常。
+# 程序落盘在 tests/.work（已 gitignore）；注释里不要出现半角单引号或反引号。
+write_prog() {
+  cat <<'AWKEOF'
+# 把「name()」「name ()」这类**定义**写法遮掉，避免定义本身被当成调用。
 # 不用 %*s（busybox awk 不支持动态宽度），改成循环补空格。
 function mask_defs(line,   pre, n, pad, i) {
   while (match(line, /[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)/)) {
@@ -111,7 +81,7 @@ BEGIN {
     cur = ""
     buf = ""
     while ((getline line < fl[fi]) > 0) {
-      # 注意：busybox awk 里 `continue` 会跳出整个 getline 循环（不是跳到下一行读取），
+      # 注意：busybox awk 里 continue 会跳出整个 getline 循环（不是跳到下一行读取），
       # 所以这里一律用 if/else 串联，不能用 continue 做「跳过本行」。
       if (line ~ /^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)/) {
         if (cur != "") { body = buf; scan(cur) }
@@ -218,4 +188,46 @@ function scan(fn,   line, i, ch, start, w, nextc, j, k, v, target, prev) {
     }
   }
 }
-' /dev/null
+AWKEOF
+}
+
+# ---- 层清单：本仓库的唯一真源（入口加载顺序就是这里列出的顺序） ----
+# 过渡期（重构进行中）：能力仍都在入口脚本里，故清单只有它一个文件。
+# 拆分完成后改成按入口加载顺序列出全部层文件，例如：
+#   FILES="fafu_checkin.sh lib/base.sh lib/state.sh lib/api.sh ... lib/commands.sh"
+FILES="${LAYER_FILES:-fafu_checkin.sh}"
+SEEN=""
+
+AWK=$(pick_awk)
+
+# ---- 动态分派白名单：单一真源是仓库里的文件，缺失即失败（不静默当成空名单） ----
+WL="${LAYER_WHITELIST:-tools/layer-whitelist.txt}"
+if [ ! -f "$WL" ]; then
+  echo "层序检查失败：找不到动态分派白名单：$WL" >&2
+  echo "（白名单说明哪些变量承载动态分派，静态判不出；仓库里应有一份）" >&2
+  exit 1
+fi
+
+# 清单里的文件先由 shell 确认存在、且不重复出现
+# （同一文件写两遍会让「函数 → 层」映射失真，属配置错误，必须报出来）
+for f in $FILES; do
+  if [ ! -f "$f" ]; then
+    echo "层序检查失败：清单里的文件不存在：$f" >&2
+    exit 1
+  fi
+  case " $SEEN " in
+    *" $f "*)
+      echo "层序检查失败：清单里的文件重复出现：$f" >&2
+      exit 1
+      ;;
+  esac
+  SEEN="$SEEN $f"
+done
+
+echo "层序检查 · 清单：$FILES"
+
+PROG="$ROOT/tests/.work/layer-order.awk"
+mkdir -p "$ROOT/tests/.work"
+write_prog > "$PROG"
+
+$AWK -v files="$FILES" -v wl="$WL" -f "$PROG" /dev/null
