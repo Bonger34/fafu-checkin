@@ -103,7 +103,8 @@ CMD="$1"
 # 守护主循环每轮会重算一次——进程常驻，跨日后 tag 不应仍停在启动那天。
 PL=$(today_tag)
 # 通知降权探测：必须在分发之前执行——各通知类子命令都会在分支里直接 exit，
-# 放在 case 之后会成为永远执行不到的死代码（曾踩过）。最长阻塞 1 秒。
+# 放在 case 之后会成为永远执行不到的死代码（曾踩过）。探测结果写入 $SU_MODE，
+# 随后由守护进程经 FAFU_SU_MODE 继承。最长阻塞 1 秒。
 case "$CMD" in
   start|""|once|refresh|keepalive|notify) probe_su ;;
 esac
@@ -180,11 +181,11 @@ while true; do
     else
       # 三个时点各自独立标记：越晚的时点信息越关键，不能被更早的那条挡住
       if [ $now -ge 1380 ]; then
-        _msg_miss;   notify_once "fafu-miss-$PL"   miss
+        notify_once miss
       elif [ $now -ge 1350 ]; then
-        _msg_late;   notify_once "fafu-t2230-$PL"  late
+        notify_once late
       else
-        _msg_nosign; notify_once "fafu-t2200-$PL"  nosign
+        notify_once nosign
       fi
     fi
   fi

@@ -1,361 +1,644 @@
 # ============================================================
-# 通知功能验收断言
+# notify 层验收断言：降权探测、事件名 → tag/文案、发送、每日一次去重、打扰冷却
 #
-# 分三层，都只针对「外部可观察的行为」：
-#   A 静态断言：关键函数/调用点/条件是否还在，以及少数**相对顺序**不变量
-#      （如降权探测必须排在子命令分发之前、开页预警必须排在 open_page 之前）；
-#     面对的是「各层按加载顺序 + 入口」拼出的全程序文本（只读，不执行）；
-#   B 函数级断言：source 真实的库，把降权写法指向记录函数，
-#      断言最终交给系统执行的命令字符串；
-#   C 文案与分支：真实 _msg_* / notify / notify_once 的产物与返回码。
+# 三条口径：
+#   1) **只报事件名**：业务层说「发生了什么」（sign / supp / …），tag 拼法与文案都在
+#      notify 层里查表。断言因此数的是「第 N 个事件产生了哪条命令、什么标题正文」，
+#      而不是去源码里找某个字面量调用点（那种写法一改调用方式就假红，也测不出映射本身）；
+#   2) **降权探测判的是身份**：替身 su 复现设备上的真实语义 —— `su - shell -c` 可能
+#      根本没执行命令、退出码却是 0。断言要求探测读 `id -u` 的输出等于 2000 才认，
+#      并且会依次尝试三个候选写法；
+#   3) **冷却基准必须落盘**：refresh_token 总在 $( ) 子 shell 里调用预警，内存变量活不过
+#      那个子 shell。断言在**子 shell 里**发预警，再看基准是否真的写到了 state 层的文件上。
+#
+# 加载方式：直接 source 真实的层文件（tests/harness.sh 的 TEST_LIB_FILES，顺序取自入口的
+# FAFU_LAYERS），不抽源码片段、不绑行号。
+#
+# 观察面只有一个：覆写 nt_send（发送层上的缝，与 api 层的 http_post 同理）把
+# **最终构造出的命令串**记下来；消息文案直接读 _NT_TITLE / _NT_TEXT。
+#
+# 本机（Windows + busybox）踩过的四个坑，改这个文件前先看：
+#   1) 驱动脚本的 stdin 是调用方的 heredoc，所以主体必须先落临时文件再与前导拼接，
+#      不能 `cat > "$name.sh"` 之后追加——那样写出来顺序正好颠倒；
+#   2) 包装脚本的第一行必须是 `#!<busybox> sh`（Windows 上扩展名缺失时只认这种 shebang），
+#      解释器会把一个多余的 `sh` 留在参数最前面；
+#   3) su 是 busybox 的内建 applet，PATH 上的同名文件拦不到它，探测因此一律走 $SU_BIN；
+#   4) 路径里带空格，`$变量` 当命令名时会因词分割执行失败——要顶掉命令就用同名函数，
+#      不要用「把变量指向函数名」的写法。
 #
 # 覆盖不到的（只能上机目视确认）：su / cmd notification post 的真实送达、Doze 投递延迟。
 # ============================================================
 
-# 静态断言面对的文本：各层 + 入口，拼接顺序即加载顺序（相对顺序断言因此仍然成立）
-NT_SRC=""
-nt_src() {
-  [ -n "$NT_SRC" ] && { printf '%s' "$NT_SRC"; return 0; }
-  NT_SRC="$T_WORK_ROOT/program.sh"
-  mkdir -p "$T_WORK_ROOT"
-  if ! t_write_program "$NT_SRC"; then
-    echo "无法拼出全程序文本（层清单见入口 fafu_checkin.sh 的 FAFU_LAYERS）" >&2
-    exit 1
-  fi
-  printf '%s' "$NT_SRC"
+# 事件名 → 期待的输出（tag 后缀）。「tag 格式与按日滚动不变」就钉在这张表上。
+NT_TAGS="sign:sign supp:supp seen:sign leave:leave failsign:failsign failtask:failtask nosign:t2200 late:t2230 miss:miss warn:warn test:test"
+
+# 工作目录与环境：每个驱动一份干净的（同一个用例里的多个驱动互不影响），
+# 目录名带上驱动名，跑完留在 tests/.work/notify-<驱动>/ 供排查。
+# 踩过的坑：把工作目录做成「每条用例清一次、用例内复用」，第二个驱动的替身就找不到
+# 第一个驱动留下的记录文件，断言静默变成空转。
+NT_WORK=""
+nt_setup() { # $1=驱动名（决定工作目录）
+  NT_WORK="$T_WORK_ROOT/notify-$1"
+  rm -rf "$NT_WORK"
+  mkdir -p "$NT_WORK/mod" "$NT_WORK/bin" "$NT_WORK/ctl/su" "$NT_WORK/dev"
+  : > "$NT_WORK/ctl/su/calls"
+  : > "$NT_WORK/ctl/su/sent"
+  t_bb_wrap "$NT_WORK/bin/bb" >/dev/null
+  nt_stub_write "$NT_WORK/bin/su"
+  nt_env
 }
 
-# -- 供用例使用的临时目录与工具链（用例执行时才创建，避免 source 本文件就有副作用） --
-nt_setup() {
-  T_WORK="$T_WORK_ROOT/notify"
-  rm -rf "$T_WORK"
-  mkdir -p "$T_WORK"
-  T_BB=$(t_find_busybox)
-  t_bb_wrap "$T_WORK/bin/bb" >/dev/null
-  if ! t_write_lib "$T_WORK/part.sh"; then
-    echo "无法拼出被测库（见 tests/harness.sh 的 TEST_LIB_FILES）"
-    exit 1
-  fi
-  NT_PART="$T_WORK/part.sh"
-  NT_BB="$T_WORK/bin/bb"
+# 降权链路的替身：**只顶掉 su 这个可执行文件**，probe_su 与 notify 都跑真实实现。
+# 两条约束决定了它必须是文件、且必须挂在 $SU_BIN 上（见文件头的坑 3、4）。
+#   探测：`su <arrangement> -c 'id -u'` → 记一行、输出 MOCK_SU_ID（默认 2000）
+#         MOCK_SU_EMPTY=1 时**空手退出 0**（KernelSU 上 `-c` 落空、命令根本没跑）
+#   发送：`su <arrangement> -c 'cmd notification post ...'` → 替身真的把它跑掉，
+#         于是「最终交给系统执行的命令」在 ctl/su/sent 里留下一份（默认用例并不断言它）
+nt_stub_write() { # $1=可执行文件路径
+  cat <<STUB > "$1"
+#!$(t_find_busybox) sh
+# 由 tests/notify.sh 生成：降权链路替身（记录调用，按配置应答）
+printf '%s\n' "\$*" >> ctl/su/calls
+case "\$*" in
+  *'id -u'*) : ;;
+  *) printf '%s\n' "\$*" >> ctl/su/sent; sh -c "\$*" ;;
+esac
+[ -n "\${MOCK_SU_EMPTY:-}" ] && exit 0
+printf '%s\n' "\${MOCK_SU_ID:-2000}"
+STUB
+  chmod +x "$1" 2>/dev/null || true
 }
 
-# 生成驱动脚本的公共前导（环境 + 注入点），落到 $T_WORK/_env.sh 供各驱动 source。
-# 约定：调用方先 \`cat > "$T_WORK/_env.sh"\`，再按自己的断言写主体，详见 nt_case_*。
-# 这里集中三件事：把时间/降权/通知命令三个注入点接上、加载真实的库、把日期固定下来。
-nt_write_env() {
-  cat > "$T_WORK/_env.sh" <<ENV
-PATH='/bin:/usr/bin'
+# 「按调用次数分档」的替身：前 4 次调用空手退出（命令没跑、rc 却是 0），第 5 次才真的
+# 给出身份。用来验「候选依次尝试」——能通过校验的必然是第三个候选（每个候选试两次）。
+# 它是**独立完整**的替身（不叠加在默认替身上）：叠加会让默认替身先输出 uid，
+# 分档就永远轮不到（踩过）。
+nt_stub_seq() { # $1=可执行文件路径 $2=控制目录
+  cat <<STUB > "$1"
+#!$(t_find_busybox) sh
+# 由 tests/notify.sh 生成：按调用次数分档的降权替身
+n=\$(cat '$2/seq' 2>/dev/null); n=\$(( \${n:-0} + 1 )); printf '%s' "\$n" > '$2/seq'
+printf '%s\n' "\$*" >> '$2/tried'
+[ "\$n" -ge 5 ] || exit 0
+echo 2000
+STUB
+  chmod +x "$1" 2>/dev/null || true
+}
+
+# 驱动脚本的公共前导：替身 busybox 排在 PATH 最前、模块目录、固定的当日 tag。
+# 用「heredoc 直接重定向」而不是 `cat > file <<EOF`：后者让外部 cat 去读 stdin，
+# 在把 stdin 挂在管道上的运行器里会一直等（踩过）。
+# $1=noprobe 时不自动探测（探测类用例自己控制调用次数）
+nt_env() {
+  cat <<ENV > "$NT_WORK/_env.sh"
+PATH='./bin:/bin:/usr/bin'
 T_ROOT='$T_ROOT'
-T_WORK='$T_WORK'
-
-# 注入点：时间走 $BB_OVERRIDE，降权写法走 SU_MODE，通知命令走 NOTIFY_CMD（本次未用到）
-NOTIFY=1; NOTIFY_LEAD=5; NOTIFY_COOLDOWN=300
-SU_BIN=/bin/true            # 降权探测先看 su 是否存在，这里给一个必然存在的替身
-
-. '$NT_PART'                # 直接加载真实的库（不是从源码里抽片段再拼接）
-SU_MODE=nt_cap              # 把降权写法指向记录函数，即可断言「最终交给系统执行的命令」
-PL=20261001                 # 库顶层会用真实日期初始化 PL，这里改回固定值
+T_WORK='$NT_WORK'
+MODDIR='./mod'
+BB_OVERRIDE='./bin/bb'
+MOCK_DATE_CTL='./ctl/date'
+# 设备命令替身的控制目录：tests/device.sh 的包装器与替身 busybox 按它应答。
+# 只有时序用例会真去调设备命令，其余用例留着它也无害（那个目录是空的）
+MOCK_DEVICE_DIR='$NT_WORK/dev'
+export MODDIR BB_OVERRIDE MOCK_DATE_CTL MOCK_DEVICE_DIR
+printf '2026-10-01 21:40\n' > "\$MOCK_DATE_CTL"
+# 注入点：通知开关与阈值、当日 tag、降权命令（绝对路径：探测里套了 timeout，
+# 由它 fork 出去的命令取不到 shell 函数，必须落在文件上）
+NOTIFY=1
+NOTIFY_LEAD=5
+NOTIFY_COOLDOWN=300
+SU_BIN='$NT_WORK/bin/su'
+PL=20261001
+export NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN SU_BIN PL
+for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
 ENV
+  [ "$1" = "noprobe" ] || printf 'probe_su   # 与入口一致：先探一次，notify 才有 SU_MODE\n' >> "$NT_WORK/_env.sh"
 }
 
-# 跑一个驱动脚本；用法：nt_run <名字>，主体从 stdin 读入（公共前导自动接在前面）
-nt_run() {
-  cat > "$T_WORK/_body.sh"
-  cp "$T_WORK/_env.sh" "$T_WORK/$1.sh"
-  cat "$T_WORK/_body.sh" >> "$T_WORK/$1.sh"
-  ( cd "$T_WORK" && $(t_sh) "./$1.sh" ) \
-    > "$T_WORK/$1.out" 2> "$T_WORK/$1.err"
-  if [ -s "$T_WORK/$1.err" ]; then
-    echo "  （驱动 $1 的 stderr）"
-    sed 's/^/    /' "$T_WORK/$1.err"
+# 跑一个驱动脚本；用法：nt_run <名字> [noprobe]，主体从 stdin 读入（前导自动接在前面）
+nt_run() { # $1=名字 [$2=noprobe]
+  local name
+  name="$1"
+  cat > "$NT_WORK/$name.body"
+  nt_env "${2:-}"
+  cat "$NT_WORK/_env.sh" "$NT_WORK/$name.body" > "$NT_WORK/$name.sh"
+  ( cd "$NT_WORK" && $(t_sh) "./$name.sh" ) > "$NT_WORK/$name.out" 2> "$NT_WORK/$name.err"
+  if [ -s "$NT_WORK/$name.err" ]; then
+    echo "  （驱动 $name 的 stderr）"
+    sed 's/^/    /' "$NT_WORK/$name.err"
   fi
 }
 
-# ============================================================
-# A. 静态断言（针对真实源码文本）
-# ============================================================
-
-nt_case_defs() {
-  local f v
-  TEST_SRC=$(nt_src)
-  for f in probe_su notify notify_once notify_lead \
-           _msg_sign _msg_supp _msg_seen _msg_leave \
-           _msg_failsign _msg_failtask _msg_nosign _msg_late _msg_miss; do
-    t_has "函数存在：$f()" "$TEST_SRC" "$f()"
-  done
-  for v in "SU_MODE=" "_NT_TITLE=" "_NT_TEXT=" "PL=" \
-           "NOTIFY=" "NOTIFY_LEAD=" "NOTIFY_COOLDOWN=" "SU_BIN="; do
-    t_has "已定义 $v" "$TEST_SRC" "$v"
-  done
-  # 通知标记与冷却基准的归属地是 state 层：notify 层只经它访问，不再持有文件路径
-  t_hasnt "notify 层不再持有通知标记路径" "$TEST_SRC" 'NTLAST="$MODDIR'
-  t_has "每日一次的判定经 state 层" "$TEST_SRC" 'notify_marked "$2" && return 0'
-  t_has "发送成功后才经 state 层落标记" "$TEST_SRC" "$(t_call notify_mark '"$2"')"
-}
-
-nt_case_call_sites() {
-  local t
-  TEST_SRC=$(nt_src)
-  for t in 'notify "fafu-sign-$PL"' 'notify "fafu-supp-$PL"' 'notify "fafu-leave-$PL"' \
-           'notify "fafu-warn-$PL"' 'notify_once "fafu-failsign-$PL" fail' \
-           'notify_once "fafu-failtask-$PL" fail' \
-           'notify_once "fafu-t2200-$PL"  nosign' \
-           'notify_once "fafu-t2230-$PL"  late' \
-           'notify_once "fafu-miss-$PL"   miss'; do
-    t_has "调用点：$t" "$TEST_SRC" "$t"
-  done
-  # 事件名写错等于当天提醒静默失效：四个事件名必须都在 state 层的映射表里。
-  # 用正则容忍分支缩进（写死空格会让一次排版改动制造假红灯），但要求「事件名 → 变量」这个形状。
-  for e in fail nosign late miss; do
-    t_has_re "state 层把事件 $e 映射到标记文件" "$TEST_SRC" \
-      "^[ ]*$e\\)[ ]*printf '%s' \"\\\$N"
-  done
-}
-
-nt_case_warn_order() {
-  TEST_SRC=$(nt_src)
-  # 预警必须挂在「本次确实会打开打卡页」上：两种路径都在 open_page 之前。
-  # 用函数体定位，不绑行号——重构时可以搬动代码，但不能改变这个相对顺序。
-  t_has "P 条件一：屏幕已亮 + 探测可用" "$TEST_SRC" '[ "${WAS_ON:-0}" = "1" ] && [ -n "$SU_MODE" ]'
-  t_before "开页预警排在 open_page 之前（静默路径也会预警）" "$TEST_SRC" \
-    'fafu-warn-' "$(t_call open_page)"
-  # 冷却基准必须落盘（refresh_token 在 $( ) 子 shell 里调用它，普通变量赋值会丢）；
-  # 落盘的归属地是 state 层：这里断言的是「经状态层读写」而不是「自己写文件」
-  t_has "冷却基准经 state 层读取" "$TEST_SRC" '$(nt_cooldown)'
-  t_has "冷却基准经 state 层写回" "$TEST_SRC" 'nt_cooldown "$now_ts"'
-  t_has "冷却基准的落盘实现只在 state 层" "$T_ROOT/lib/state.sh" 'NTLAST="$MODDIR/.fafu_notify_last"'
-  t_hasnt "keepalive 层不再自己写冷却文件" "$T_ROOT/lib/keepalive.sh" '> "$NTLAST"'
-  # 契约（设备实测后新增）：拿到新 token 就**提前**关页，让前台尽早回到用户手里。
-  # 判据是「提前关页早于兜底唤醒」，用那句日志做锚点而不是注释行。
-  t_before "拿到 token 即提前关页（早于兜底唤醒）" "$TEST_SRC" \
-    "$(t_call close_page)" "静默刷新未成功，尝试唤醒屏幕重试"
-  # 回归：绝不再有「回桌面」这类主动切换用户前台的兜底（注释里说明理由不算）
-  _starts=""
-  while IFS= read -r _ln; do
-    case "$_ln" in
-      *':#'*) : ;;               # 注释行不参与判定
-      *) _starts="$_starts$_ln
-" ;;
-    esac
-  done <<EOF
-$(grep -nF -e 'am start' -- "$TEST_SRC" 2>/dev/null)
-EOF
-  case "$_starts" in
-    *category.HOME*) _t_fail "已移除「回桌面兜底」：仍有切到桌面的 am start" ;;
-    '')              _t_fail "已移除「回桌面兜底」：找不到任何 am start（开页实现没了？）" ;;
-    *)               _t_pass "已移除「回桌面兜底」（am start 调用点 $(printf '%s' "$_starts" | grep -c .) 处）" ;;
-  esac
-  t_has "与冷却阈值比较" "$TEST_SRC" '-ge "$NOTIFY_COOLDOWN"'
-  t_hasnt "旧的 _NT_LAST 变量已彻底移除" "$TEST_SRC" '_NT_LAST'
-  t_has "提前量：延时由 notify_lead 决定" "$TEST_SRC" 'sleep "$(notify_lead)"'
-  t_has "notify_lead：仅亮屏时返回正数" "$TEST_SRC" \
-    'if [ "${WAS_ON:-0}" = "1" ] && [ "$NOTIFY_LEAD" -gt 0 ]'
-}
-
-nt_case_state_text() {
-  TEST_SRC=$(nt_src)
-  t_has "存在 state_text() 映射函数" "$TEST_SRC" 'state_text() {'
-  t_has "映射：1 → 已签到" "$TEST_SRC" '1) echo "已签到" ;;'
-  t_has "映射：2 → 已请假" "$TEST_SRC" '2) echo "已请假" ;;'
-  t_has "映射：未知值也自解释" "$TEST_SRC" '*) echo "未知状态($1)" ;;'
-  t_has "日志调用处已改用映射" "$TEST_SRC" 'log "[$name] $(state_text "$state")"'
-  t_hasnt "裸状态码日志已彻底移除" "$TEST_SRC" '已签到(状态'
-}
-
-nt_case_time_points() {
-  TEST_SRC=$(nt_src)
-  t_before "22:00 起判定，23:00 分支在其后" "$TEST_SRC" \
-    'if [ $now -ge 1320 ]' 'if [ $now -ge 1380 ]'
-  t_has "22:30 分支" "$TEST_SRC" 'elif [ $now -ge 1350 ]'
-  t_has "当日已解决（含请假）不提醒" "$TEST_SRC" \
-    '[ "$sd" = "$(today)" ] && [ "$sk" != "" ]'
-}
-
-nt_case_probe_wiring() {
-  TEST_SRC=$(nt_src)
-  t_has "已注册 notify 子命令" "$TEST_SRC" 'notify)    cmd_notify; exit $?'
-  t_has "存在 cmd_notify() 实现" "$TEST_SRC" 'cmd_notify() {'
-  t_has "notify 也执行降权探测（否则 SU_MODE 为空）" "$TEST_SRC" \
-    'once|refresh|keepalive|notify) probe_su'
-  t_has "测试通知用独立 tag（不污染正常通知）" "$TEST_SRC" 'fafu-test-$PL'
-  t_has "用法串已含 notify" "$TEST_SRC" 'stop|status|notify|once|refresh'
-  t_has "探测前进：检查 su 可用性" "$TEST_SRC" 'command -v "$SU_BIN"'
-  t_has "S1 回归：探测用 id -u 验证命令真的执行了" "$TEST_SRC" "'id -u'"
-  t_has "S1 回归：校验身份真的降到了 shell" "$TEST_SRC" '[ "$u" = "2000" ]'
-  t_has "S1 回归：候选含 KernelSU 可用写法" "$TEST_SRC" 'su shell /system/bin/sh -c'
-  t_has "探测仅在这些子命令执行" "$TEST_SRC" 'start|""|once|refresh|keepalive|notify) probe_su'
-  t_hasnt "status/stop 不触发探测（未误加）" "$TEST_SRC" 'status|stop|toggle)'
-  # P0-A 回归：探测必须在子命令分发之前——各分支会直接 exit，否则探测成死代码
-  t_before "P0-A 回归：探测排在分发之前" "$TEST_SRC" "$(t_call probe_su)" 'cmd_notify; exit'
-  t_has "P0-B 回归：标题/正文已 export" "$TEST_SRC" 'export _NT_TITLE _NT_TEXT'
-  t_has "S3 回归：先发送成功后才写标记" "$TEST_SRC" 'if notify "$1"; then'
-  t_has "守护进程继承探测结果（不重复探测）" "$TEST_SRC" 'FAFU_SU_MODE'
-  t_has "启动日志记录通知链路状态" "$TEST_SRC" 'notify=[${SU_MODE:-不可用}]'
-  t_has "S7 回归：PL 在守护主循环内重算（跨日 tag 不滞留）" "$TEST_SRC" \
-    'PL=$(today_tag)' 2
-  t_has "S4 回归：拒绝用空文件覆盖 module.prop" "$TEST_SRC" '[ -s "$tmp" ]'
-  # 四类通知标记的归属地是 state 层：文件名与事件映射都在那里，这里只钉住这条边界
-  t_has "22:00 标记在 state 层" "$T_ROOT/lib/state.sh" 'NNOSIGN="$MODDIR/.fafu_notify_nosign"'
-  t_has "22:30 标记在 state 层" "$T_ROOT/lib/state.sh" 'NLATE="$MODDIR/.fafu_notify_late"'
-  t_has "23:00 标记在 state 层" "$T_ROOT/lib/state.sh" 'NMISS="$MODDIR/.fafu_notify_miss"'
-  t_has "失败类标记在 state 层" "$T_ROOT/lib/state.sh" 'NFAIL="$MODDIR/.fafu_notify_fail"'
+# 从驱动输出里取一行（形如 key=value）
+nt_val() { # $1=文件 $2=键
+  sed -n "s/^$2=//p" "$1"
 }
 
 # ============================================================
-# B. 函数级：真实 notify() 生成的最终命令
+# 一、降权探测：以「命令真的执行了、且身份降到 shell」为准
+#
+# 替身的两种应答分别对应设备上的两个真实结局：
+#   MOCK_SU_EMPTY=1 —— `-c` 落空、命令根本没跑，但退出码是 0（KernelSU 的 su 就是这样）；
+#   默认            —— 真的执行了，输出身份（2000 = shell）。
+# 只看退出码的实现在第一种下会把链路误记成「可用」，这里的断言就会报红。
 # ============================================================
 
-nt_case_command() {
-  nt_setup
-  nt_write_env
-  nt_run cmd <<DRIVER
-nt_cap() { printf '%s\n' "\$1" >> "\$T_WORK/cmd.log"; }
-
-_msg_sign;  notify "fafu-sign-\$PL"
-_msg_leave; notify "fafu-leave-\$PL"
-WAS_ON=1; lead_on=\$(notify_lead)
-WAS_ON=0; lead_off=\$(notify_lead)
-WAS_ON=1
-# NOTIFY=0 时 notify / notify_once 必须零调用
-NOTIFY=0; _msg_miss; notify "fafu-miss-\$PL"; NOTIFY=1
-# 当日标记未写时才发；发送成功后标记落盘（标记的归属地是 state 层，这里只传事件名）
-_msg_miss; notify_once "fafu-miss-\$PL" miss
-_msg_miss; notify_once "fafu-miss-\$PL" miss
-printf 'lead_on=%s\nlead_off=%s\n' "\$lead_on" "\$lead_off" > "\$T_WORK/lead.txt"
-printf 'guard=%s\n' "\$(cat "\$MODDIR/.fafu_notify_miss")" > "\$T_WORK/guard.txt"
+nt_case_probe() {
+  local d
+  nt_setup probe
+  nt_run probe noprobe <<'DRIVER'
+printf 'ok=%s\n'    "$(probe_su; printf '%s' "$SU_MODE")"
+printf 'calls=%s\n' "$(grep -c . ctl/su/calls)"
+printf 'call1=%s\n' "$(head -n 1 ctl/su/calls)"
 DRIVER
+  d="$NT_WORK/probe.out"
+  t_has "探测到 uid=2000：认定第一个候选写法可用" "$d" "ok=$NT_WORK/bin/su - shell -c"
+  t_eq "可用即停止：只试了一个候选" "$(nt_val "$d" calls)" "1"
+  t_has "探测真的执行了 id -u（不是只看退出码）" "$d" "-c id -u"
 
-  t_lines "三条命令（2 条 notify + 1 条 once）" "$T_WORK/cmd.log" 3
-  t_has "命令为 cmd notification post" "$T_WORK/cmd.log" 'notification post'
-  t_has "tag 由 \$PL 展开（未延迟）" "$T_WORK/cmd.log" 'fafu-sign-20261001'
-  t_has "请假 tag 正确" "$T_WORK/cmd.log" 'fafu-leave-20261001'
-  t_has "未签 tag 正确" "$T_WORK/cmd.log" 'fafu-miss-20261001'
-  t_has "标题保留给子 shell 展开" "$T_WORK/cmd.log" '$_NT_TITLE'
-  t_has "正文回退写法保留" "$T_WORK/cmd.log" '${_NT_TEXT:-$_NT_TITLE}'
-  t_has "使用 bigtext 样式" "$T_WORK/cmd.log" '-S bigtext'
-  t_has "NOTIFY=0 不产生命令（miss 只出现 1 次，来自 once）" "$T_WORK/cmd.log" 'fafu-miss' 1
-  t_eq "notify_lead：亮屏 = 5" "$(sed -n 's/^lead_on=//p' "$T_WORK/lead.txt")" 5
-  t_eq "notify_lead：熄屏 = 0" "$(sed -n 's/^lead_off=//p' "$T_WORK/lead.txt")" 0
-  t_eq "当日标记写为今天" "$(cat "$T_WORK/guard.txt")" "guard=$(t_today)"
+  # 只验退出码的实现会栽在这里：命令没执行（空的 id 输出），rc 却是 0。
+  # 变量必须 export：命令最终由 timeout fork 出去，普通赋值进不了子进程
+  nt_setup empty
+  nt_run empty noprobe <<'DRIVER'
+MOCK_SU_EMPTY=1
+export MOCK_SU_EMPTY
+printf 'skip=%s\n' "$(probe_su; printf '%s' "${SU_MODE:-EMPTY}")"
+DRIVER
+  t_eq "空手退出 0（命令没执行）→ 不认定可用" "$(nt_val "$NT_WORK/empty.out" skip)" "EMPTY"
+
+  # 身份没降到 shell（uid 不是 2000）同样不算可用
+  nt_setup rootid
+  nt_run rootid noprobe <<'DRIVER'
+MOCK_SU_ID=0
+export MOCK_SU_ID
+printf 'skip=%s\n' "$(probe_su; printf '%s' "${SU_MODE:-EMPTY}")"
+DRIVER
+  t_eq "输出 uid=0（没降权）→ 不认定可用" "$(nt_val "$NT_WORK/rootid.out" skip)" "EMPTY"
+
+  # 通知开关关闭时不探测：零动作（连 su 都不碰）
+  nt_setup off
+  nt_run off noprobe <<'DRIVER'
+NOTIFY=0
+probe_su
+printf 'mode=%s\n'  "$(printf '%s' "${SU_MODE:-EMPTY}")"
+printf 'calls=%s\n' "$(grep -c . ctl/su/calls)"
+DRIVER
+  d="$NT_WORK/off.out"
+  t_eq "NOTIFY=0：不探测" "$(nt_val "$d" mode)" "EMPTY"
+  t_eq "NOTIFY=0：零调用" "$(nt_val "$d" calls)" "0"
+}
+
+# 候选依次尝试：替身按调用次数分档，前两个候选（各含一次宽松重试 = 前 4 次调用）
+# 都空手退出，第 5 次才给出身份 —— 于是能通过校验的必然是第三个候选。
+nt_case_probe_order() {
+  local d
+  nt_setup none
+  nt_run none noprobe <<'DRIVER'
+MOCK_SU_EMPTY=1
+export MOCK_SU_EMPTY
+probe_su
+printf 'mode=%s\n'  "$(printf '%s' "${SU_MODE:-EMPTY}")"
+printf 'calls=%s\n' "$(grep -c . ctl/su/calls)"
+DRIVER
+  d="$NT_WORK/none.out"
+  t_eq "三个候选全空手退出 → SU_MODE 保持为空" "$(nt_val "$d" mode)" "EMPTY"
+  # 每个候选都试了两次（宽松超时重试一次）：3 × 2 = 6
+  t_eq "候选逐个试过（各含一次宽松重试）" "$(nt_val "$d" calls)" "6"
+
+  nt_setup candrun
+  nt_stub_seq "$NT_WORK/bin/su" "$NT_WORK/ctl/su"
+  nt_run candrun noprobe <<'DRIVER'
+rm -f ctl/su/seq ctl/su/tried
+probe_su
+printf 'mode=%s\n'     "$SU_MODE"
+printf 'attempts=%s\n' "$(grep -c . ctl/su/tried)"
+printf 'last=%s\n'     "$(tail -n 1 ctl/su/tried)"
+DRIVER
+  d="$NT_WORK/candrun.out"
+  t_eq "候选依次尝试，直到某个通过身份校验" "$(nt_val "$d" mode)" "$NT_WORK/bin/su shell /system/bin/sh -c"
+  t_eq "前两个候选都被试过（空手退出不算可用）" "$(nt_val "$d" attempts)" "5"
+  t_eq "第三个候选是带 /system/bin/sh 的那种写法" "$(nt_val "$d" last)" "shell /system/bin/sh -c id -u"
 }
 
 # ============================================================
-# C. 文案模板与发送失败分支（真实 _msg_* / notify_once）
+# 二、事件名 → tag 与文案：业务层只报事件名，映射表才是唯一真源
+#
+# 事件名清单直接从 notify 层的映射表里读出来（不在测试里另抄一份）：
+# 表里加了事件却忘了文案，下面的断言会报红。
 # ============================================================
 
-nt_case_templates() {
-  nt_setup
-  nt_write_env
-  nt_run msg <<DRIVER
-nt_cap() { printf '%s\n' "\$1" >> "\$T_WORK/msg.log"; }
-
-# 逐条模板：先发模板函数、再取标题正文，断言的就是 notify 真正会用的那两个值
-for m in sign supp seen leave failsign failtask nosign late miss; do
-  _msg_\$m
-  printf '%s\t%s\n' "\$_NT_TITLE" "\$_NT_TEXT" >> "\$T_WORK/msg.txt"
-  notify "fafu-\$m-\$PL"
+nt_case_map() {
+  local d tag
+  nt_setup map
+  nt_run map <<'DRIVER'
+# 事件名清单从**真实源码的映射表**里读出来，逐个驱动
+for m in $(grep -o '_NT_TPL_[A-Za-z0-9_][A-Za-z0-9_]*' "$T_ROOT/lib/notify.sh" | sort -u); do
+  ev=${m#_NT_TPL_}
+  _NT_TITLE=""; _NT_TEXT=""
+  notify_event "$ev"
+  printf '%s\t%s\t%s\n' "$ev" "$_NT_TITLE" "$_NT_TEXT" >> "$T_WORK/msg.txt"
 done
-# 开页预警：正文里的提前量由 notify_lead 决定（屏幕已亮 = 5 秒）
-WAS_ON=1
-_NT_TITLE="🔄 正在刷新登录状态"
-_NT_TEXT="\$(notify_lead) 秒后自动打开打卡页（用于刷新登录），完成后自动关闭，无需操作"
-printf '%s\t%s\n' "\$_NT_TITLE" "\$_NT_TEXT" >> "\$T_WORK/msg.txt"
-notify "fafu-warn-\$PL"
-
-# 发送失败：notify_once 必须返回非 0，且不得落当日标记（否则一次瞬时失败=整天不再提醒）
-printf '%s\n' '2026-10-01 20:00' > "\$T_WORK/clock"
-rm -f "\$MODDIR/.fafu_notify_fail"
-SU_MODE=false
-if _msg_miss && notify_once "fafu-failsign-\$PL" fail; then
-  echo 'once_rc=0' >> "\$T_WORK/msg.txt"
-else
-  echo 'once_rc=1' >> "\$T_WORK/msg.txt"
-fi
-if notify_marked fail; then
-  echo 'guard=written' >> "\$T_WORK/msg.txt"
-else
-  echo 'guard=absent' >> "\$T_WORK/msg.txt"
-fi
 DRIVER
-
-  t_lines "10 条文案模板全部生成" "$T_WORK/msg.txt" 12
-  t_lines "10 条通知命令全部构造" "$T_WORK/msg.log" 10
-  t_has "A1 标题" "$T_WORK/msg.txt" '✅ 查寝签到成功'
-  t_has "A2 标题" "$T_WORK/msg.txt" '🕘 已补签'
-  t_has "B 标题" "$T_WORK/msg.txt" '✅ 今日已签到'
-  t_has "C 标题" "$T_WORK/msg.txt" '🏖 今日查寝已请假'
-  t_has "D 标题" "$T_WORK/msg.txt" '⚠️ 查寝签到失败'
-  t_has "E 标题" "$T_WORK/msg.txt" '⚠️ 拿不到查寝任务'
-  t_has "F1 标题（22:00 还剩 30 分钟）" "$T_WORK/msg.txt" '⏰ 尚未签到，主窗口还剩 30 分钟'
-  t_has "F2 标题（22:30 进入补签）" "$T_WORK/msg.txt" '⏰ 主窗口已过，进入补签时段'
-  t_has "F3 标题（23:00 未能签到）" "$T_WORK/msg.txt" '❌ 今晚未能自动签到'
-  t_has "P 标题" "$T_WORK/msg.txt" '🔄 正在刷新登录状态'
-  t_has "P 正文含提前量（亮屏=5 秒）" "$T_WORK/msg.txt" '5 秒后自动打开打卡页'
-  t_has "A1 tag" "$T_WORK/msg.log" 'fafu-sign-20261001'
-  t_has "P tag" "$T_WORK/msg.log" 'fafu-warn-20261001'
-  t_has "S3：发送失败时 notify_once 返回非 0" "$T_WORK/msg.txt" 'once_rc=1'
-  t_has "S3：发送失败时不落当日标记（可再试）" "$T_WORK/msg.txt" 'guard=absent'
+  d="$NT_WORK/msg.txt"
+  t_lines "九个业务事件的文案都取到了" "$d" 9
+  # 判定用正则而不是写死制表符：文案表的「事件 ⇥ 标题 ⇥ 正文」逐字比对在这里，
+  # 但不该因为排版（空格量）变化制造假红灯
+  t_has_re "A1 标题" "$d" '^sign[	 ]+✅ 查寝签到成功'
+  t_has_re "A2 标题" "$d" '^supp[	 ]+🕘 已补签'
+  t_has_re "B 标题" "$d" '^seen[	 ]+✅ 今日已签到'
+  t_has_re "C 标题" "$d" '^leave[	 ]+🏖 今日查寝已请假'
+  t_has_re "D 标题" "$d" '^failsign[	 ]+⚠️ 查寝签到失败'
+  t_has_re "E 标题" "$d" '^failtask[	 ]+⚠️ 拿不到查寝任务'
+  t_has_re "F1 标题（22:00 还剩 30 分钟）" "$d" '^nosign[	 ]+⏰ 尚未签到，主窗口还剩 30 分钟'
+  t_has_re "F2 标题（22:30 进入补签）" "$d" '^late[	 ]+⏰ 主窗口已过，进入补签时段'
+  t_has_re "F3 标题（23:00 未能签到）" "$d" '^miss[	 ]+❌ 今晚未能自动签到'
+  t_has "A1 正文含日期" "$d" "20261001 已签到（晚查寝签到）"
+  t_has "F3 正文逐字不变" "$d" "20261001 23:00 重试结束仍未签到，请手动处理"
   # 文案不得出现任何分数/扣分字样（用户明确要求：不替用户判断补签的得失）。
   # 「30 分钟」里的「分」是时间单位，故只匹配真正的计分表述。
-  if grep -qE '得分|扣分|计分|加分|满分|少得|[0-9] *分[^钟]' "$T_WORK/msg.txt" 2>/dev/null; then
+  if grep -qE '得分|扣分|计分|加分|满分|少得|[0-9] *分[^钟]' "$d" 2>/dev/null; then
     _t_fail "文案不含任何分数/扣分表述（出现了计分写法）"
   else
     _t_pass "文案不含任何分数/扣分表述"
   fi
-}
 
-# ============================================================
-# D. 库加载缝：断言可以 source 真实的库（这是整套测试的地基）
-# ============================================================
-
-nt_case_lib_load() {
-  nt_setup
-  nt_write_env
-  nt_run load <<DRIVER
-# 库加载缝：断言真的能直接加载真实源码，且加载本身没有任何副作用
-for f in probe_su notify notify_once notify_lead desc_text set_desc update_desc \
-         get_token api refresh_token run_once keepalive_ping cmd_status state_text \
-         svc_is_disabled svc_set sign_get sign_set ka_note ka_counts ka_ok_count \
-         ka_fail_count ka_last_time ka_last_result ka_is_today \
-         done_marked done_mark notify_marked notify_mark nt_cooldown; do
-  command -v "\$f" >/dev/null 2>&1 || echo "missing:\$f"
+  # tag 表：十个业务事件都拼得出 tag，且命令串逐字保留那三段（缺一个就是该类提醒静默失效）
+  nt_setup tag
+  nt_run tag <<'DRIVER'
+nt_send() { printf '%s\n' "$1" >> "$T_WORK/tag.log"; }
+for ev in sign supp seen leave failsign failtask nosign late miss; do
+  notify_event "$ev"
 done
 DRIVER
-  t_eq "加载后无缺失函数、无 stderr" "$(cat "$T_WORK/load.err")" ""
-  # missing: 是打到 stdout 的：不查这一行的话，「函数改名了」会让这条断言空转
-  t_eq "加载后无缺失函数（stdout 也无 missing:）" "$(grep -c '^missing:' "$T_WORK/load.out")" "0"
-  t_hasnt "加载库不会自行跑起来（无输出）" "$T_WORK/load.out" '用法:'
+  d="$NT_WORK/tag.log"
+  t_lines "九个业务事件都拼出了 tag" "$d" 9
+  for tag in $NT_TAGS; do
+    case "${tag%%:*}" in
+      warn|test) : ;;                 # 这两个没有文案模板，由各自的调用方驱动（见下）
+      *) t_has "事件 ${tag%%:*} 的 tag 为 fafu-${tag##*:}-\$PL" "$d" "fafu-${tag##*:}-20261001" ;;
+    esac
+  done
+  t_has "命令为 cmd notification post" "$d" 'notification post'
+  t_has "使用 bigtext 样式" "$d" '-S bigtext'
+  t_has "标题保留给子 shell 展开" "$d" '$_NT_TITLE'
+  t_has "正文回退写法保留" "$d" '${_NT_TEXT:-$_NT_TITLE}'
+  # sign 与 seen 用同一个 tag（复刻重构前的行为）：同日重复检测到已签到时互相覆盖，
+  # 通知栏不堆积；这两个 tag 相同是**对外契约**，不是巧合
+  t_has "seen 与 sign 同 tag（复刻重构前）" "$d" "fafu-sign-20261001" 2
+
+  # warn 与 test 的 tag 由各自的真实调用方驱动：它们不在业务事件表里，但同样要按日滚动。
+  # 标题与正文直接取发送时的那两个变量（命令串里存的是给子 shell 展开的写法）
+  nt_setup tagsrc
+  nt_run tagsrc <<'DRIVER'
+nt_send() { printf '%s\n' "$1" >> "$T_WORK/tag.log"; printf '%s\t%s\n' "$_NT_TITLE" "$_NT_TEXT" >> "$T_WORK/msg.log"; }
+WAS_ON=1
+notify_warn
+cmd_notify >/dev/null 2>&1
+DRIVER
+  d="$NT_WORK/tag.log"
+  t_has "预警（keepalive 调用方）的 tag" "$d" "fafu-warn-20261001"
+  t_has "测试通知（notify 子命令）的 tag" "$d" "fafu-test-20261001"
+  d="$NT_WORK/msg.log"
+  t_has "预警标题" "$d" "🔄 正在刷新登录状态"
+  t_has "预警正文含提前量" "$d" "5 秒后自动打开打卡页"
+  t_has "测试通知的标题" "$d" "🔔 通知测试"
 }
 
 # ============================================================
-# E. mock 时间源本身
+# 三、每日一次：当日一次、发送失败不落标记（否则一次瞬时失败=整天不再提醒）
+# ============================================================
+
+nt_case_once() {
+  local d
+  nt_setup once
+  nt_run once <<'DRIVER'
+nt_send() { printf '%s\n' "$1" >> "$T_WORK/cmd.log"; }
+printf 'first=%s\n'  "$(notify_once miss; echo $?)"
+printf 'second=%s\n' "$(notify_once miss; echo $?)"
+printf 'calls=%s\n'  "$(grep -c . "$T_WORK/cmd.log")"
+# 发送失败：命令必然失败 → 返回非 0 且不落当日标记（下一次还能再试）
+rm -f mod/.fafu_notify_miss
+nt_send() { return 1; }
+printf 'fail_rc=%s\n' "$(notify_once miss; echo $?)"
+printf 'fail_mark=%s\n' "$(notify_marked miss && echo marked || echo no)"
+# 未知事件名：不发送、不落标记（写错名字不该把标记烧掉）
+nt_send() { printf '%s\n' "$1" >> "$T_WORK/cmd.log"; }
+printf 'unknown=%s\n' "$(notify_once tsil; echo $?)"
+printf 'unknown_mark=%s\n' "$(notify_marked tsil && echo marked || echo no)"
+DRIVER
+  d="$NT_WORK/once.out"
+  t_eq "首次：发出去并返回 0" "$(nt_val "$d" first)" "0"
+  t_eq "当日第二次：不再发（返回 0）" "$(nt_val "$d" second)" "0"
+  t_eq "当日只发了一条命令" "$(nt_val "$d" calls)" "1"
+  t_eq "发送失败：返回非 0" "$(nt_val "$d" fail_rc)" "1"
+  t_eq "发送失败：不落当日标记（可再试）" "$(nt_val "$d" fail_mark)" "no"
+  t_eq "未知事件名：不发送（返回 0）" "$(nt_val "$d" unknown)" "0"
+  t_eq "未知事件名：不落标记" "$(nt_val "$d" unknown_mark)" "no"
+
+  # 四个「当日一次」事件各自的标记：三个未签时点必须各有独立标记
+  # （共用标记会让 22:00 那条把 23:00 那条永久挡住）；两个失败类共用同一个
+  nt_setup marks
+  nt_run marks <<'DRIVER'
+nt_send() { printf '%s\n' "$1" >> "$T_WORK/cmd.log"; }
+for e in failsign failtask nosign late miss; do
+  printf 'sent_%s=%s\n' "$e" "$(notify_once "$e"; echo $?)"
+done
+printf 'markfile=%s\n' "$(ls -a mod | grep '^\.fafu_notify_' | tr '\n' ' ')"
+for e in fail nosign late miss; do
+  printf '%s=%s\n' "$e" "$(notify_marked "$e" && echo marked || echo no)"
+done
+DRIVER
+  d="$NT_WORK/marks.out"
+  t_eq "failsign 首次发送成功" "$(nt_val "$d" sent_failsign)" "0"
+  t_eq "nosign 首次发送成功" "$(nt_val "$d" sent_nosign)" "0"
+  t_eq "miss 首次发送成功" "$(nt_val "$d" sent_miss)" "0"
+  for e in fail nosign late miss; do
+    t_eq "$e 已落当日标记" "$(nt_val "$d" "$e")" "marked"
+  done
+  t_eq "失败类共用一个标记、三个时点各自独立" \
+    "$(nt_val "$d" markfile)" ".fafu_notify_fail .fafu_notify_late .fafu_notify_miss .fafu_notify_nosign "
+}
+
+# ============================================================
+# 四、打扰冷却：基准落盘、冷却窗口内不发
 #
-# mock 只在「找不到真实 busybox」时才报错退出（正常情况下它必须能承接 applet 调用）。
-# 「找不到」这一支在 busybox ash 里测不出来——那里 `command -v busybox` 连清空 PATH
-# 都会命中内建 applet；而 mock 由哪个 shell 跑取决于环境（CI 上是系统 sh）。
-# 所以这里只断言两件与环境无关的事：报错分支确实写在源码里，且正常路径真的可用。
+# 冷却是「与上一次的实际时间比较」，故夹具按**相对时间**算（提前若干秒）：
+# 写死某个绝对时刻的测试会在那个时刻真的到来之后自己变红。
 # ============================================================
 
-nt_case_mock_guard() {
-  nt_setup
-  t_file "已生成 mock busybox 包装" "$NT_BB"
-  t_has "包装里带上了真实 busybox 的路径" "$NT_BB" "BB_REAL='"
-  t_has "mock 有「拿不到真实 busybox」的明确报错分支" "$T_ROOT/tests/mock/busybox" 'exit 127'
-  t_has "报错里指出了出路" "$T_ROOT/tests/mock/busybox" 'TEST_BUSYBOX'
-
-  # 正常路径：包装必须真的能取到日期（否则 mock 只是个会报错的摆设）
-  _d=$("$NT_BB" date +%Y-%m-%d 2>/dev/null)
-  t_eq "mock 包装可用：能取到日期（长度 10）" "${#_d}" 10
+nt_case_cooldown() {
+  local d
+  nt_setup warn
+  nt_run warn <<DRIVER
+nt_send() { printf '%s\n' "\$1" >> "\$T_WORK/cmd.log"; printf '%s\t%s\n' "\$_NT_TITLE" "\$_NT_TEXT" >> "\$T_WORK/msg.log"; }
+WAS_ON=1
+nt_cooldown "\$(( \$(now_s) - 600 ))"     # 上次打扰在 10 分钟前 → 早该放行
+printf 'first=%s\n'  "\$( (notify_warn; echo \$?) )"
+printf 'adv=%s\n'    "\$(( \$(nt_cooldown) - \$(now_s) ))"
+printf 'calls=%s\n'  "\$(grep -c . "\$T_WORK/cmd.log")"
+printf 'cmd=%s\n'    "\$(cat "\$T_WORK/cmd.log")"
+printf 'second=%s\n' "\$( (notify_warn; echo \$?) )"
+printf 'calls2=%s\n' "\$(grep -c . "\$T_WORK/cmd.log")"
+WAS_ON=0
+printf 'lead_dark=%s\n' "\$(notify_lead)"
+DRIVER
+  d="$NT_WORK/warn.out"
+  t_eq "冷却已过期：预警发出去（返回 0）" "$(nt_val "$d" first)" "0"
+  t_eq "预警发了一条命令" "$(nt_val "$d" calls)" "1"
+  t_has "预警 tag" "$d" "fafu-warn-20261001"
+  t_has "预警标题" "$NT_WORK/msg.log" "🔄 正在刷新登录状态"
+  t_has "预警正文含提前量" "$NT_WORK/msg.log" "5 秒后自动打开打卡页"
+  t_has_re "冷却基准被写到现在（不是回写旧值）" "$d" '^adv=-?[0-2]$'
+  t_eq "冷却窗口内：不再发（返回非 0）" "$(nt_val "$d" second)" "1"
+  t_eq "冷却窗口内：命令数没变" "$(nt_val "$d" calls2)" "1"
+  t_eq "熄屏（WAS_ON=0）：提前量为 0" "$(nt_val "$d" lead_dark)" "0"
 }
 
+# 「这次到底发没发」的返回值：调用方（keepalive）据此决定要不要留出阅读时间。
+# 旧写法把 sleep 放在「冷却已过」的分支里，等价于「发了才等」——这条不变量必须保住，
+# 否则通知关闭 / 降权不可用 / 冷却期内的每次亮屏刷新都会白等 5 秒。
+nt_case_warn_return() {
+  local d
+  nt_setup warnret
+  nt_run warnret <<'DRIVER'
+nt_send() { printf '%s\n' "$1" >> "$T_WORK/cmd.log"; }
+WAS_ON=1
+nt_cooldown 0
+printf 'sent=%s\n'     "$( (notify_warn; echo $?) )"        # 冷却已过 → 发了 → 0
+printf 'cooling=%s\n'  "$( (notify_warn; echo $?) )"        # 同一秒再调 → 冷却挡住 → 非 0
+NOTIFY=0
+nt_cooldown 0
+printf 'off=%s\n'      "$( (notify_warn; echo $?) )"        # 通知关闭 → 非 0
+NOTIFY=1; SU_MODE=""
+nt_cooldown 0
+printf 'nosu=%s\n'     "$( (notify_warn; echo $?) )"        # 降权不可用 → 非 0
+printf 'calls=%s\n'    "$(grep -c . "$T_WORK/cmd.log")"
+DRIVER
+  d="$NT_WORK/warnret.out"
+  t_eq "真发了 → 返回 0（调用方才 sleep）" "$(nt_val "$d" sent)" "0"
+  t_eq "冷却挡住 → 非 0（不该白等）" "$(nt_val "$d" cooling)" "1"
+  t_eq "通知关闭 → 非 0" "$(nt_val "$d" off)" "1"
+  t_eq "降权不可用 → 非 0" "$(nt_val "$d" nosu)" "1"
+  t_eq "四次调用只发出一条命令" "$(nt_val "$d" calls)" "1"
+}
 
-t_case "notify · A · 通知调用点齐全" nt_case_call_sites
-t_case "notify · A · 预警条件、提前量与冷却" nt_case_warn_order
-t_case "notify · A · 状态码译名" nt_case_state_text
-t_case "notify · A · 时间点提醒与请假排除" nt_case_time_points
-t_case "notify · A · 探测编排与降级" nt_case_probe_wiring
-t_case "notify · B · 真实 notify 生成的命令" nt_case_command
-t_case "notify · C · 文案模板与发送失败分支" nt_case_templates
-t_case "notify · D · 库加载缝" nt_case_lib_load
-t_case "notify · E · mock 时间源的兜底" nt_case_mock_guard
+# 冷却基准的落盘：在**子 shell** 里发预警（refresh_token 就是这么调它的），
+# 基准必须写到 state 层的文件上才可能在下次调用时还生效
+nt_case_cooldown_persist() {
+  local d
+  nt_setup persist
+  nt_run persist <<DRIVER
+nt_send() { printf '%s\n' "\$1" >> "\$T_WORK/cmd.log"; }
+WAS_ON=1
+past="\$(( \$(now_s) - 600 ))"
+nt_cooldown "\$past"
+( notify_warn ) >/dev/null
+printf 'file=%s\n'  "\$(cat mod/.fafu_notify_last | tr -d '\n')"
+printf 'sub=%s\n'   "\$( (nt_cooldown) )"
+printf 'stale=%s\n' "\$(( \$(nt_cooldown) - past ))"
+printf 'again=%s\n' "\$( (notify_warn; echo \$?) )"
+printf 'calls=%s\n' "\$(grep -c . "\$T_WORK/cmd.log")"
+DRIVER
+  d="$NT_WORK/persist.out"
+  t_eq "基准在子 shell 里读得回（不是内存变量）" "$(nt_val "$d" sub)" "$(nt_val "$d" file)"
+  t_has_re "基准被推进到现在（晚于上次打扰 600 秒）" "$d" '^stale=60[0-2]$'
+  t_eq "紧接着的第二次预警被冷却挡住" "$(nt_val "$d" again)" "1"
+  t_eq "冷却期内只发出过一条命令" "$(nt_val "$d" calls)" "1"
+}
+
+# 相对顺序不变量：**预警必须排在打开打卡页之前**。
+# 用真实 refresh_token 跑（只替换 token 来源与 sleep），预警与设备命令一起按发生顺序
+# 落进同一条 trace —— 数的是**实际调用顺序**，把被测对象整体 stub 掉时 trace 会塌成空。
+nt_case_warn_order() {
+  local d
+  nt_setup dv
+  # 这份工作目录里再放上设备命令替身（真机上 am / dumpsys 同样在 /system/bin 下）：
+  # 前导里的 PATH='./bin:...' 正好命中 dv_tools 写的那些包装器。
+  # DV_WORK 必须在 nt_setup 之后取——那之前 NT_WORK 还是上一条用例的目录（踩过）
+  DV_WORK="$NT_WORK"
+  dv_tools
+  nt_run order <<DRIVER
+# 通知与设备命令落进**同一条时间线**：跨进程的先后只有共享一个记录文件才可比
+nv="\$T_WORK/device-commands"
+MOCK_DEVICE_LOG="\$nv"
+export MOCK_DEVICE_LOG
+nt_send() { printf 'notify %s\n' "\$1" >> "\$nv"; }
+get_token() { echo NEW; }
+sleep() { :; }
+# 先自检设备命令替身接得住（接不住时下面的顺序断言会是空转）
+am start -n a/b >/dev/null 2>&1
+printf 'selftest=%s\n' "\$(grep -c 'device am' "\$nv")"
+: > "\$nv"
+refresh_token OLD >/dev/null
+# 时间线逐行输出（t_before 比的是行号）：每行一个事件，先通知后开页就一目了然
+printf 'timeline:\n'
+cat "\$nv"
+printf 'opens=%s\n' "\$(grep -c 'device am' "\$nv")"
+DRIVER
+  d="$NT_WORK/order.out"
+  t_ne "设备命令替身接得住（自检）" "$(nt_val "$d" selftest)" "0"
+  t_ne "开页确实发生了（否则下面的顺序断言是空转）" "$(nt_val "$d" opens)" "0"
+  # 相对顺序不变量：**预警必须排在打开打卡页之前**。
+  # 同一条时间线上先出现通知、后出现开页（device am），就是这个顺序的证据。
+  # 每一行一个事件，故 t_before 比的行号就是真实先后。
+  t_before "预警排在打开打卡页之前" "$d" 'notify cmd notification post' 'device am'
+  t_has "时间线里有开页（device am）" "$d" 'device am'
+}
+
+# ============================================================
+# 五、静默跳过：降权不可用 / 通知关闭时一律零调用
+# ============================================================
+
+nt_case_silent() {
+  local d
+  nt_setup silent
+  nt_run silent <<'DRIVER'
+nt_send() { printf '%s\n' "$1" >> "$T_WORK/cmd.log"; }
+WAS_ON=1
+nt_cooldown 0
+# 降权不可用（SU_MODE 为空）→ 三条路径都零调用
+SU_MODE=""
+printf 'e=%s\n' "$(notify_event miss; echo $?)"
+printf 'o=%s\n' "$(notify_once miss; echo $?)"
+printf 'w=%s\n' "$(notify_warn; echo $?)"
+printf 'calls=%s\n' "$(grep -c . "$T_WORK/cmd.log" 2>/dev/null || echo 0)"
+printf 'mark=%s\n'  "$(notify_marked miss && echo marked || echo no)"
+# 通知整体关闭 → 同样零调用
+SU_MODE="su - shell -c"; NOTIFY=0
+printf 'e_off=%s\n' "$(notify_event miss; echo $?)"
+printf 'o_off=%s\n' "$(notify_once miss; echo $?)"
+printf 'w_off=%s\n' "$(notify_warn; echo $?)"
+printf 'calls_off=%s\n' "$(grep -c . "$T_WORK/cmd.log" 2>/dev/null || echo 0)"
+DRIVER
+  d="$NT_WORK/silent.out"
+  t_eq "降权不可用：通知类事件静默跳过（返回 0）" "$(nt_val "$d" e)" "0"
+  t_eq "降权不可用：当日一次的通知也静默跳过" "$(nt_val "$d" o)" "0"
+  t_eq "降权不可用：预警报「没发」（非 0，调用方不该等）" "$(nt_val "$d" w)" "1"
+  t_eq "降权不可用：一条命令都没有" "$(nt_val "$d" calls)" "0"
+  t_eq "降权不可用：不落当日标记" "$(nt_val "$d" mark)" "no"
+  t_eq "通知关闭：零调用（事件）" "$(nt_val "$d" e_off)" "0"
+  t_eq "通知关闭：零调用（当日一次）" "$(nt_val "$d" o_off)" "0"
+  t_eq "通知关闭：预警报「没发」（非 0）" "$(nt_val "$d" w_off)" "1"
+  t_eq "通知关闭：命令总数仍为 0" "$(nt_val "$d" calls_off)" "0"
+}
+
+# ============================================================
+# 六、能力收口（静态）：业务层不再自己拼 tag，也不再自己发通知
+#
+# 判据只用**能力名**与**命令位**，不绑行号、也不绑局部变量名——
+# 谁改了调用方式、谁绕过了这一层，都会在这里报红。
+# ============================================================
+
+NT_CAPS="tag_of:notify probe_su:notify nt_send:notify notify:notify notify_event:notify notify_once:notify notify_warn:notify notify_lead:notify"
+NT_LAYERS="signin keepalive commands"
+
+nt_case_boundary() {
+  local src f cap owner miss all
+  NT_WORK="$T_WORK_ROOT/notify-boundary"
+  mkdir -p "$NT_WORK"
+  src="$NT_WORK/program.sh"
+  t_write_program "$src" || { _t_fail "无法拼出全程序文本"; return 0; }
+
+  # 通知的八个能力只有 notify 层定义（能力名 = 函数的唯一真源，改名会在这里报红）
+  miss=""
+  for cap in $NT_CAPS; do
+    owner=""
+    for f in $TEST_LIB_FILES; do
+      if grep -qE "^[ 	]*${cap%%:*}[ 	]*\(\)" "$T_ROOT/$f" 2>/dev/null; then owner="${f##*/}"; fi
+    done
+    [ "$owner" = "${cap##*:}.sh" ] || miss="$miss $cap→${owner:-无}"
+  done
+  t_eq "通知能力全部定义在 notify 层" "[$miss]" "[]"
+
+  # tag 只在 notify 层拼：业务层说事件名，进 notify 层的 tag 由 tag_of 拼出。
+  # 唯一豁免是 commands 层的 notify 子命令（它发的就是测试通知，不属于业务事件表）
+  all=""
+  for f in $TEST_LIB_FILES; do
+    if grep -qF 'fafu-$(tag_of' "$T_ROOT/$f" 2>/dev/null; then all="$all ${f##*/}"; fi
+  done
+  t_eq "tag 拼法只在 notify 层（外加测试通知）" "[$all]" "[ notify.sh commands.sh]"
+  t_has "notify 层经 tag_of 拼 tag" "$T_ROOT/lib/notify.sh" 'fafu-$(tag_of'
+  # 事件名（而不是 tag）才是业务层与 notify 层的接口
+  for f in signin keepalive; do
+    t_hasnt "$f 层只报事件名（不出现 tag 拼接）" "$T_ROOT/lib/$f.sh" 'tag_of'
+  done
+
+  # 发送命令逐字只有一处，且只在 notify 层（注释里提到它不算）
+  all=""
+  for f in $TEST_LIB_FILES; do
+    if grep -qE '^[ 	]*t="cmd notification post' "$T_ROOT/$f" 2>/dev/null; then all="$all ${f##*/}"; fi
+  done
+  t_eq "命令位的 cmd notification post 只在 notify 层" "[$all]" "[ notify.sh]"
+
+  # 打扰冷却只由 notify 层判定：冷却基准的**读写**只出现在 notify 层
+  # （state 层只持有 nt_cooldown 的实现，它不参与「要不要发」的判断）
+  all=""
+  for f in $TEST_LIB_FILES fafu_checkin.sh; do
+    if grep -qE 'nt_cooldown[ 	]' "$T_ROOT/$f" 2>/dev/null; then all="$all ${f##*/}"; fi
+  done
+  t_eq "冷却基准只由 notify 层读写，判定也在这一层" "[$all]" "[ notify.sh]"
+  t_hasnt "keepalive 层不再自己判冷却" "$T_ROOT/lib/keepalive.sh" 'NOTIFY_COOLDOWN'
+  t_hasnt "keepalive 层不再自己设文案" "$T_ROOT/lib/keepalive.sh" '_NT_TITLE'
+  t_has "keepalive 层经 notify_warn 发预警" "$T_ROOT/lib/keepalive.sh" 'notify_warn'
+  # 业务层不直接落标记：标记只由 notify 层在发送成功后写
+  for f in signin keepalive; do
+    t_hasnt "$f 层不直接落标记（经 notify 层）" "$T_ROOT/lib/$f.sh" 'notify_mark '
+  done
+
+  # 文案表：正文不含引号与命令替换（含了会破坏 su 的引号配对，是本功能最容易写错的地方）
+  if grep -nE '^_msg_' "$T_ROOT/lib/notify.sh" 2>/dev/null | grep -qE "_NT_TEXT=.*['\`]"; then
+    _t_fail "文案正文不含引号与命令替换（出现了引号或反引号）"
+  else
+    _t_pass "文案正文不含引号与命令替换"
+  fi
+
+  # 相对顺序不变量（静态那一半）：**降权探测必须排在子命令分发之前**。
+  # 各分支都会直接 exit，放在 case 之后就是永远执行不到的死代码（曾踩过）。
+  # 锚点用**调用点**而不是行号：搬代码不会假红，顺序真的变了才会红。
+  t_before "探测排在子命令分发之前" "$T_ROOT/fafu_checkin.sh" 'probe_su ;;' 'cmd_notify; exit'
+}
+
+# ============================================================
+# 七、端到端形状（静态）：入口与各层的调用点仍然齐全
+#
+# 这一节盯的是「有没有人把调用点删掉」——调用点没了，上面所有函数级断言都还在跑，
+# 但设备上那件事根本不会发生。判据只用被调用者与调用形状，不绑行号。
+# ============================================================
+
+nt_case_callsites() {
+  local src miss c
+  NT_WORK="$T_WORK_ROOT/notify-callsites"
+  mkdir -p "$NT_WORK"
+  src="$NT_WORK/program.sh"
+  t_write_program "$src" || { _t_fail "无法拼出全程序文本"; return 0; }
+
+  # 十个业务事件 + 预警 + 测试通知的调用点：每个都必须还在
+  miss=""
+  for c in 'notify_event sign'        'notify_event supp'     'notify_event seen' \
+           'notify_event leave'       'notify_once failsign'  'notify_once failtask' \
+           'notify_once nosign'       'notify_once late'      'notify_once miss' \
+           'notify_warn'              'tag_of test'; do
+    grep -qF "$c" "$src" 2>/dev/null || miss="$miss [$c]"
+  done
+  t_eq "十二个通知调用点齐全" "[$miss]" "[]"
+
+  # 业务层不再自己发通知：signin / keepalive 里不出现底层发送与文案表
+  t_hasnt "signin 层不直接调文案表" "$T_ROOT/lib/signin.sh" '_msg_'
+  t_hasnt "signin 层不直接调底层发送" "$T_ROOT/lib/signin.sh" 'notify "fafu-'
+  t_hasnt "keepalive 层不直接调底层发送" "$T_ROOT/lib/keepalive.sh" 'notify "fafu-'
+  t_hasnt "入口不直接调底层发送" "$T_ROOT/fafu_checkin.sh" 'notify "fafu-'
+}
+
+# ---- 注册（顺序即执行顺序） ----
+
+t_case "notify · 降权探测以身份为准" nt_case_probe
+t_case "notify · 候选写法依次尝试与降级" nt_case_probe_order
+t_case "notify · 事件名 → tag 与文案" nt_case_map
+t_case "notify · 每日一次去重与失败不落标记" nt_case_once
+t_case "notify · 打扰冷却窗口" nt_case_cooldown
+t_case "notify · 冷却基准落盘（子 shell 内）" nt_case_cooldown_persist
+t_case "notify · 预警返回值与调用方的等待" nt_case_warn_return
+t_case "notify · 预警排在打开打卡页之前" nt_case_warn_order
+t_case "notify · 静默跳过（降权不可用 / 通知关闭）" nt_case_silent
+t_case "notify · 能力收口与相对顺序（静态）" nt_case_boundary
+t_case "notify · 调用点齐全（静态）" nt_case_callsites

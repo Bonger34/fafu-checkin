@@ -47,8 +47,8 @@ lo_case_whitelist_missing() {
   lo_fixture
   lo_layer a.sh <<'A'
 notify() {
-  _ntc="cmd notification post"
-  $SU_MODE "$_ntc"
+  send="cmd notification post"
+  $SU_MODE "$send"
 }
 A
   lo_layer b.sh <<'B'
@@ -178,8 +178,9 @@ C
 # 仓库自带的白名单：文件必须在，且关键项都在（内容本身是人工维护的契约）
 lo_case_repo_whitelist() {
   t_file "仓库带 tools/layer-whitelist.txt" "$T_ROOT/tools/layer-whitelist.txt"
-  t_has "白名单含 _ntc（通知命令字符串）" "$T_ROOT/tools/layer-whitelist.txt" '_ntc'
   t_has "白名单含 SU_MODE（降权写法）" "$T_ROOT/tools/layer-whitelist.txt" 'SU_MODE'
+  # 白名单越短越有用：命令串直接写在本地变量里之后，_ntc 那一条就该删掉
+  t_hasnt "白名单不再含已废弃的 _ntc" "$T_ROOT/tools/layer-whitelist.txt" '_ntc'
 }
 
 # 守卫报的错必须指出「是谁调用了谁」，否则维护者还得自己去翻源码

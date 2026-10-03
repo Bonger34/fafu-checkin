@@ -31,7 +31,8 @@
 # 当前用例：多数只走「透传」这一半；tests/skeleton.sh 用 MOCK_DATE_CTL 真的拨钟
 # （验 base 层的时间源），跨日/时点用例同样直接设它；tests/api.sh 用 MOCK_WGET_DIR
 # 断言网络调用的命令行与响应注入；tests/device.sh 用 MOCK_DEVICE_DIR 断言设备命令
-# 的命令行与 fd 加固。
+# 的命令行与 fd 加固。降权链路（su）的替身不在这里——它由 tests/notify.sh 自己生成，
+# 因为探测里套了 timeout、命令最终由别的进程 fork 出去，必须落在文件上。
 # ============================================================
 BB_REAL="${BB_REAL:-busybox}"
 MOCK_DATE_FMT="${MOCK_DATE_FMT:-+%s}"
@@ -102,6 +103,12 @@ if [ "$1" = "wget" ] && [ -n "${MOCK_WGET_DIR:-}" ]; then
   exit 0
 fi
 
+# ---- 分派前缀：本机（Windows）的包装器靠 `#!<busybox> sh` 才可执行，解释器会把
+# 一个多余的 `sh` 留在参数最前面。设备命令的包装器同样如此，故这一处统一剥掉
+# （也避免 `set -- $*` 那种把参数边界抹平的写法）。
+_bb_applet="$1"
+[ "$_bb_applet" = "sh" ] && shift && _bb_applet="${1:-}"
+
 # ---- 设备命令：仅当 MOCK_DEVICE_DIR 被设置时接管 ----
 # am / input / wm / dumpsys 在真机上是 /system/bin 下的独立程序（不是 busybox applet），
 # 被测层通过 PATH 调用它们。要用替身顶掉它们，就得在 PATH 上放同名文件——
@@ -122,8 +129,8 @@ fi
 if [ -n "${MOCK_DEVICE_DIR:-}" ]; then
   _mock_dev_applet=""
   _mock_dev_fixture=""
-  case "$1" in
-    am|input|wm) _mock_dev_applet="$1" ;;
+  case "$_bb_applet" in
+    am|input|wm) _mock_dev_applet="$_bb_applet" ;;
     dumpsys)
       # 两个子命令（power / activity activities）分开注入；未注入时输出为空
       case "$2" in
@@ -137,6 +144,10 @@ if [ -n "${MOCK_DEVICE_DIR:-}" ]; then
     if [ -f /dev/stdout ]; then _mock_dev_fd="file"; fi
     { printf '%s' "$_mock_dev_fd"; for _a in "$@"; do printf '|%s' "$_a"; done; printf '\n'; } \
       >> "$MOCK_DEVICE_DIR/calls" 2>/dev/null
+    # 可选：把「设备命令发生了」这件事追加到调用方指定的时间线文件里。
+    # 要断言「通知早于开页」这类**跨进程的先后**时用它——两个动作落到同一条时间线，
+    # 顺序才是可比的（各自的记录文件之间没有可比的时间基准）。
+    [ -n "$MOCK_DEVICE_LOG" ] && printf 'device %s\n' "$_mock_dev_applet" >> "$MOCK_DEVICE_LOG" 2>/dev/null
     if [ -n "$_mock_dev_fixture" ]; then
       [ -f "$MOCK_DEVICE_DIR/$_mock_dev_fixture" ] && cat "$MOCK_DEVICE_DIR/$_mock_dev_fixture"
     fi

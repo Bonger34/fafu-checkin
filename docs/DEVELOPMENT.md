@@ -108,7 +108,7 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 | `lib/state.sh` | 运行时状态的**唯一读写者**：服务开关、签到记录、保活统计、完成标记、四类通知标记、通知冷却基准；对外只给语义函数，文件格式是它的契约 |
 | `lib/api.sh` | 接口：token 提取、请求签名、HTTP 调用（含 wget 超时选项探测）；`http_post` 是全程序唯一的网络出口 |
 | `lib/device.sh` | 设备控制：屏幕状态、前端任务枚举、打开/移除打卡页 |
-| `lib/notify.sh` | 通知：降权探测、文案表、发送、每日一次去重、打扰冷却 |
+| `lib/notify.sh` | 通知：事件名 → tag 与文案、降权探测、发送、每日一次去重、打扰冷却 |
 | `lib/desc.sh` | 模块描述：读状态生成描述文本并写入（KernelSU 覆盖优先，回退改写元数据） |
 | `lib/keepalive.sh` | 刷新 token 与白天保活（15 分钟节流、30 分钟冷却、亮屏延后） |
 | `lib/signin.sh` | 签到决策：取任务 / 解析字段 / 判定该做什么 / 提交并记录（三档返回码） |
@@ -140,7 +140,8 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
   开关 `svc_is_disabled` / `svc_set`，签到记录 `sign_get` / `sign_set`，
   保活统计 `ka_counts` / `ka_ok_count` / `ka_fail_count` / `ka_last_time` / `ka_last_result` /
   `ka_is_today` / `ka_note`，完成标记 `done_marked` / `done_mark`，
-  通知标记 `notify_marked` / `notify_mark`（事件名 `fail` / `nosign` / `late` / `miss`），
+  通知标记 `notify_marked` / `notify_mark`（事件名 `fail` / `nosign` / `late` / `miss`；
+  notify 层的 `failsign` 与 `failtask` 都映射到 `fail`），
   冷却基准 `nt_cooldown`。
   文件名、字段名、字段顺序、内容格式是**对外契约**（升级后不丢当日记录），
   「按日滚动」的三处判定（保活统计、完成标记、通知一日一次）也都只在本层发生。
@@ -178,7 +179,7 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 |---|---|
 | 发送命令 | `cmd notification post -t "<标题>" "<tag>" "<正文>" -S bigtext` |
 | **执行身份** | **必须降权 shell**：`su - shell -c '...'`。root 身份发出的通知在部分 ROM 上被静默丢弃（实测 HyperOS 2 / 小米 13 Ultra：命令 `rc=0`，通知栏无任何显示），换 shell 身份后正常出现 |
-| **降权探测必须验语义** | `su - shell -c CMD` 在 **KernelSU** 上会让 `-c` 落空：它用 Rust `getopts` 且默认 `StopAtFirstFree`，长度 1 的 `-` 是 free 参数、在那里就停止解析，最终 exec 出**交互式登录 shell**、把 CMD 当多余参数丢掉；`</dev/null` 下立刻 EOF 退出 **0**。只看退出码会记成「可用」，之后每条通知都变成「rc=0 但什么都没发生」。故 `probe_su` 用 `$c 'id -u'` 的输出必须等于 **2000**，并依次尝试 `su - shell -c` / `su shell -c` / `su shell /system/bin/sh -c` |
+| **降权探测必须验语义** | `su - shell -c CMD` 在 **KernelSU** 上会让 `-c` 落空：它用 Rust `getopts` 且默认 `StopAtFirstFree`，长度 1 的 `-` 是 free 参数、在那里就停止解析，最终 exec 出**交互式登录 shell**、把 CMD 当多余参数丢掉；`</dev/null` 下立刻 EOF 退出 **0**。只看退出码会记成「可用」，之后每条通知都变成「rc=0 但什么都没发生」。故 `probe_su` 先用 `command -v` 解析出 `su` 的实际路径，再用它依次尝试 `- shell -c` / `shell -c` / `shell /system/bin/sh -c`，并以 `id -u` 输出必须等于 **2000** 为准 |
 | 通知 id | **恒为 2020**，不可指定 → 只能靠 `tag` 区分事件；**同 tag 会覆盖**（静默更新，不产生新提示音） |
 | channel | 恒为 `shell_cmd`（名为 "Shell command"、重要性 DEFAULT），**不可调整**声音 / 震动 / 图标 |
 | 通知归属显示 | 显示为 **Shell**（AOSP 自己的 manifest 里也专门申请 `SUBSTITUTE_NOTIFICATION_APP_NAME` 来给自己的通知改名） |
@@ -197,19 +198,33 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 
 **实现约定**：
 
-- 文案模板集中在 `_msg_*()` 系列函数里，正文**不含引号与命令替换**，可安全直接展开；
-- 所有发送统一走 `notify()` / `notify_once()`，外层用单引号包住 `su - shell -c` 的命令（`$SU_MODE '...'`），
-  这样正文里的双引号不会破坏引号配对——**这是本功能最容易写错的地方**；
-- `probe_su()` 在启动与手动子命令时探测一次降权写法（依次尝试 `su - shell -c`、`su shell -c`、
-  `su shell /system/bin/sh -c`，**以 `id -u` 输出等于 2000 为准**），结果写入 `$SU_MODE` 并记入启动日志 `notify=[...]`；
+- 业务层**只报事件名**（`sign` / `supp` / `seen` / `leave` / `failsign` / `failtask` /
+  `nosign` / `late` / `miss`），tag 与文案都由 notify 层查表。新增一条通知要动三处
+  （事件表 `_NT_TPL_*`、tag 表 `tag_of`、`_msg_*` 文案），但都在这一个文件里：
+  - `tag_of()` 事件名 → tag 后缀（完整 tag = `fafu-<后缀>-<当日 tag>`），默认后缀就是
+    事件名本身。两个例外是**对外契约**：`seen` 与 `sign` 同用 `sign`（同为「已签到」，
+    同日互相覆盖不堆积）、三个未签时点用 `t2200` / `t2230` / `miss`；
+  - `notify_event()` 取文案模板并发送。文案模板集中在 `_msg_*()` 系列函数里，
+    正文**不含引号与命令替换**，可安全直接展开；
+- 所有发送统一走 `notify()` / `notify_event()` / `notify_once()` / `notify_warn()`；
+  `notify()` 负责构造命令串，**执行那一步单独放在 `nt_send()`**（与 api 层的 `http_post`
+  同理）：改执行方式、或在断言里截住「最终交给系统执行的命令」都只动这一处；
+- `probe_su()` 在启动与手动子命令时探测一次降权写法：先用 `command -v` 解析出 `su` 的
+  实际路径（`SU_BIN` 是回退与注入点，默认 `/system/bin/su`），再依次尝试
+  `<su> - shell -c`、`<su> shell -c`、`<su> shell /system/bin/sh -c`，
+  **以 `id -u` 输出等于 2000 为准**，结果写入 `$SU_MODE` 并记入启动日志 `notify=[...]`；
   由 `start` 派生的守护进程通过 `FAFU_SU_MODE` 继承该结果，不重复探测；
 - 探测必须排在子命令 `case` **之前**——各分支会直接 `exit`，放后面就是永远执行不到的死代码；
-- 「首次失败」类通知用同一个事件名 `fail`（其余三个是 `nosign` / `late` / `miss`），
-  由 state 层映射到各自独立的标记文件：**三个未签时点必须各用一个标记**，
-  共用标记会让 22:00 那条把 23:00 那条「今晚未能自动签到」永久挡住；
+- 「首次失败」类通知有两个事件名（`failsign` / `failtask`）：文案与 tag 各不同，
+  但**共用同一个当日标记**（`_NT_MARK_failsign` / `_NT_MARK_failtask` 都指向 state 层的 `fail`）；
 - `notify_once()` **先发送、成功后才经 state 层落标记**：反过来的话一次瞬时失败会让该类提醒整天不再出现；
-- 预警冷却基准落盘保存（state 层的 `nt_cooldown`），**不能放普通变量**：`refresh_token` 总在 `$( )` 子 shell 中调用，
-  变量赋值会随子 shell 丢弃，导致冷却永不生效；
+- 三个未签时点各自独立标记（`nosign` / `late` / `miss`）——共用标记会让 22:00 那条
+  把 23:00 那条「今晚未能自动签到」永久挡住；
+- 预警冷却（`notify_warn`）的判定与落盘都在 notify 层；基准经 state 层的 `nt_cooldown` 保存，
+  **不能放普通变量**：`refresh_token` 总在 `$( )` 子 shell 中调用预警，变量赋值会随子 shell 丢弃；
+- `notify_warn()` 的返回值就是「这次到底发没发」：**0 = 真发了**，非 0 = 被冷却挡住 /
+  通知关闭 / 降权不可用。`refresh_token` 据此决定要不要 `sleep NOTIFY_LEAD`
+  （没发还等，等于每次亮屏刷新都白等 5 秒）；
 - `PL`（日期 tag）在主循环中每轮重算，避免守护进程常驻跨日后 tag 仍停在启动那天；
 - 预警使用的提前量 `NOTIFY_LEAD` **只在屏幕已亮时生效**（`notify_lead()` 自带判断），
   熄屏路径不做无意义的等待。
@@ -268,12 +283,13 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 **服务开关**：状态文件 `fafu-checkin.state`（`enabled` / `disabled`）。
 停用 = 停进程 + 开机不启动 + 无网络请求。
 
-**通知**（`notify` / `notify_once`，模板见 `_msg_*`）：
+**通知**（`notify_event` / `notify_once` / `notify_warn`，模板见 `_msg_*`，tag 见 `tag_of`）：
 
 - 触发：签到成功 / 补签成功 / 检测到已签到 / 检测到请假 / **当日首次**签到失败 /
   **当日首次**获取任务失败 / 22:00 与 22:30 与 23:00 未签提醒 / 打开打卡页前的预警
   （屏幕已亮时必发，与静默路径或兜底唤醒无关）
-- 去重：失败类与未签提醒用标记文件做「一日一次」；同 tag 的通知相互覆盖（同日同事件不会堆积）
+- 去重：失败类与未签提醒用标记文件做「一日一次」（失败类的两个事件名共用一个标记）；
+  同 tag 的通知相互覆盖（同日同事件不会堆积）
 - 预警条件：**屏幕已亮**（本次确实会打开打卡页）且距上次打扰型通知超过 `NOTIFY_COOLDOWN`（默认 300 秒）
   才发，且排在 `open_page` **之前**，并 `sleep NOTIFY_LEAD` 留出阅读时间；
   熄屏时**不发**任何预警——那条路径是静默开页（屏幕不亮），用户看不见，发了也无意义。
@@ -383,13 +399,13 @@ sh build.sh                                 # 构建（含产物文件核对）
 
 **断言总入口 `tools/run-tests.sh`**（`tests/` 下的用例文件；harness 见 `tests/harness.sh`）：
 
-- 基线：**379 项**（`api` 45 + `device` 50 + `layer` 33 + `notify` 94 + `skeleton` 43 + `state` 114），改动后应保持全绿；
+- 基线：**395 项**（`api` 45 + `device` 50 + `layer` 33 + `notify` 110 + `skeleton` 43 + `state` 114），改动后应保持全绿；
   任一项失败时脚本以非 0 退出；迁移前草稿版的计数（文档写的 92、提交记录里的 95/100）都不可靠——
   那版测试里有一个 `for` 循环因缺换行整段没执行、断言函数复用变量把部分结果静默覆盖；
   拆层前实测为 115 项。
   本机（Windows）没有 `zip`/`unzip` 时，`skeleton` 里「打包产物校验」整段（13 条断言）会**跳过**
-  （计数上记为 `跳过 1 项`，不计入通过，避免「本机没跑」被读成「已验证」），此时报 379 项；
-  CI 上全跑，报 392 项；
+  （计数上记为 `跳过 1 项`，不计入通过，避免「本机没跑」被读成「已验证」），此时报 395 项；
+  CI 上全跑，报 408 项；
 - 断言只描述**外部行为**——返回码、状态文件产物、交给系统执行的命令字符串、
   「某个时刻会发生什么」；不绑行号，重构搬代码不应制造假红灯。
   需要容忍「空白量可变」时（例如 case 分支的对齐空格）用 `t_has_re`（正则），
@@ -400,7 +416,9 @@ sh build.sh                                 # 构建（含产物文件核对）
 - 注入缝沿用运行时既有开关，不加测试专用后门：时间走 `BB_OVERRIDE` + `tests/mock/busybox`
   （设 `MOCK_DATE_CTL` 即可把 `"$BB" date` 拨到任意时刻，`tests/skeleton.sh` 与 `tests/state.sh`
   用它验时间源与跨日行为；秒位没有可控来源，完整时间戳固定输出 `:00`），
-  降权写法走 `SU_MODE`，通知命令走 `NOTIFY_CMD`，
+  降权写法走 `SU_MODE`（探测本身走 `SU_BIN`），通知命令走 `NOTIFY_CMD`，
+  **发送走 `nt_send`**（覆盖同名函数即可截住「最终交给系统执行的命令」，
+  `tests/notify.sh` 用它断言 tag / 标题 / 正文与发送失败分支），
   **网络走 `http_post`**（覆盖同名函数即可注入响应体 / 退出码，`tests/api.sh` 用它复现
   「响应异常 / 超时」两条路径），token 目录走 `LD_DIR`（加载时生效；同一驱动内要换目录
   直接改 `LD`）；
@@ -418,13 +436,25 @@ sh build.sh                                 # 构建（含产物文件核对）
   （见 `.github/workflows/`）；三者统一由 `tools/lib.sh` 的 `find_busybox` 定位。
   替身只在对应控制变量被设置时接管那处环境事实（完全不设就等价于透传）：时间源
   `MOCK_DATE_CTL`、`/dev/urandom`（`MOCK_RANDOM_CTL`；Windows 上没有这个设备，
-  签名随机数会退化成空串）、wget（`MOCK_WGET_DIR`）、设备命令（`MOCK_DEVICE_DIR`）；
+  签名随机数会退化成空串）、wget（`MOCK_WGET_DIR`）、设备命令（`MOCK_DEVICE_DIR`）、
+  降权命令（`MOCK_SU_EMPTY` / `MOCK_SU_ID`，配合包装脚本，见下面的说明）；
   其余 applet 一律透传；
 - 本机（Windows）没有系统 `sh` 时用 `busybox sh tools/run-tests.sh` 跑；
   断言脚本本身保持 POSIX 兼容，CI 直接用系统 `sh`；
+- **Windows + busybox 的四个坑**（`tests/notify.sh` 的注释里有同样一份）：
+  ① 写驱动脚本不能 `cat > "$name.sh"` 之后再追加前导——驱动主体是从 stdin 读进来的，
+  那个 heredoc 会变成脚本进程的 stdin，写出来顺序正好颠倒；先落临时文件再拼接；
+  ② PATH 上的包装脚本第一行必须是 `#!<busybox> sh`（本机扩展名缺失时只认这种 shebang），
+  解释器会把一个多余的 `sh` 留在参数最前面，替身要认；
+  ③ `su` 是 busybox 的**内建 applet**，PATH 上的同名文件拦不到它——探测改成显式走 `SU_BIN`；
+  ④ 工作目录路径里带空格时，`$变量` 当命令名会因词分割执行失败——顶掉命令要用同名**函数**
+  （`nt_send` / `http_post`），不要用「把变量指向函数名」的写法；
 - 驱动脚本里的路径**一律用相对路径**（`cd` 进临时目录再以 `./x.sh` 运行）：
   Windows 的 `D:/...` 在 sh 里既没有根目录也会被当成分隔符，喂进被测代码会得到 `/mod/...`
   这类残缺路径（踩过）；被测代码在设备上用的仍是绝对路径，这里只是替身环境；
+  驱动本体需要的绝对路径（如 `SU_BIN`、`T_WORK`）由前导写好——**别在驱动里读 `$PWD`**；
+- 每个驱动一份独立的工作目录（`tests/.work/notify-<驱动名>`）：同一条用例里的多个驱动
+  共用目录时，后一个驱动会覆盖前一个留下的产物，断言会静默空转（踩过）；
 - 按关键字筛选用例时，含非 ASCII 的关键字在 Windows 控制台上会因代码页被改写，
   优先用 `^api` / `^device` / `^layer` / `^notify` / `^skeleton` / `^state` / `^desc` 这类纯 ASCII 前缀。
 
@@ -443,8 +473,14 @@ sh build.sh                                 # 构建（含产物文件核对）
   取不到新 token 时不提前关页（只关一次）、拿到新 token 后立即关页（提前关 + 收尾关）。
   时序用例只注入 token 来源与 `sleep`，`open_page` / `close_page` 跑真实实现，断言数的是
   它们**实际发出的 `am` / `dumpsys` 条数**（stub 掉被测对象时这些数字会塌掉，防止空转）；
-- `tests/notify.sh`：通知的调用点、文案模板、tag、冷却、去重、降权命令构造，
-  以及少数**相对顺序**不变量（探测排在子命令分发之前、开页预警排在 `open_page` 之前）；
+- `tests/notify.sh`：通知层的四条口径——降权探测（替身 su 复现「`-c` 落空、命令没跑、
+  退出码却是 0」这条设备语义，验「以 `id -u` 输出等于 2000 为准」与三个候选依次尝试）、
+  事件名 → tag 与文案（事件清单直接从层里的映射表读出，不在测试里另抄一份）、
+  发送（`nt_send` 缝截住真实构造出的命令串）与每日一次去重（发送失败不落标记）、
+  打扰冷却（基准落盘、子 shell 内仍生效、返回值被调用方用来决定要不要等）。
+  两条**相对顺序**不变量各有一半：预警排在 `open_page` 之前由一次真实 `refresh_token`
+  的时间线钉住（通知与设备命令落进同一条记录），探测排在子命令分发之前由调用点锚点的
+  静态判据钉住（不绑行号）；
 - `tests/state.sh`：state 层的读写契约与 desc 层的呈现——五类状态的文件名/字段名/字段顺序/
   内容格式逐字节断言（含「旧版本写下的文件仍读得出」）、跨日归零与按日滚动（用拨钟验证）、
   通知「发送失败不落标记」、描述文案逐字比对、写入契约（改写元数据仍保留其余行、
@@ -480,7 +516,8 @@ sh /data/adb/modules/fafu-checkin/fafu_checkin.sh status
    ```
 2. **跑一次真通知**：`sh /data/adb/modules/fafu-checkin/fafu_checkin.sh once`，
    确认通知栏出现、标题 emoji 正常；日志里应有
-   `通知链路: 降权写法 [...] 可用（id -u = 2000）`，启动行有 `notify=[...]`。
+   `通知链路: 降权写法 [...] 可用（id -u = 2000）`（写法带完整路径，如
+   `[/system/bin/su - shell -c]`），启动行有 `notify=[...]`。
 3. **测 Doze 延迟**：熄屏放置 30 分钟后触发一次，记录实际送达时间。
    若延迟超过 10 分钟，22:00 那条「还剩 30 分钟」的时点就需要重算。
 
@@ -493,6 +530,7 @@ sh /data/adb/modules/fafu-checkin/fafu_checkin.sh status
 已在设备上验证（小米 13 Ultra / Android 17 / SDK 37）：
 
 - 降权链路可用：日志 `通知链路: 降权写法 [su - shell -c] 可用（id -u = 2000）`
+  （该次记录早于本次改动；改动后同一条会记成 `[/system/bin/su - shell -c]`）
 - 通知**真实送达**（目视确认，非依赖 `rc=0`）
 - 请假分支正确：服务端 `signState=2` → 弹「🏖 今日查寝已请假」，未误报为「已签到」
 - 请假排除生效：请假当天**不发** 22:00 / 22:30 / 23:00 三条未签提醒（设计使然）

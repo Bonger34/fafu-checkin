@@ -49,7 +49,7 @@ cmd_notify() { # 发一条测试通知，用来确认通知链路是否真的能
   fi
   _NT_TITLE="🔔 通知测试"
   _NT_TEXT="如果你看到这条，说明通知链路正常（$("$BB" date '+%m-%d %H:%M')）"
-  if notify "fafu-test-$PL"; then
+  if notify "fafu-$(tag_of test)-$PL"; then
     echo "已发送（降权写法: $SU_MODE）"
     echo "没收到时依次查：系统设置里 Shell 的通知权限、勿扰模式、以及是否被 ROM 拦截"
     return 0

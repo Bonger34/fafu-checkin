@@ -18,16 +18,10 @@ refresh_token() { # $1=旧token；$2=允许唤醒重试(1=是,0=否，默认1)�
   screen_is_on && WAS_ON=1
   # 开页预警：屏幕已亮时，本次确实会打开打卡页 → 先通知再开，别让页面毫无解释地跳出来。
   # （熄屏时不开预警：用户看不见，且静默开页本就不打扰。）
-  # 冷却用于防突发：一次刷新失败可能连锁触发多次 refresh_token，避免连续弹同一条。
-  if [ "${WAS_ON:-0}" = "1" ] && [ -n "$SU_MODE" ]; then
-    now_ts=$(now_s)
-    if [ $((now_ts - $(nt_cooldown))) -ge "$NOTIFY_COOLDOWN" ]; then
-      nt_cooldown "$now_ts"
-      _NT_TITLE="🔄 正在刷新登录状态"
-      _NT_TEXT="$(notify_lead) 秒后自动打开打卡页（用于刷新登录），完成后自动关闭，无需操作"
-      notify "fafu-warn-$PL"
-      sleep "$(notify_lead)"   # 留出阅读时间；提前量由 NOTIFY_LEAD 配置，默认 5 秒
-    fi
+  # 冷却、通知开关、降权是否可用都由 notify_warn 判定；它返回 0 = 这次真的发了通知，
+  # 才需要留出阅读时间（没发还等，等于每次亮屏刷新都白等 5 秒）。
+  if [ "${WAS_ON:-0}" = "1" ] && notify_warn; then
+    sleep "$(notify_lead)"   # 留出阅读时间；提前量由 NOTIFY_LEAD 配置，默认 5 秒
   fi
   # 阶段1：打开打卡页（熄屏/锁屏下屏幕不亮）
   open_page

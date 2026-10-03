@@ -348,37 +348,38 @@ st_case_notify_once() {
   st_write_env
   st_run once <<'DRIVER'
 # SU_MODE 是「降权写法可用」的注入点：不设它 notify / notify_once 会直接跳过（零调用），
-# 这样断言就测不到去重与标记，故这里显式给一个值，真正执行的发送由下面的 notify stub 顶替
+# 这样断言就测不到去重与标记，故这里显式给一个值；真正执行的发送由下面的 nt_send 顶替
+# （nt_send 是发送层上的缝，与 api 层的 http_post 同理）
 SU_MODE=st_probe
 nt_try() { printf '%s\n' "$1" >> tries.log; }
 {
   # 发送失败：返回非 0，且不落标记
-  notify() { nt_try "fail-call"; return 1; }
-  if _msg_miss && notify_once "fafu-miss-20261003" miss; then rc=0; else rc=1; fi
+  nt_send() { nt_try "fail-call"; return 1; }
+  if notify_once miss; then rc=0; else rc=1; fi
   printf 'rc_fail=%s\n'  "$rc"
   printf 'mark_fail=%s\n' "$(notify_marked miss && echo yes || echo no)"
 
   # 再试一次并成功：落标记
-  notify() { nt_try "ok-call"; return 0; }
-  if notify_once "fafu-miss-20261003" miss; then rc=0; else rc=1; fi
+  nt_send() { nt_try "ok-call"; return 0; }
+  if notify_once miss; then rc=0; else rc=1; fi
   printf 'rc_ok=%s\n'    "$rc"
   printf 'mark_ok=%s\n'  "$(notify_marked miss && echo yes || echo no)"
 
   # 当日已发：不再调用发送
-  if notify_once "fafu-miss-20261003" miss; then rc=0; else rc=1; fi
+  if notify_once miss; then rc=0; else rc=1; fi
   printf 'rc_dup=%s\n'   "$rc"
   printf 'calls=%s\n'    "$(wc -l < tries.log | tr -dc '0-9')"
 
   # NOTIFY=0：零发送、零标记
   NOTIFY=0
-  if notify_once "fafu-late-20261003" late; then rc=0; else rc=1; fi
+  if notify_once late; then rc=0; else rc=1; fi
   printf 'rc_off=%s\n'   "$rc"
   printf 'mark_off=%s\n' "$(notify_marked late && echo yes || echo no)"
   printf 'calls_off=%s\n' "$(wc -l < tries.log | tr -dc '0-9')"
 
   # 降权不可用（SU_MODE 为空）：同样零发送、零标记
   NOTIFY=1; SU_MODE=""
-  if notify_once "fafu-nosign-20261003" nosign; then rc=0; else rc=1; fi
+  if notify_once nosign; then rc=0; else rc=1; fi
   printf 'rc_nosu=%s\n'  "$rc"
   printf 'mark_nosu=%s\n' "$(notify_marked nosign && echo yes || echo no)"
   printf 'calls_nosu=%s\n' "$(wc -l < tries.log | tr -dc '0-9')"

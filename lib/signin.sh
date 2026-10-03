@@ -29,8 +29,7 @@ run_once() {
     resp=$(api "sign_in/student/my/page" "rows=3&pageNum=1" "$token"); rc=$?
     if [ $rc -ne 0 ] || ! echo "$resp" | "$BB" grep -q '"records"'; then
       log "获取任务失败: rc=$rc $(echo "$resp" | "$BB" head -c 120)"
-      _msg_failtask
-      notify_once "fafu-failtask-$PL" fail
+      notify_once failtask
       return 2
     fi
   fi
@@ -70,11 +69,9 @@ run_once() {
     update_desc
     # 检测到已签到 / 已请假 → 通知（每次检测到都发；同事件同 tag 覆盖，不会堆积）
     if [ "$state" = "2" ]; then
-      _msg_leave
-      notify "fafu-leave-$PL"
+      notify_event leave
     else
-      _msg_seen
-      notify "fafu-sign-$PL"
+      notify_event seen
     fi
     return 0
   fi
@@ -100,20 +97,17 @@ run_once() {
     if [ -n "$et" ] && [ "$now" -gt "$et" ]; then
       log "✅ 补签成功 [$name]"
       sign_set "$td" "$hm" "supplement"
-      _msg_supp
-      notify "fafu-supp-$PL"
+      notify_event supp
     else
       log "✅ 签到成功 [$name]"
       sign_set "$td" "$hm" "normal"
-      _msg_sign
-      notify "fafu-sign-$PL"
+      notify_event sign
     fi
     update_desc
     return 0
   fi
   # 签到提交失败：当日仅首次通知（之后的重试只写日志，避免刷屏）
   log "签到失败: rc=$rc $(echo "$resp2" | "$BB" head -c 120)"
-  _msg_failsign
-  notify_once "fafu-failsign-$PL" fail
+  notify_once failsign
   return 1
 }
