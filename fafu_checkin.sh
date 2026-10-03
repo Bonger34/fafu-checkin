@@ -196,10 +196,10 @@ while true; do
       [ $rc -eq 0 ] && done_mark
       [ $rc -eq 2 ] && { sleep 240; continue; }
     fi
-  elif [ "$KEEPALIVE" = "1" ] && [ $now -ge 420 ] && [ $now -lt 1285 ]; then
-    # ---- 白天保活 07:00~21:25，每 15 分钟一次 ----
+  elif [ "$KEEPALIVE" = "1" ] && ka_in_window; then
+    # ---- 白天保活 07:00~21:25，每 15 分钟一次（窗口与节流都由 keepalive 层判定）----
     now_ts=$(now_s)
-    if [ $((now_ts - KA_LAST)) -ge 900 ]; then
+    if ka_due "$now_ts"; then
       KA_LAST=$now_ts
       keepalive_ping
     fi
