@@ -21,3 +21,6 @@ tools/busybox/
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 并行实施用的本地工作树（不入库）
+.worktrees/
