@@ -274,6 +274,42 @@ poll_case_static() {
   t_hasnt "入口不再写死提醒第三档（23:00 = 1380）" "$src" '1380'
 }
 
+# ============================================================
+# 六、当日已解决只停「查看任务」，不停保活
+#
+# 两件事互不影响：签到办完了照样要继续刷新登录状态（token 是滑动过期）。
+# 观察面：把 keepalive_ping 也换成记录桩，再看「范围内已解决」的那几轮里
+# 保活有没有真的发生——只看 run_once 的断言抓不到这条。
+# 保活时段取 00:00~23:59，于是拨钟的时点全部落在窗口内。
+# ============================================================
+
+poll_case_keepalive_on_resolved() {
+  poll_setup keepalive-on-resolved
+  poll_config 'KEEPALIVE=1
+KA_START=00:00
+KA_END=23:59
+POLL_START=19:30
+POLL_END=22:15'
+  poll_status "$POLL_DATE" normal
+  poll_plan '19:30
+19:31
+19:32
+19:33'
+  cat >> "$POLL_WORK/mod/lib/commands.sh" <<'INJECT'
+
+# ka_due 让位给固定结论：真实那条按 15 分钟节流判，而这里的拨钟是分钟级、
+# 且 KA_LAST 在进程里不跨轮推进，会把「到了保活分支」和「节流挡住」混成同一个读数。
+ka_due() { return 0; }
+keepalive_ping() { printf 'ping\n' >> ./ctl/ka; }
+INJECT
+  : > "$POLL_WORK/ctl/ka"
+  poll_start
+  t_eq "当日已解决：范围内一次都不查看任务" "$(poll_calls)" "0"
+  t_ne "当日已解决：保活照常发生（签到办完不等于不用续期）" \
+    "$(grep -c . "$POLL_WORK/ctl/ka" 2>/dev/null)" "0"
+  t_eq "当日已解决：主循环仍在按一分钟一轮走" "$(poll_slept)" "60|60|60|60|"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "poll · 轮询范围（拨钟逐时点）" poll_case_window
@@ -281,3 +317,4 @@ t_case "poll · 当日已解决即停轮询（四类）" poll_case_resolved
 t_case "poll · 提交失败继续重试到范围止" poll_case_retry
 t_case "poll · 任务异常四分钟后重试" poll_case_task_error
 t_case "poll · 范围来自配置、钟点不再写死（静态）" poll_case_static
+t_case "poll · 当日已解决只停查看任务、不停保活" poll_case_keepalive_on_resolved

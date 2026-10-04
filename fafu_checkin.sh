@@ -121,18 +121,21 @@ while true; do
   ROT_TICK=$((ROT_TICK-1))
   now=$(now_hm)
   PL=$(today_tag)   # 每轮重算：守护进程常驻，跨日后 tag 不应仍停在启动那天
-  # ---- 当日已解决（签到成功 / 补签成功 / 检测到已在 App 内签到 / 今日请假）→ 不查任务 ----
-  if signin_resolved_today; then
-    :
-  elif [ ! "$now" \< "$POLL_START" ] && [ ! "$now" \> "$POLL_END" ]; then
+  if [ ! "$now" \< "$POLL_START" ] && [ ! "$now" \> "$POLL_END" ]; then
     # ---- 轮询范围内：查看今晚的任务（该不该签由服务端任务数据决定）----
     # 时刻比较直接用 now_hm 的零填充字符串：字典序即时间序，不必换算分钟；
     # 两条否定合起来读作 POLL_START <= now <= POLL_END（test 没有 >= / <= 的写法）。
-    run_once; rc=$?
-    [ $rc -eq 0 ] && done_mark
-    [ $rc -eq 2 ] && { sleep 240; continue; }
-  elif [ "$(cfg_keepalive)" = "1" ] && ka_in_window; then
-    # ---- 白天保活（时段由配置层给出；窗口与节流都由 keepalive 层判定）----
+    # 当日已解决时不再查看——「今晚的事办完了就不再反复查询」。
+    if ! signin_resolved_today; then
+      run_once; rc=$?
+      [ $rc -eq 0 ] && done_mark
+      [ $rc -eq 2 ] && { sleep 240; continue; }
+    fi
+  fi
+  # ---- 白天保活：与「轮询范围内」并列，不受当日是否已解决影响 ----
+  # 这两个条件都成立才保活：时段在配置里（窗口与节流都由 keepalive 层判定）；
+  # 签到办完了照样要续期，且轮询范围与保活时段本就大面积重叠。
+  if [ "$(cfg_keepalive)" = "1" ] && ka_in_window; then
     now_ts=$(now_s)
     if ka_due "$now_ts"; then
       KA_LAST=$now_ts
