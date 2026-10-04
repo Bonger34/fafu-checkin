@@ -256,6 +256,30 @@ DRIVER
   t_eq "disable：不探测，直接分发"   "$(sed -n 's/^disable: //p' "$CD_WORK/order.txt")" "call cmd_disable rc=0 | "
 }
 
+# 入口在装配阶段已经探过（结果经 FAFU_SU_MODE 传进来）时，分发这一趟不该再探一次——
+# 重复探测不只是白跑一次 su，还会让「探了几次」在不同路径下不一致，日志里数不清。
+cd_case_probe_once() {
+  cd_setup
+  cd_write_env
+  cd_run inherit <<'DRIVER'
+{
+  one() { # $1=子命令；$2=要预设的 FAFU_SU_MODE（空则模拟「入口没探到」）
+    : > "$CD_CALLS"
+    SU_MODE=""
+    if [ -n "$2" ]; then FAFU_SU_MODE="$2"; export FAFU_SU_MODE; else unset FAFU_SU_MODE; fi
+    ( cmd_dispatch "$1" ) >/dev/null 2>&1
+    printf '%s=%s\n' "$1" "$(grep -c '^probe' "$CD_CALLS")"
+  }
+  one notify "/system/bin/su - shell -c"    # 入口探到了 → 分发不再探
+  one notify ""                             # 入口没探到 → 分发兜底探一次
+  one status "/system/bin/su - shell -c"    # 本就不需要探测的命令
+} > "$T_WORK/inherit.out"
+DRIVER
+  t_eq "未继承时：分发仍会兜底探测（表里标 1 的命令）" "$(sed -n '2p' "$CD_WORK/inherit.out")" "notify=1"
+  t_eq "已继承探测结果时：分发不再重复探测" "$(sed -n '1p' "$CD_WORK/inherit.out")" "notify=0"
+  t_eq "未继承且表里标 0 的命令：不探测" "$(sed -n '3p' "$CD_WORK/inherit.out")" "status=0"
+}
+
 # ============================================================
 # 四、用法文本：集合与顺序取自表；未知子命令打印用法并非 0 退出
 # ============================================================
@@ -351,20 +375,14 @@ cd_case_entry_shape() {
     'probe_su "$CMD"' '[ -z "$FAFU_DAEMON" ] && cmd_start'
   t_before "代码顺序：装配阶段的探测排在命令分发之前" "$entry" \
     'probe_su "$CMD"' 'cmd_dispatch "$CMD"'
-  # 「探测先于分发」的结构保证（静态那一半）：探测那一趟排在分发调用之前。
-  # 删掉探测那一趟、只留分发，这条会立刻报红；行为那一半见上面的「降权探测先于任何分发」。
-  # 锚点用带参数的调用形态：层里注释也提到过这个函数名，用 t_call 会锚到注释上。
-  t_before "代码顺序：探测那一趟排在分发之前" "$T_ROOT/lib/commands.sh" \
-    'probe_su "$cmd"' 'rc=$(cmd_dispatch_rc "$cmd")'
 }
 
 # ============================================================
 # 七、分发不依赖调用者的 fd：fd 3 关着时也要能拿到输出与退出码
 # ============================================================
 
-# 调用者的 fd 3 关着时也必须能用。fd 3 是调用者的环境事实，root shell（管理器的 WebUI /
-# 交互终端）常常就是关着它 exec 出来的；而这类 shell 下「重定向一个未打开的 fd」是**致命
-# 错误**（脚本当场非 0 退出，`||` 兜底都执行不到），所以分发路径根本不能碰 fd 3。
+# 调用者的 fd 3 关着时也必须能用：fd 3 是调用者的环境事实，root shell（管理器的 WebUI /
+# 交互终端）常常就是关着它 exec 出来的，而分发路径不依赖任何外部 fd。
 # 驱动脚本先把 fd 3 关掉，再验输出仍然到得了 stdout、返回码仍然原样出来。
 cd_case_dispatch_without_fd3() {
   cd_setup
@@ -408,6 +426,7 @@ t_case "commands · once 的三档返回码" cd_case_once_rc
 t_case "commands · 不在表里的名字不分发" cd_case_unknown
 t_case "commands · 一张表驱动分发 / 探测 / 用法" cd_case_table_single_source
 t_case "commands · 降权探测先于任何分发" cd_case_probe_first
+t_case "commands · 已继承探测结果时不重复探测" cd_case_probe_once
 t_case "commands · 用法文本与实际命令集合一致" cd_case_usage
 t_case "commands · 新增子命令只需表里加一行" cd_case_one_row
 t_case "commands · 入口只剩装配与调度（静态）" cd_case_entry_shape

@@ -13,7 +13,8 @@ M="${M:-/data/adb/modules/fafu-checkin}"
 E="$M/fafu_checkin.sh"
 LOG="$M/fafu_checkin.log"
 OUT="/sdcard/Download/fafu-smoke-$(date '+%Y%m%d-%H%M%S').txt"
-WAIT_KA="${WAIT_KA:-600}"          # 等下一个保活节拍的上限（秒）
+WAIT_KA="${WAIT_KA:-1000}"         # 等下一个保活节拍的上限（秒）：节拍间隔 15 分钟，
+                                   # 脚本可能刚好在其后起跑，故留到 17 分钟才算超时
 export M E WAIT_KA OUT
 
 # 报告正文：单独一段，由外层用 `sh -c` 跑并把 stdout 边跑边 tee 进证据文件。
@@ -49,8 +50,17 @@ run() { # $1=命令名：把「时刻 + 退出码 + 输出」记进报告，输�
   say "$OUT_LAST"
 }
 ka_count() { grep -ac '保活' "$LOG" 2>/dev/null; }
+# 现在几点（当日第几分钟）：只看当前时刻，不读模块的任何状态
+smoke_now_minutes() { date '+%H %M' | { read -r h m; echo $((h * 60 + m)); }; }
 desc_line() { printf '%s\n' "$1" | grep -a '^描述:' | head -n1; }
-enabled_now() { [ "$(cat "$M/fafu-checkin.state" 2>/dev/null)" != "disabled" ]; }
+# 开关状态只从 `status` 的输出读（运行时状态文件只有 state 层与开机脚本碰，
+# 冒烟脚本不该成为第三个读它的地方——同一个事实两个真源迟早会说法不一）
+enabled_now() {
+  case "$(desc_line "$(sh "$E" status 2>&1)")" in
+    *"已启用"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 if [ "$(id -u)" != "0" ]; then
   say "本脚本要在 root 下跑（模块目录 /data/adb 读不了）—— 请用带 root 的 shell 重跑。"
@@ -182,7 +192,7 @@ if [ "$AFTER_KA" -gt "$BEFORE_KA" ]; then
 else
   note "手动保活没让保活记录数增加（看日志原文）"
 fi
-if [ "${WAIT_KA:-600}" -gt 0 ]; then
+if [ "${WAIT_KA:-1000}" -gt 0 ]; then
   say "--- 等下一个 15 分钟节拍（上限 ${WAIT_KA}s；已存在的保活记录不算数）"
   WAITED=0
   HIT=0
@@ -193,8 +203,11 @@ if [ "${WAIT_KA:-600}" -gt 0 ]; then
   done
   if [ "$HIT" = "1" ]; then
     ok "第 $((WAITED / 60)) 分钟内出现新的保活记录：$(grep -a '保活' "$LOG" | tail -n 1)"
+  elif [ "$(smoke_now_minutes)" -lt 420 ] || [ "$(smoke_now_minutes)" -ge 1285 ]; then
+    note "不在保活窗口（07:00~21:25）内，等不到新节拍是设计使然"
   else
-    note "等了 ${WAIT_KA}s 没有新的保活记录——检查此刻是否在保活窗口（07:00~21:25）内"
+    # 窗口内等了整整一个节拍周期还没有新记录 = 保活没按节拍跑，这必须算失败
+    bad "在保活窗口内等了 ${WAIT_KA}s 仍无新的保活记录"
   fi
 else
   say "（WAIT_KA=0，跳过 15 分钟节拍等待）"
