@@ -5,7 +5,7 @@
 # 只做装配与调度：定位模块目录 → 加载配置 → 按序加载各层 → 命令分发 → 守护主循环；
 # 能力实现都在同目录的 lib/ 各层里。
 #
-# 用法：sh fafu_checkin.sh [子命令]      # 不带子命令 = start（启动守护进程）
+# 用法：sh fafu_checkin.sh [子命令] [参数…]   # 不带子命令 = start（启动守护进程）
 #   子命令清单、说明与用法文本同源于 lib/commands.sh 的命令表（未知子命令会打印用法）。
 #   start 例外：守护进程的后台化与单实例判定在本文件（见 cmd_start）。
 #
@@ -54,13 +54,16 @@ unset _layer _err
 # 命令表（分发规则、降权探测、用法文本）在 commands 层；表里的子命令在 cmd_dispatch
 # 里就干完并退出，走到下面的只剩「不带子命令」与 `start`。
 CMD="$1"
+# 子命令之后的参数原样转交处理函数：先把子命令名从位置参数里摘掉，
+# 下面转发时 $@ 才只剩参数（不会把子命令名算成一个）
+[ $# -eq 0 ] || shift
 cmd_known "$CMD" || { cmd_usage; exit 1; }
 # 降权写法在这里探一次，**启动路径与手动子命令共用**：守护进程是下面 cmd_start 派生出来的
 # 后台进程，它自己不再探（从 FAFU_SU_MODE 继承）。漏掉这一句，daemon 的 SU_MODE 就是空的，
 # 而空的 SU_MODE 会让 notify() 直接返回——自动签到那几条通知会静默消失且没有任何报错。
 # cmd_dispatch 里那一趟是给手动子命令探的（它分发的进程与守护进程不是同一个）。
 probe_su "$CMD"
-cmd_dispatch "$CMD"
+cmd_dispatch "$CMD" "$@"
 
 # 后台化 + 单实例：不是自己重启出来的（FAFU_DAEMON 空）= 命令行上确实要启动守护进程
 cmd_start() {

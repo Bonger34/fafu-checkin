@@ -59,6 +59,9 @@ cmd_known() {
 # 只认表里的子命令：名字不在表里 =「不带子命令」或 start，两者都由入口的 cmd_start 接手，
 # 这里什么都不做、正常返回（未知子命令在入口就被拦下，不会走到这里）。
 #
+# $1 是子命令，**其余参数原样转交处理函数**（子命令名本身不算参数）：这两件事都靠位置参数，
+# 故本函数里除了开头摘掉子命令名，不再动位置参数（探测那一趟改用具名变量逐列读表）。
+#
 # 命中处理函数即终局：它做完这件事就以它的返回码**退出整个进程**（起止都在它自己体内）。
 # 输出与返回码必须分开走（混在一条流里会两头都坏：输出被吞掉、$? 里夹着文字），
 # 分开的办法是**一层命令替换 + 一行哨兵**，全程只用 fd 1：
@@ -70,8 +73,9 @@ cmd_known() {
 # 不用 fd 3 承接输出：fd 3 是调用者的环境事实，root shell 常常关着它 exec 本脚本，
 # 而重定向一个未打开的 fd 会让整条子命令当场失败——分发路径不依赖任何外部 fd。
 cmd_dispatch() {
-  local cmd name handler probe desc rc _cd_in _cd_line cd_rc cd_out
+  local cmd name handler probe desc rc _cd_in cd_rc cd_out
   cmd="${1:-start}"
+  [ $# -eq 0 ] || shift
   # 今日日期 tag（YYYYMMDD）：通知 tag 与「当日首次」判定都用它。
   # 守护主循环每轮会重算一次——进程常驻，跨日后 tag 不应仍停在启动那天。
   PL=$(today_tag)
@@ -81,16 +85,16 @@ cmd_dispatch() {
     _cd_in=$(cmd_specs)
     # 这一趟读的是 here-doc 而不是管道：管道右侧的 while 在子 shell 里跑，探测写下的
     # SU_MODE 会随子 shell 一起丢掉（表现为探测成功、通知却发不出去）。
-    # read 逐行读、set -- 再按空白拆列，行尾的说明文本落在第 4 列。
-    while read -r _cd_line; do
-      set -- $_cd_line
-      if [ -n "${1:-}" ] && [ "$1" = "$cmd" ] && [ "${3:-0}" = "1" ]; then probe_su "$cmd"; fi
+    # read 逐行读、四列直接读进四个具名变量（行尾的说明文本落在第 4 列），
+    # 不用 set -- 拆列：位置参数要原样留给处理函数。
+    while read -r name handler probe desc; do
+      if [ -n "$name" ] && [ "$name" = "$cmd" ] && [ "${probe:-0}" = "1" ]; then probe_su "$cmd"; fi
     done <<EOF
 $_cd_in
 EOF
   fi
   # 二、分发：哨兵行告诉调用方「处理函数真的跑过了、它的返回码是多少」
-  rc=$(cmd_dispatch_rc "$cmd")
+  rc=$(cmd_dispatch_rc "$cmd" "$@")
   case "$rc" in
     *"$CD_SENTINEL"*)
       # 哨兵之后是返回码；哨兵之前是处理函数的输出（原样送回 stdout，顺序不受影响）
@@ -103,16 +107,17 @@ EOF
   return 0
 }
 
-# 命令表里那一行 → 调它的处理函数；输出「处理函数的输出 + 一行哨兵+退出码」。
+# 命令表里那一行 → 调它的处理函数，子命令之后的参数原样跟在后面；输出「处理函数的输出 + 一行哨兵+退出码」。
 # 没命中时不输出任何东西（调用方按「这个子命令不归命令表管」处理）。
 # 处理函数跑在管道右侧的 while 里（那本身就是个子 shell），所以它的 exit 只终结这个子 shell、
 # 把退出码交给 `{ }` 里紧跟着的哨兵 —— 若哪天改成不经管道直接调，exit 会连哨兵一起带走。
 cmd_dispatch_rc() {
   local name handler probe desc want
   want="$1"
+  [ $# -eq 0 ] || shift
   cmd_specs | while read -r name handler probe desc; do
     if [ -n "$name" ] && [ "$name" = "$want" ]; then
-      { "$handler"; echo "$CD_SENTINEL$?"; }
+      { "$handler" "$@"; echo "$CD_SENTINEL$?"; }
       exit 0
     fi
   done

@@ -1,12 +1,13 @@
 # ============================================================
 # commands 层验收断言：命令表驱动分发、降权探测先于分发、用法文本
 #
-# 四条口径（都只针对外部可观察的行为）：
+# 五条口径（都只针对外部可观察的行为）：
 #   1) 分发：表里的名字进哪个处理函数、退出码原样出来、不在表里的名字什么都不做；
 #   2) 同源：表同时决定「分发到哪」与「探测哪些命令」（把处理函数钉成记录桩即可看出）；
 #   3) 顺序：降权探测在任何处理函数之前完成（记录桩按时间顺序落盘，数先后即可）；
 #   4) 用法：命令集合与顺序取自表；未知子命令打印用法并以非 0 退出；
 #      加一行就是一个可用的子命令（临时改一份模块副本验证，不动仓库文件）。
+#   5) 传参：子命令之后的参数原样交给处理函数（入口那一跳与分发那一跳各一条）。
 #
 # 断言直接加载真实的层文件（tests/harness.sh 的 TEST_LIB_FILES），不抽源码片段、不绑行号。
 # ============================================================
@@ -31,6 +32,8 @@ cd_setup() {
 # $1=stub 时**按真实命令表**把每个处理函数换成记录桩（往 $CD_CALLS 追加一行）：
 # 于是「表里写了哪一行」与「实际分派到谁」是同一份数据，断言不必另抄一份命令名单；
 # 传别的（或省略）= 不顶替，用真实处理函数（要断言命令自己的输出时用）。
+# 桩把收到的参数记在行尾（`args=[...]`，按空白拼成一列）——参数到没到处理函数因此可观察；
+# 没收到参数时不记这一列，记录行与不带参数的格式逐字一致。
 cd_write_env() {
   cat > "$CD_WORK/_env.sh" <<ENV
 PATH='/bin:/usr/bin'
@@ -51,7 +54,7 @@ probe_su() { printf 'probe %s\n' "\${1:-none}" >> "\$CD_CALLS"; SU_MODE="stub"; 
 ENV
   if [ "${1:-stub}" = "stub" ]; then
     cat >> "$CD_WORK/_env.sh" <<'STUBS'
-eval "$(cmd_specs | sed -n 's/^\([a-z]*\).*\(cmd_[a-z]*\).*$/\2() { printf \"call %s rc=%s\\n\" \2 \"$CD_RC\" >> \"$CD_CALLS\"; return \"$CD_RC\"; }/p')"
+eval "$(cmd_specs | sed -n 's/^\([a-z]*\).*\(cmd_[a-z]*\).*$/\2() { printf \"call %s rc=%s\" \2 \"$CD_RC\" >> \"$CD_CALLS\"; [ $# -gt 0 ] \&\& printf \" args=[%s]\" \"$*\" >> \"$CD_CALLS\"; printf \"\\n\" >> \"$CD_CALLS\"; return \"$CD_RC\"; }/p')"
 STUBS
   fi
 }
@@ -420,6 +423,93 @@ cd_case_probe_before_daemon() {
 
 
 
+# ============================================================
+# 九、分发传参：子命令之后的参数原样交给处理函数
+#
+# 契约一句话：`cmd_dispatch <子命令> <参数…>` 把它收到的其余参数**原样**（个数、顺序、
+# 内容，含空格与 `键=值` 形态）转交处理函数——子命令名本身不算参数。
+# 缝沿用既有的两条：驱动真实处理函数（参数到手没到、边界对不对）与记录桩（参数被记下来）。
+# ============================================================
+
+cd_case_dispatch_argv() {
+  cd_setup
+  cd_write_env real
+  cd_run_real argv <<'DRIVER'
+# 处理函数按「一个参数一对括号」回显：个数、顺序与边界（含空格的参数）都在这一行里
+cmd_stop() {
+  _argv=""
+  for _a in "$@"; do _argv="$_argv[$_a]"; done
+  printf 'argv=%s\n' "$_argv"
+  return 0
+}
+cmd_dispatch stop 中文参数 两个词 键=值
+DRIVER
+  t_eq "传参：处理函数收到的参数逐字一致（个数 / 顺序 / 含空格的参数）" \
+    "$(cd_val "$CD_WORK/argv.out" argv)" "[中文参数][两个词][键=值]"
+
+  # 带参数时返回码也必须照旧走哨兵那条路
+  cd_run_real argv_rc <<'DRIVER'
+cmd_stop() {
+  _argv=""
+  for _a in "$@"; do _argv="$_argv[$_a]"; done
+  printf 'argv=%s\n' "$_argv"
+  return 7
+}
+cmd_dispatch stop alpha
+DRIVER
+  t_eq "传参：带参数的子命令，返回码仍原样传出" "$(cat "$CD_WORK/argv_rc.rc")" "7"
+  t_has "传参：返回非 0 时输出也没被吞掉" "$CD_WORK/argv_rc.out" "argv=[alpha]"
+}
+
+# 入口那一跳也要原样传：`sh fafu_checkin.sh <子命令> <参数…>` 里的参数经分发到达处理函数。
+# 入口已经把 $1 取成子命令名，转发时不能再把它算进参数——回显里多出一个 `[argvtmp]` 就会露出来。
+cd_case_entry_argv() {
+  local d bb line tmp
+  cd_setup
+  d=$(t_stage_module "$CD_WORK/entry")
+  line=$(grep -n 'stop      cmd_stop' "$d/lib/commands.sh" | head -n1 | cut -d: -f1)
+  if [ -z "$line" ]; then
+    _t_fail "临时用例：找不到命令表（层结构变了？）"
+    return 0
+  fi
+  # 只改临时副本：表里插入一行 + 给这一行写一个回显参数的处理函数
+  tmp="$CD_WORK/entryrow.txt"
+  printf 'argvtmp   cmd_argvtmp   0 临时用例：把收到的参数回显出来\n' > "$tmp"
+  bb=$(t_find_busybox)
+  "$bb" sed -i "${line}r $tmp" "$d/lib/commands.sh" 2>/dev/null || \
+    sed -i "${line}r $tmp" "$d/lib/commands.sh"
+  cat >> "$d/lib/commands.sh" <<'HANDLER'
+
+cmd_argvtmp() {
+  _argv=""
+  for _a in "$@"; do _argv="$_argv[$_a]"; done
+  printf 'argv=%s\n' "$_argv"
+}
+HANDLER
+
+  ( cd "$d" && BB_OVERRIDE="$CD_WORK/bin/bb" $(t_sh) "./fafu_checkin.sh" argvtmp alpha "two words" ) \
+    > "$CD_WORK/entry.out" 2>&1
+  t_eq "入口传参：子命令之后的参数原样到达处理函数（子命令名不在其中）" \
+    "$(cd_val "$CD_WORK/entry.out" argv)" "[alpha][two words]"
+}
+
+# 记录桩也要看得见参数——否则「参数到底到没到处理函数」在按表驱动的用例里无从观察。
+# 桩把参数记成**行尾新加的一列**，且只在真有参数时才出现：不带参数的记录行与既有格式
+# 逐字一致，既有断言（分发顺序那几条比的是整行）因此不受影响。
+cd_case_stub_argv() {
+  cd_setup
+  cd_write_env
+  cd_run stub_argv <<'DRIVER'
+CD_RC=0; export CD_RC
+( cmd_dispatch status )
+( cmd_dispatch status alpha "two words" )
+DRIVER
+  t_eq "记录桩：不带参数时记录行保持既有格式" \
+    "$(sed -n '1p' "$CD_WORK/calls")" "call cmd_status rc=0"
+  t_eq "记录桩：参数作为行尾一列记下来" \
+    "$(sed -n '2p' "$CD_WORK/calls")" "call cmd_status rc=0 args=[alpha two words]"
+}
+
 t_case "commands · 表驱动分发与退出码" cd_case_dispatch
 t_case "commands · 分派不吞命令自己的输出" cd_case_dispatch_stdout
 t_case "commands · once 的三档返回码" cd_case_once_rc
@@ -432,3 +522,6 @@ t_case "commands · 新增子命令只需表里加一行" cd_case_one_row
 t_case "commands · 入口只剩装配与调度（静态）" cd_case_entry_shape
 t_case "commands · fd 3 关闭时分发仍可用" cd_case_dispatch_without_fd3
 t_case "commands · 启动路径与手动子命令共用一次降权探测" cd_case_probe_before_daemon
+t_case "commands · 子命令之后的参数原样交给处理函数" cd_case_dispatch_argv
+t_case "commands · 入口把子命令之后的参数传进分发" cd_case_entry_argv
+t_case "commands · 记录桩看得见处理函数收到的参数" cd_case_stub_argv
