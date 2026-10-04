@@ -97,33 +97,16 @@ for _layer in $FAFU_LAYERS; do
 done
 unset _layer _err
 
-# ---- 子命令分发 ----
+# ---- 子命令分发与守护进程启动 ----
+# 命令表（分发规则、降权探测、用法文本）在 commands 层；表里的子命令在 cmd_dispatch
+# 里就干完并退出，走到下面的只剩「不带子命令」与 `start`。
 CMD="$1"
-# 今日日期 tag（YYYYMMDD）：通知 tag 与「当日首次」判定都用它。
-# 守护主循环每轮会重算一次——进程常驻，跨日后 tag 不应仍停在启动那天。
-PL=$(today_tag)
-# 通知降权探测：必须在分发之前执行——各通知类子命令都会在分支里直接 exit，
-# 放在 case 之后会成为永远执行不到的死代码（曾踩过）。探测结果写入 $SU_MODE，
-# 随后由守护进程经 FAFU_SU_MODE 继承。最长阻塞 1 秒。
-case "$CMD" in
-  start|""|once|refresh|keepalive|notify) probe_su ;;
-esac
-case "$CMD" in
-  once)      run_once; exit $? ;;
-  refresh)   cmd_refresh; exit 0 ;;
-  keepalive) cmd_keepalive; exit 0 ;;
-  notify)    cmd_notify; exit $? ;;
-  status)    cmd_status; exit 0 ;;
-  stop)      cmd_stop; exit 0 ;;
-  toggle)    cmd_toggle; exit 0 ;;
-  enable)    cmd_enable; exit 0 ;;
-  disable)   cmd_disable; exit 0 ;;
-  start|"")  : ;;
-  *)         echo "用法: sh $SELF [start|stop|status|notify|once|refresh|keepalive|toggle|enable|disable]"; exit 1 ;;
-esac
+cmd_known "$CMD" || { cmd_usage; exit 1; }
+cmd_dispatch "$CMD"
 
-# ---- 启动守护进程（后台化 + 单实例） ----
-if [ -z "$FAFU_DAEMON" ]; then
+# 后台化 + 单实例：不是自己重启出来的（FAFU_DAEMON 空）= 命令行上确实要启动守护进程
+cmd_start() {
+  local oldpid
   if svc_is_disabled; then
     echo "服务已停用（可点击操作按钮或运行 enable 启用）"
     update_desc
@@ -142,7 +125,9 @@ if [ -z "$FAFU_DAEMON" ]; then
   "$BB" nohup sh "$SELF" start </dev/null >/dev/null 2>&1 &
   echo "服务已启动"
   exit 0
-fi
+}
+
+[ -z "$FAFU_DAEMON" ] && cmd_start
 
 # ---- 守护主循环 ----
 echo $$ > "$PIDF"

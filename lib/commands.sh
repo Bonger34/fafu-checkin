@@ -1,9 +1,108 @@
 # ============================================================
-# commands 层 —— 子命令的实现（start、分发与降权探测在入口）
+# commands 层 —— 子命令表：分发、需要降权探测的命令集合、用法文本同源
 #
 # 加载顺序：第 9 层（最后一个）。本层的输出文案是使用者的手动排查入口，
 # 与 README / 开发文档里列出的命令一一对应，改文案要同步文档。
+#
+# 新增一个子命令只在下面那张表里加一行（表头有列的含义），并写好它的 cmd_<名字>；
+# 用法文本与降权探测都从同一张表读出来，没有第三处要同步。
+# 特例是 `start`：它不走处理函数（守护进程的后台化与单实例判定在入口，见 cmd_start），
+# 故不在表里，只出现在用法文本的说明中，改动时别漏。
 # ============================================================
+
+# 读出命令表（每行「名字 处理函数 是否需要降权探测 一行说明」）。
+# 表与解析都只此一处：加子命令 = 在这里加一行，用法文本与探测集合跟着一起变。
+cmd_specs() {
+  cat <<'SPECS'
+stop      cmd_stop      0 停止守护进程（不改变开关状态）
+status    cmd_status    0 查看开关 / 服务 / token 状态
+notify    cmd_notify    1 发一条测试通知，确认通知链路是否真的能送到
+once      cmd_once      1 立即检查一次并签到（幂等）
+refresh   cmd_refresh   1 手动刷新 token（测试用）
+keepalive cmd_keepalive 1 手动执行一次保活检查
+toggle    cmd_toggle    0 切换服务开关（启用 ⇄ 停用）
+enable    cmd_enable    0 启用服务
+disable   cmd_disable   0 停用服务
+SPECS
+}
+
+# 可用子命令的清单（按表里的顺序，空格分隔）——用法文本与 cmd_known 都用它，
+# 不再另维护一份名单
+dispatch_cmds() {
+  cmd_specs | while read -r name handler probe desc; do
+    [ -n "$name" ] && printf '%s ' "$name"
+  done
+}
+
+# 用法文本（未知子命令时打印）：命令集合与顺序都取自命令表。
+# 表里没有 `start`，故它只写在下面这行说明里（"start" 即不带子命令）。
+# 返回非 0：调用方一律按「用法即失败」处理。
+cmd_usage() {
+  printf '用法: sh %s [%sstart]\n' "$SELF" "$(dispatch_cmds)"
+  return 1
+}
+
+# 这个子命令在命令表里吗？给入口判定用：不在表里、也不是 start = 未知子命令（打印用法并非 0 退出）。
+# 表里没有 start（守护进程的后台化与单实例判定在入口，见入口的 cmd_start），故这里显式认它一次。
+cmd_known() {
+  case "$1" in start|"") return 0 ;; esac
+  case " $(dispatch_cmds) " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# 分发：先把该探测的命令探完，再执行处理函数 —— 两道循环分开写，
+# 于是「降权探测发生在任何子命令分支之前」是结构上的必然，不靠注释或断言维持。
+# 只认表里的子命令：名字不在表里 =「不带子命令」或 start，两者都由入口的 cmd_start 接手，
+# 这里什么都不做、正常返回（未知子命令在入口就被拦下，不会走到这里）。
+#
+# 命中处理函数即终局：它做完这件事就以它的返回码**退出整个进程**（起止都在它自己体内）。
+# 处理函数在管道右侧的子 shell 里跑，它的 exit 只能结束子 shell，所以这里把退出码接回来：
+# 处理函数自己的输出走 fd 3（脚本自己的 stdout），只有「返回码」进 $( )。
+# 两者混在一起会两头都坏 —— 输出被吞掉、$? 里还夹着文字（都踩过）。
+cmd_dispatch() {
+  local cmd name handler probe desc rc _cd_in _cd_line
+  cmd="${1:-start}"
+  # 今日日期 tag（YYYYMMDD）：通知 tag 与「当日首次」判定都用它。
+  # 守护主循环每轮会重算一次——进程常驻，跨日后 tag 不应仍停在启动那天。
+  PL=$(today_tag)
+  # 一、降权探测（只对表里标了 1 的命令）。
+  # 这一趟读的是 here-doc 而不是管道：管道右侧的 while 在子 shell 里跑，probe_su
+  # 写下的 SU_MODE 会随子 shell 一起丢掉（探测看起来成功、通知却发不出去）。
+  # read 逐行读、set -- 再按空白拆列，行尾的说明文本落在第 4 列。
+  _cd_in=$(cmd_specs)
+  while read -r _cd_line; do
+    set -- $_cd_line
+    if [ -n "${1:-}" ] && [ "$1" = "$cmd" ] && [ "${3:-0}" = "1" ]; then probe_su "$cmd"; fi
+  done <<EOF
+$_cd_in
+EOF
+  # 二、分发。fd 3 在 $( ) **外面**接给脚本自己的 stdout：处理函数的输出走 fd 3，
+  # 于是 $( ) 里只剩退出码（在 $( ) 里面接 3>&1 就晚了——那时 fd 1 已经是捕获管道）。
+  rc=$(cmd_dispatch_rc "$cmd") 3>&1
+  [ -n "$rc" ] || return 0
+  exit "$rc"
+}
+
+# 按命令表找到那一行并调用它的处理函数，把它的退出码写到**标准输出**（没命中则输出空）。
+# 处理函数的正常输出被转到 fd 3（调用方接到自己的 stdout 上），于是这里只剩下退出码。
+# 退出码先存进变量再输出：紧接着的 $? 是上一条命令的状态，不存就会被下一步覆盖。
+cmd_dispatch_rc() {
+  local name handler probe desc want rc
+  want="$1"
+  cmd_specs | while read -r name handler probe desc; do
+    if [ -n "$name" ] && [ "$name" = "$want" ]; then
+      "$handler" >&3
+      rc=$?
+      echo "$rc"
+      exit 0
+    fi
+  done
+}
+
+# 立即检查一次：处理函数一律命名 cmd_<子命令>，故 once 也在这里包一层（内容就是调用本身）
+cmd_once() { run_once; }
 
 cmd_refresh() {
   log "===== 手动刷新测试 ====="

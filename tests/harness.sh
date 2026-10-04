@@ -299,3 +299,18 @@ t_write_program() {
   cat "$T_ROOT/fafu_checkin.sh" >> "$out"
   [ -s "$out" ]
 }
+
+# 把模块拷成一份**可独立运行**的副本（入口 + 全部层 + 元数据），输出副本目录。
+# 入口按自身路径定位模块目录，故副本能自己跑起来，不会碰到仓库本身。
+# 用例要「在真实模块上做一处临时改动」时用它（改副本，不动仓库文件）。
+t_stage_module() { # $1=目标目录
+  local d f
+  d="$1"
+  rm -rf "$d"
+  mkdir -p "$d/lib"
+  cp "$T_ROOT/fafu_checkin.sh" "$T_ROOT/module.prop" "$d/"
+  for f in $TEST_LIB_FILES; do
+    cp "$T_ROOT/$f" "$d/$f"
+  done
+  printf '%s' "$d"
+}

@@ -49,17 +49,9 @@ sk_run() {
 }
 
 # 把模块拷成一份**可独立运行**的副本（入口 + 层 + 元数据）。
-# 入口按自身路径定位模块目录，故副本能自己跑起来，不会碰到仓库本身。
+# 实现在 harness 里（tests/commands.sh 的「临时模块」用例也用同一份）。
 sk_stage_module() { # $1=目标目录
-  local d f
-  d="$1"
-  rm -rf "$d"
-  mkdir -p "$d/lib"
-  cp "$T_ROOT/fafu_checkin.sh" "$T_ROOT/module.prop" "$d/"
-  for f in $TEST_LIB_FILES; do
-    cp "$T_ROOT/$f" "$d/$f"
-  done
-  printf '%s' "$d"
+  t_stage_module "$1"
 }
 
 # 从驱动输出里取一行（形如 key=value）
