@@ -296,6 +296,55 @@ DRIVER
 }
 
 # ============================================================
+# 四·五、当日已解决判定（主循环据此停止当日轮询）
+#
+# 判据只有一条：今天的签到记录 + 四种「办完了」的类型。记录就是当日状态的唯一真源，
+# 故四种类型各验一次，并把「没有记录」「昨天的记录」「类型为空 / 认不出」都算未解决。
+# 判定必须只读：它不得顺手造出新的状态文件（否则「已解决」会被自己写出来）。
+# ============================================================
+
+st_case_resolved() {
+  local d
+  st_setup
+  st_write_env
+  st_run resolved <<'DRIVER'
+{
+  one() { # $1=类型 → 写入今天的记录并读判定结论
+    printf 'sign_date=2026-10-03\nsign_time=21:30\nsign_kind=%s\n' "$1" > "$MODDIR/fafu_checkin.status"
+    printf 'k_%s=%s\n' "${1:-empty}" "$(signin_resolved_today && echo yes || echo no)"
+  }
+  rm -f "$MODDIR/fafu_checkin.status"
+  printf 'norec=%s\n' "$(signin_resolved_today && echo yes || echo no)"
+  printf 'sign_date=2026-10-02\nsign_time=21:30\nsign_kind=normal\n' > "$MODDIR/fafu_checkin.status"
+  printf 'stale=%s\n' "$(signin_resolved_today && echo yes || echo no)"
+  one normal
+  one supplement
+  one detected
+  one leave
+  printf 'again=%s\n' "$(signin_resolved_today && echo yes || echo no)"
+  one ""
+  one other
+  printf 'files_before=%s\n' "$(ls "$MODDIR" | sort | tr '\n' ' ')"
+  printf 'other_again=%s\n' "$(signin_resolved_today && echo yes || echo no)"
+  printf 'files=%s\n' "$(ls "$MODDIR" | sort | tr '\n' ' ')"
+} > "$T_WORK/resolved.txt"
+DRIVER
+
+  d="$ST_WORK/resolved.txt"
+  t_eq "没有签到记录：未解决" "$(st_val "$d" norec)" "no"
+  t_eq "昨天的记录：未解决（当日状态按日滚动）" "$(st_val "$d" stale)" "no"
+  t_eq "今天签到成功（normal）：已解决" "$(st_val "$d" k_normal)" "yes"
+  t_eq "今天补签成功（supplement）：已解决" "$(st_val "$d" k_supplement)" "yes"
+  t_eq "今天检测到已签到（detected）：已解决" "$(st_val "$d" k_detected)" "yes"
+  t_eq "今天请假（leave）：已解决" "$(st_val "$d" k_leave)" "yes"
+  t_eq "今天的记录但类型为空：未解决" "$(st_val "$d" k_empty)" "no"
+  t_eq "今天的记录但类型认不出：未解决" "$(st_val "$d" k_other)" "no"
+  t_eq "同一份已解决记录再判一次：结论不变" "$(st_val "$d" again)" "yes"
+  t_eq "再判一次仍为未解决（判定只读且稳定）" "$(st_val "$d" other_again)" "no"
+  t_eq "判定不新建状态文件（前后文件清单不变）" "$(st_val "$d" files)" "$(st_val "$d" files_before)"
+}
+
+# ============================================================
 # 五、通知标记：四类事件各自的文件、跨日滚动
 # ============================================================
 
@@ -610,6 +659,7 @@ t_case "state · 签到记录（含旧文件兼容）" st_case_sign
 t_case "state · 保活统计与跨日归零" st_case_keepalive_daily
 t_case "state · 保活统计文件格式" st_case_keepalive_format
 t_case "state · 当日完成标记" st_case_done_mark
+t_case "state · 当日已解决判定" st_case_resolved
 t_case "state · 通知标记与跨日滚动" st_case_notify_marks
 t_case "state · 通知每日一次去重" st_case_notify_once
 t_case "state · 打扰通知冷却基准" st_case_cooldown

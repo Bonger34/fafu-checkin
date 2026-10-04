@@ -10,7 +10,7 @@
 #   start 例外：守护进程的后台化与单实例判定在本文件（见 cmd_start）。
 #
 # 配置（可选）：模块目录内 fafu-checkin.conf，键与默认值登记在 lib/config.sh
-#   KEEPALIVE=0  关闭白天保活（仅保留签到时段的自动签到）
+#   KEEPALIVE=0  关闭白天保活（仅保留轮询范围内的自动签到）
 #   NOTIFY=0     关闭全部通知
 # ============================================================
 
@@ -92,6 +92,11 @@ cmd_start() {
 echo $$ > "$PIDF"
 log "===== 服务启动 (PID $$) 版本=${VER:-未知} wget_timeout=[${WGET_T:-无}] notify=[${SU_MODE:-不可用}] ====="
 
+# 轮询范围在循环外取一次：它只决定「什么时候去查看今晚的任务」，
+# 该不该签、能不能补签仍只由服务端任务数据决定（signin 层）。
+POLL_START=$(cfg_poll_start)
+POLL_END=$(cfg_poll_end)
+
 DESC_TICK=0
 ROT_TICK=0
 while true; do
@@ -114,32 +119,18 @@ while true; do
     ROT_TICK=60
   fi
   ROT_TICK=$((ROT_TICK-1))
-  now=$(now_minutes)
+  now=$(now_hm)
   PL=$(today_tag)   # 每轮重算：守护进程常驻，跨日后 tag 不应仍停在启动那天
-  # ---- 未签到提醒：22:00（还剩 30 分钟）/ 22:30（窗口已过，进入补签）/ 23:00（补签窗口关闭） ----
-  # 依据签到状态文件判定：当日已解决（已签到/已补签/已检测/已请假）则一律不发，避免假警报
-  if [ $now -ge 1320 ]; then
-    sd=$(sign_get sign_date); sk=$(sign_get sign_kind)
-    if [ "$sd" = "$(today)" ] && [ "$sk" != "" ]; then
-      :   # 当日状态已解决（含请假）→ 不提醒
-    else
-      # 三个时点各自独立标记：越晚的时点信息越关键，不能被更早的那条挡住
-      if [ $now -ge 1380 ]; then
-        notify_once miss
-      elif [ $now -ge 1350 ]; then
-        notify_once late
-      else
-        notify_once nosign
-      fi
-    fi
-  fi
-  # ---- 主窗口 21:30~22:30；补签时段 22:30~23:00（失败重试，最后一次不晚于 22:59 发起） ----
-  if [ $now -ge 1290 ] && [ $now -le 1379 ]; then
-    if ! done_marked; then
-      run_once; rc=$?
-      [ $rc -eq 0 ] && done_mark
-      [ $rc -eq 2 ] && { sleep 240; continue; }
-    fi
+  # ---- 当日已解决（签到成功 / 补签成功 / 检测到已在 App 内签到 / 今日请假）→ 不查任务 ----
+  if signin_resolved_today; then
+    :
+  elif [ ! "$now" \< "$POLL_START" ] && [ ! "$now" \> "$POLL_END" ]; then
+    # ---- 轮询范围内：查看今晚的任务（该不该签由服务端任务数据决定）----
+    # 时刻比较直接用 now_hm 的零填充字符串：字典序即时间序，不必换算分钟；
+    # 两条否定合起来读作 POLL_START <= now <= POLL_END（test 没有 >= / <= 的写法）。
+    run_once; rc=$?
+    [ $rc -eq 0 ] && done_mark
+    [ $rc -eq 2 ] && { sleep 240; continue; }
   elif [ "$(cfg_keepalive)" = "1" ] && ka_in_window; then
     # ---- 白天保活（时段由配置层给出；窗口与节流都由 keepalive 层判定）----
     now_ts=$(now_s)

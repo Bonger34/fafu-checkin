@@ -3,7 +3,7 @@
 #
 # 加载顺序：第 3 层。本层是模块目录内运行时文件的**唯一归属地**：其余层与入口只经
 # 这里的函数访问，不自己读写这些文件。
-# 对外提供：svc_is_disabled / svc_set、sign_get / sign_set、
+# 对外提供：svc_is_disabled / svc_set、sign_get / sign_set、signin_resolved_today、
 #   ka_counts / ka_ok_count / ka_fail_count / ka_last_time / ka_last_result / ka_is_today /
 #   ka_note、done_marked / done_mark、notify_marked / notify_mark、nt_cooldown。
 # 契约：文件名、字段名、字段顺序与内容格式对使用者可见——升级后不丢当日记录，不要改。
@@ -97,7 +97,19 @@ ka_note() { # $1=ok|fail；$2=本次使用的 token（可选，省略则沿用�
   kv_set "$KASTAT" date "$t" ok "$ok" fail "$fail" last "$(now_full)" last_result "$1" token "$tk"
 }
 
-# ---- 当日签到完成标记（主循环据此跳过当日重复签到） ----
+# ---- 当日是否已解决（主循环据此停止当日轮询） ----
+# 「办完了」的四种类型：签到成功 / 补签成功 / 检测到已在 App 内签到 / 今日请假。
+# 判据落在签到记录本身（今天的记录 + 白名单类型），不另立状态文件：
+# 记录已经是当日状态的唯一真源，多一份标记就多一处会不同步的地方。
+signin_resolved_today() {
+  [ "$(sign_get sign_date)" = "$(today)" ] || return 1
+  case "$(sign_get sign_kind)" in
+    normal|supplement|detected|leave) return 0 ;;
+  esac
+  return 1
+}
+
+# ---- 当日签到完成标记（主循环在 run_once 返回 0 的那一轮写下它） ----
 done_marked() { # 今天已完成签到
   _state_dated "$DONE"
 }
