@@ -25,6 +25,7 @@ keepalive cmd_keepalive 1 手动执行一次保活检查
 toggle    cmd_toggle    0 切换服务开关（启用 ⇄ 停用）
 enable    cmd_enable    0 启用服务
 disable   cmd_disable   0 停用服务
+setconfig cmd_setconfig 0 写入配置项（键=值 …；唯一校验闸门）
 SPECS
 }
 
@@ -225,6 +226,13 @@ cmd_status() {
   "$BB" tail -n 6 "$LOG" 2>/dev/null
   # 顺带刷新一次动态描述（保证日期与状态最新）
   update_desc
+}
+
+# 写入配置项：校验、落盘、回读回显都在配置层的 cfg_write 里（配置写入只有那一道闸门）。
+# 命令层只做转交——不在这里拼文件内容、也不在这里另立一套校验，否则闸门就有了第二道，
+# 「校验先于落盘」便不再是结构上的必然。成功时 cfg_write 把全部键的生效值打到 stdout。
+cmd_setconfig() { # $1…=「键=值」
+  cfg_write "$@"
 }
 
 cmd_stop() {

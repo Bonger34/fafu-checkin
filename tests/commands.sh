@@ -199,7 +199,7 @@ cd_case_table_single_source() {
   cd_write_env
   cd_run table <<'DRIVER'
 {
-  # 表本身：九行，每行四列（名字 处理函数 探测 说明），说明非空
+  # 表本身：十行，每行四列（名字 处理函数 探测 说明），说明非空
   printf 'rows=%s\n' "$(cmd_specs | grep -c .)"
   printf 'bad=%s\n'  "$(cmd_specs | awk 'NF != 4 || $4 == "" { n++ } END { print n + 0 }')"
   # 探测集合完全由表决定
@@ -211,10 +211,10 @@ cd_case_table_single_source() {
 } > "$T_WORK/table.out"
 DRIVER
   f="$CD_WORK/table.out"
-  t_eq "命令表：九行（九个手动排查子命令）" "$(cd_val "$f" rows)" "9"
+  t_eq "命令表：十行（十个手动排查子命令）" "$(cd_val "$f" rows)" "10"
   t_eq "命令表：每行前三列合法（名字 / cmd_ 处理函数 / 0|1）且说明非空" "$(cd_val "$f" cols)" "0"
   t_eq "需要降权探测的集合取自表" "$(cd_val "$f" probed)" "notify once refresh keepalive "
-  t_eq "不需要探测的集合取自表" "$(cd_val "$f" quiet)" "stop status toggle enable disable "
+  t_eq "不需要探测的集合取自表" "$(cd_val "$f" quiet)" "stop status toggle enable disable setconfig "
 
   # 分派用的确实是表里的那一列（表里 keepalive 指向 cmd_keepalive，分派就调它）
   cd_run table_call <<'DRIVER'
@@ -244,7 +244,7 @@ one() { # $1=子命令 → 单独跑一次（子 shell：命中即以 exit 收�
   printf '%s: %s | %s\n' "$1" "$(sed -n '1p' "$CD_CALLS")" "$(sed -n '2p' "$CD_CALLS")" \
     >> "$T_WORK/order.txt"
 }
-for c in notify once refresh keepalive stop status toggle enable disable; do one "$c"; done
+for c in notify once refresh keepalive stop status toggle enable disable setconfig; do one "$c"; done
 DRIVER
   # 需要探测的四条：第一行是探测、第二行才是处理函数
   t_eq "notify：先探测再分发" "$(sed -n 's/^notify: //p'  "$CD_WORK/order.txt")" "probe notify | call cmd_notify rc=0"
@@ -257,6 +257,7 @@ DRIVER
   t_eq "toggle：不探测，直接分发"    "$(sed -n 's/^toggle: //p'  "$CD_WORK/order.txt")" "call cmd_toggle rc=0 | "
   t_eq "enable：不探测，直接分发"    "$(sed -n 's/^enable: //p'  "$CD_WORK/order.txt")" "call cmd_enable rc=0 | "
   t_eq "disable：不探测，直接分发"   "$(sed -n 's/^disable: //p' "$CD_WORK/order.txt")" "call cmd_disable rc=0 | "
+  t_eq "setconfig：不探测，直接分发" "$(sed -n 's/^setconfig: //p' "$CD_WORK/order.txt")" "call cmd_setconfig rc=0 | "
 }
 
 # 入口在装配阶段已经探过（结果经 FAFU_SU_MODE 传进来）时，分发这一趟不该再探一次——
@@ -304,10 +305,10 @@ cd_case_usage() {
 } > "$T_WORK/usage.out"
 DRIVER
   d="$CD_WORK/usage.out"
-  t_eq "清单：按表里的顺序列出九个命令" "$(cd_val "$d" list)" "stop status notify once refresh keepalive toggle enable disable "
+  t_eq "清单：按表里的顺序列出十个命令" "$(cd_val "$d" list)" "stop status notify once refresh keepalive toggle enable disable setconfig "
   # 用法文本逐字钉住（集合来自表，start 写在说明里）
   t_eq "用法文本：逐字一致" "$(cd_val "$d" usage)" \
-    "用法: sh [stop status notify once refresh keepalive toggle enable disable start]"
+    "用法: sh [stop status notify once refresh keepalive toggle enable disable setconfig start]"
   t_eq "用法文本：返回非 0（用法即失败）" "$(cd_val "$d" rc)" "1"
   t_eq "cmd_known：start 认" "$(cd_val "$d" known_start)" "0"
   t_eq "cmd_known：不带子命令认" "$(cd_val "$d" known_empty)" "0"
@@ -510,6 +511,160 @@ DRIVER
     "$(sed -n '2p' "$CD_WORK/calls")" "call cmd_status rc=0 args=[alpha two words]"
 }
 
+# ============================================================
+# 十、写入子命令 setconfig：配置写入的唯一校验闸门
+#
+# 缝：在**临时模块副本**上驱动真实入口与真实处理函数（不替换记录桩），断言 stdout
+# 回显、返回码，以及副本里那份配置文件的逐字节内容。「一次给全量六项」是页面实际的
+# 调用形态，故基准用例从它出发；部分给也必须能用。
+# ============================================================
+
+# 页面一次给全的六项（合法值）
+CD_SIX="KEEPALIVE=1 POLL_START=20:00 POLL_END=23:59 NOTIFY=1 NOTIFY_LEAD=5 NOTIFY_COOLDOWN=300"
+
+# 基准配置：八项全是非默认值；轮询止 20:00 让「起点单独改晚」有得可越。
+# 全程只读**这一份文件**判定写入是否发生（生效值留在进程里，跨进程看的就是它）。
+CD_BASE='KEEPALIVE=0
+POLL_START=06:30
+POLL_END=20:00
+NOTIFY=0
+NOTIFY_LEAD=0
+NOTIFY_COOLDOWN=60
+KA_START=09:00
+KA_END=18:30'
+
+# 在副本里跑一次真实入口的 setconfig；用法：cd_sc <副本> <前缀> [参数…]
+cd_sc() {
+  local d prefix
+  d="$1"; prefix="$2"; shift 2
+  ( cd "$d" && BB_OVERRIDE="$CD_WORK/bin/bb" $(t_sh) "./fafu_checkin.sh" setconfig "$@" ) \
+    > "$CD_WORK/$prefix.out" 2> "$CD_WORK/$prefix.err"
+  echo "$?" > "$CD_WORK/$prefix.rc"
+}
+
+# 模块副本 + 基准配置（每个用例自备一份，互不干扰）
+cd_sc_mod() { # $1=子目录名
+  local d
+  d=$(t_stage_module "$CD_WORK/$1")
+  printf '%s\n' "$CD_BASE" > "$d/fafu-checkin.conf"
+  printf '%s' "$d"
+}
+
+cd_case_setconfig_ok() {
+  local d k
+  cd_setup
+  d=$(cd_sc_mod ok)
+  cd_sc "$d" ok $CD_SIX
+  t_eq "setconfig：合法的六项写入成功（返回 0）" "$(cat "$CD_WORK/ok.rc")" "0"
+  # 回显：页面按 key=value 逐行解析，故每项都要是刚写进去的那个值
+  t_eq "setconfig：回显 KEEPALIVE"             "$(cd_val "$CD_WORK/ok.out" KEEPALIVE)" "1"
+  t_eq "setconfig：回显 POLL_START"            "$(cd_val "$CD_WORK/ok.out" POLL_START)" "20:00"
+  t_eq "setconfig：回显 POLL_END"              "$(cd_val "$CD_WORK/ok.out" POLL_END)" "23:59"
+  t_eq "setconfig：回显 NOTIFY"                "$(cd_val "$CD_WORK/ok.out" NOTIFY)" "1"
+  t_eq "setconfig：回显 NOTIFY_LEAD"           "$(cd_val "$CD_WORK/ok.out" NOTIFY_LEAD)" "5"
+  t_eq "setconfig：回显 NOTIFY_COOLDOWN"       "$(cd_val "$CD_WORK/ok.out" NOTIFY_COOLDOWN)" "300"
+  # 回显的是**全部键**的生效值（含页面没给、只由文件承载的保活时段）
+  t_eq "setconfig：回显八行（全部登记键的生效值）" "$(grep -c . "$CD_WORK/ok.out")" "8"
+  # 回显与落盘一致：页面据此确认「真的进去了」
+  for k in KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN KA_START KA_END; do
+    t_eq "setconfig：回显的 $k 与落盘文件一致" \
+      "$(cd_val "$CD_WORK/ok.out" "$k")" "$(cd_val "$d/fafu-checkin.conf" "$k")"
+  done
+  # 落盘：按登记顺序整份重写，六项是新值、保活时段沿用当前生效值
+  t_eq "setconfig：落盘按登记顺序整份重写" "$(cat "$d/fafu-checkin.conf" | tr '\n' '|')" \
+    "KEEPALIVE=1|POLL_START=20:00|POLL_END=23:59|NOTIFY=1|NOTIFY_LEAD=5|NOTIFY_COOLDOWN=300|KA_START=09:00|KA_END=18:30|"
+  t_eq "setconfig：写入成功时不打噪音" "$(wc -c < "$CD_WORK/ok.err" | tr -dc '0-9')" "0"
+}
+
+# 页面一次给全六项是调用约定，但闸门不该因此只在「给全」时才可用
+cd_case_setconfig_partial() {
+  local d
+  cd_setup
+  d=$(cd_sc_mod partial)
+  cd_sc "$d" partial NOTIFY_COOLDOWN=600
+  t_eq "setconfig：只给一项也能写（返回 0）" "$(cat "$CD_WORK/partial.rc")" "0"
+  t_eq "setconfig：给了的项落盘" "$(cd_val "$d/fafu-checkin.conf" NOTIFY_COOLDOWN)" "600"
+  t_eq "setconfig：没给的项沿用当前生效值" "$(cd_val "$d/fafu-checkin.conf" POLL_START)" "06:30"
+  t_eq "setconfig：没给的项不退回默认值" "$(cd_val "$d/fafu-checkin.conf" KEEPALIVE)" "0"
+  t_eq "setconfig：回显仍是全部键的生效值" "$(grep -c . "$CD_WORK/partial.out")" "8"
+}
+
+# 非法值逐类各一条：非 0 退出 + 可读原因 + 配置文件逐字节未变
+cd_case_setconfig_reject() {
+  local d n rc
+  cd_setup
+  d=$(cd_sc_mod reject)
+  sc_bad() { # $1=样本名，其余=「键=值」参数
+    n="$1"; shift
+    cp "$d/fafu-checkin.conf" "$CD_WORK/$n.before"
+    cd_sc "$d" "$n" "$@"
+    rc=$(cat "$CD_WORK/$n.rc")
+    t_ne "setconfig 拒绝（$n）：返回非 0" "$rc" "0"
+    t_ne "setconfig 拒绝（$n）：给出可读原因" "$(cat "$CD_WORK/$n.err")" ""
+    t_eq "setconfig 拒绝（$n）：配置文件逐字节未变" \
+      "$(cat "$d/fafu-checkin.conf")" "$(cat "$CD_WORK/$n.before")"
+  }
+  sc_bad badtime   POLL_START=25:00
+  sc_bad letters   POLL_START=ab:cd
+  sc_bad midnight  POLL_START=23:00 POLL_END=01:00
+  sc_bad pastend   POLL_START=21:00
+  sc_bad leadalpha NOTIFY_LEAD=abc
+  sc_bad leadover  NOTIFY_LEAD=99999
+  sc_bad switch7   KEEPALIVE=7
+  sc_bad unknown   FOO=1
+  # 只接受登记表里的精确键名：同一批里合法与非法混着给，整批都不落盘
+  sc_bad lowercase keepalive=1
+  sc_bad mixed     POLL_START=05:00 KEEPALIVE=7
+  t_has "setconfig 拒绝（时刻越界）：原因里点明键名" "$CD_WORK/badtime.err" "POLL_START"
+  t_has "setconfig 拒绝（时刻越界）：原因里带上被拒的值" "$CD_WORK/badtime.err" "25:00"
+  t_has "setconfig 拒绝（未知键）：原因里点明那个键" "$CD_WORK/unknown.err" "FOO"
+  t_has "setconfig 拒绝（键名大小写不符）：原因里点明那个键" "$CD_WORK/lowercase.err" "keepalive"
+  t_has "setconfig 拒绝（跨午夜）：原因里说清起止的约束" "$CD_WORK/midnight.err" "早于"
+  # 参数形态本身有毛病：不成对与完全没给
+  sc_bad nosep     POLL_START
+  sc_bad noargs
+  t_has "setconfig 拒绝（不成对）：原因里说清要写成 键=值" "$CD_WORK/nosep.err" "键=值"
+  # 一路拒绝下来，合法的一组照旧写得进去（证明上面不是「一律拒绝」）
+  cd_sc "$d" recover NOTIFY_COOLDOWN=120
+  t_eq "setconfig：连拒之后合法的一组照旧写进去" "$(cat "$CD_WORK/recover.rc")" "0"
+  t_eq "setconfig：合法写入的生效值落盘" "$(cd_val "$d/fafu-checkin.conf" NOTIFY_COOLDOWN)" "120"
+}
+
+# 重写策略：整份按登记键重写，手写注释与表外的键都不活过这一次
+cd_case_setconfig_rewrite() {
+  local d
+  cd_setup
+  d=$(t_stage_module "$CD_WORK/rewrite")
+  cat > "$d/fafu-checkin.conf" <<'CONF'
+# 手写的注释：重写后不该留下
+POLL_START=06:30
+POLL_END=20:00
+FOO=bar
+CONF
+  cd_sc "$d" rewrite $CD_SIX
+  t_eq "setconfig：写入成功（返回 0）" "$(cat "$CD_WORK/rewrite.rc")" "0"
+  t_eq "setconfig：重写后恰好八行（登记键各一行）" "$(grep -c . "$d/fafu-checkin.conf")" "8"
+  t_eq "setconfig：重写后没有注释行" "$(grep -c '^#' "$d/fafu-checkin.conf")" "0"
+  t_eq "setconfig：重写后没有表外的键" "$(grep -c '^FOO=' "$d/fafu-checkin.conf")" "0"
+  t_eq "setconfig：未提到的键补的是默认值" "$(cd_val "$d/fafu-checkin.conf" KA_END)" "21:25"
+  t_eq "setconfig：重写后按登记顺序整份落盘" "$(cat "$d/fafu-checkin.conf" | tr '\n' '|')" \
+    "KEEPALIVE=1|POLL_START=20:00|POLL_END=23:59|NOTIFY=1|NOTIFY_LEAD=5|NOTIFY_COOLDOWN=300|KA_START=07:00|KA_END=21:25|"
+}
+
+# 校验先于落盘：带 shell 元字符的值一个字节都不该进配置文件，更不该被执行
+cd_case_setconfig_injection() {
+  local d
+  cd_setup
+  d=$(cd_sc_mod inject)
+  cp "$d/fafu-checkin.conf" "$CD_WORK/inject.before"
+  cd_sc "$d" inject "POLL_START=20:00; touch hacked" POLL_END=23:00
+  t_ne "setconfig 注入：返回非 0" "$(cat "$CD_WORK/inject.rc")" "0"
+  t_eq "setconfig 注入：配置文件逐字节未变" \
+    "$(cat "$d/fafu-checkin.conf")" "$(cat "$CD_WORK/inject.before")"
+  t_eq "setconfig 注入：文件里没有注入的字样" "$(grep -c 'hacked' "$d/fafu-checkin.conf")" "0"
+  t_eq "setconfig 注入：没有生成被注入命令碰过的文件" "$(ls "$d" | grep -c '^hacked$')" "0"
+}
+
 t_case "commands · 表驱动分发与退出码" cd_case_dispatch
 t_case "commands · 分派不吞命令自己的输出" cd_case_dispatch_stdout
 t_case "commands · once 的三档返回码" cd_case_once_rc
@@ -525,3 +680,8 @@ t_case "commands · 启动路径与手动子命令共用一次降权探测" cd_c
 t_case "commands · 子命令之后的参数原样交给处理函数" cd_case_dispatch_argv
 t_case "commands · 入口把子命令之后的参数传进分发" cd_case_entry_argv
 t_case "commands · 记录桩看得见处理函数收到的参数" cd_case_stub_argv
+t_case "commands · setconfig 写入合法值并回显生效值" cd_case_setconfig_ok
+t_case "commands · setconfig 部分给也能用" cd_case_setconfig_partial
+t_case "commands · setconfig 拒非法值且旧值不变" cd_case_setconfig_reject
+t_case "commands · setconfig 重写后只留登记键" cd_case_setconfig_rewrite
+t_case "commands · setconfig 不落未校验的内容" cd_case_setconfig_injection
