@@ -86,14 +86,13 @@ MOCK_DATE_CTL='./ctl/date'
 MOCK_DEVICE_DIR='$NT_WORK/dev'
 export MODDIR BB_OVERRIDE MOCK_DATE_CTL MOCK_DEVICE_DIR
 printf '2026-10-01 21:40\n' > "\$MOCK_DATE_CTL"
-# 注入点：通知开关与阈值、当日 tag、降权命令（绝对路径：探测里套了 timeout，
-# 由它 fork 出去的命令取不到 shell 函数，必须落在文件上）
-NOTIFY=1
-NOTIFY_LEAD=5
-NOTIFY_COOLDOWN=300
+# 注入点：当日 tag、降权命令（绝对路径：探测里套了 timeout，
+# 由它 fork 出去的命令取不到 shell 函数，必须落在文件上）。
+# 通知开关与两个阈值由**配置层**给出（默认 1 / 5 / 300），本前导不设它们：
+# 需要改值的用例在驱动里改（改完的值经 cfg_notify / cfg_notify_lead / cfg_notify_cooldown 读到）。
 SU_BIN='$NT_WORK/bin/su'
 PL=20261001
-export NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN SU_BIN PL
+export SU_BIN PL
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
 ENV
   [ "$1" = "noprobe" ] || printf 'probe_su   # 与入口一致：先探一次，notify 才有 SU_MODE\n' >> "$NT_WORK/_env.sh"

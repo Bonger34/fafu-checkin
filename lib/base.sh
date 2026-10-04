@@ -2,7 +2,7 @@
 # base 层 —— 环境与工具：模块 / 工具链定位、日志与轮转、时间源、文件读写原语
 #
 # 加载顺序：第 1 层（最先）。本层不引用其它层的函数，其余各层都可以用本层。
-# 对外提供：now_s / now_hm / now_full / today / today_tag / now_minutes、
+# 对外提供：now_s / now_hm / now_full / today / today_tag / now_minutes / hm_minutes、
 #   log / rotate_log、write_atomic、kv_get / kv_set、json_first。
 # 注入点（生产环境不设置）：BB_OVERRIDE=busybox 替身。
 # ============================================================
@@ -42,10 +42,13 @@ today()     { _now +%Y-%m-%d; }                    # 2026-10-03（当日判定�
 today_tag() { _now +%Y%m%d; }                      # 20261003（通知 tag 与每日一次去重）
 
 # 当前时刻的「当日第几分钟」（0~1439）：窗口判定全部用它，避免各处自己拆时分。
-now_minutes() {
-  local hm h m
-  hm=$(now_hm)
-  h=${hm%%:*}; m=${hm#*:}
+now_minutes() { hm_minutes "$(now_hm)"; }
+
+# HH:MM → 当日第几分钟：配置里的钟点与「现在」的比较共用这一处换算。
+# 先去前导 0 再算（`$((08))` 会被当成八进制而报错）。
+hm_minutes() { # $1=HH:MM
+  local h m
+  h=${1%%:*}; m=${1#*:}
   h=${h#0}; m=${m#0}; [ -n "$h" ] || h=0; [ -n "$m" ] || m=0
   echo $((h * 60 + m))
 }

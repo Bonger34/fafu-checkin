@@ -96,7 +96,8 @@ hd_case_header_limit() {
   t_eq "文件头都在 $HD_LIMIT 行以内（只留用法与配置）" "${over:-无}" "无"
   # 反向：头部确实在说自己是什么，而不是被压成了空壳
   t_has "入口的文件头写着用法" "$T_ROOT/fafu_checkin.sh" '用法：sh fafu_checkin.sh'
-  t_has "层的文件头写着加载顺序" "$T_ROOT/lib/api.sh" '加载顺序：第 3 层'
+  t_has "层的文件头写着加载顺序" "$T_ROOT/lib/api.sh" '加载顺序：第 4 层'
+  t_has "配置层的文件头写着加载顺序" "$T_ROOT/lib/config.sh" '加载顺序：第 2 层'
   t_has "断言的文件头写着它测什么" "$T_ROOT/tests/api.sh" 'api 层验收断言'
 }
 

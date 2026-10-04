@@ -1,23 +1,24 @@
 # ============================================================
 # keepalive 层 —— 刷新 token 与白天保活
 #
-# 加载顺序：第 7 层（必须早于 signin：签到决策会调用刷新流程）。
+# 加载顺序：第 8 层（必须早于 signin：签到决策会调用刷新流程）。
 # 对外提供：refresh_token（三段：refresh_silent / refresh_wake / refresh_finish）、
 #   keepalive_ping、ka_in_window / ka_due、ka_stat。
-# 配置：KEEPALIVE=0 关闭白天保活（仅保留 21:30 自动签到）。
+# 配置：保活开关与保活时段都经配置层读取（cfg_keepalive / cfg_ka_start / cfg_ka_end）。
 # ============================================================
 
-KEEPALIVE="${KEEPALIVE:-1}"   # 配置项：0 = 关闭白天保活（仅保留 21:30 自动签到）
 KA_LAST=0                     # 节流基准（unix 秒；由入口在主循环里推进，见 ka_due）
 KA_LAST_REFRESH=0             # 刷新冷却基准（unix 秒）
 
 # ---- 保活时段与节流 ----
-# 保活时段 07:00 ~ 21:25（**上界不含**：21:25 起就不再保活，与签到时段留出间隔）。
+# 时段取自配置层（起点含、终点不含：到点就不再保活，与签到时段留出间隔）。
 # 判据是「当日第几分钟」，与守护循环的 60 秒一跳对齐。
 ka_in_window() {
-  local m
+  local m s e
   m=$(now_minutes)
-  [ "$m" -ge 420 ] && [ "$m" -lt 1285 ]
+  s=$(hm_minutes "$(cfg_ka_start)")
+  e=$(hm_minutes "$(cfg_ka_end)")
+  [ "$m" -ge "$s" ] && [ "$m" -lt "$e" ]
 }
 
 # 节流：距上次保活不足 15 分钟就不再敲接口。$1=当前 unix 秒。
@@ -50,7 +51,7 @@ _ka_poll() { # $1=旧token $2=采样次数上限 → 输出新 token（没有则
 refresh_silent() { # $1=旧token → 输出本段拿到的 token（没有则空）
   log "刷新 token（静默优先）"
   if [ "${WAS_ON:-0}" = "1" ] && notify_warn; then
-    sleep "$(notify_lead)"   # 留出阅读时间；提前量由 NOTIFY_LEAD 配置，默认 5 秒
+    sleep "$(notify_lead)"   # 留出阅读时间；提前量由配置层给出
   fi
   open_page
   _ka_poll "$1" 10

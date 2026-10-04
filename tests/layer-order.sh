@@ -268,9 +268,10 @@ lo_case_repo_manifest() {
   LO_RC=$?
   t_eq "真实仓库：层序检查通过（退出码 0）" "$LO_RC" 0
   lo_has "真实仓库：报告函数数与层文件数" '层序检查通过'
-  t_eq "真实仓库：清单覆盖全部 9 个层文件" \
-    "$(printf '%s\n' "$LO_OUT" | sed -n 's/^层序检查 · 清单：//p' | wc -w)" 9
+  t_eq "真实仓库：清单覆盖全部 10 个层文件" \
+    "$(printf '%s\n' "$LO_OUT" | sed -n 's/^层序检查 · 清单：//p' | wc -w)" 10
   lo_has "真实仓库：清单含第一层" 'lib/base.sh'
+  lo_has "真实仓库：清单含配置层（紧随 base 之后）" 'lib/config.sh'
   lo_has "真实仓库：清单含最后一层" 'lib/commands.sh'
 }
 
