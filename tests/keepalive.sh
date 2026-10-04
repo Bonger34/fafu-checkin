@@ -93,13 +93,14 @@ MODDIR='$KA_MODDIR'
 # 每个 token 一个文件，一个文件就是一个采样点，最后那个文件即最新 token。
 LD_DIR='./ld'
 PL=20261001
-NOTIFY=0
+# 通知在保活用例里一律不参与：SU_MODE 为空即「降权不可用」，
+# 通知类事件与预警都会静默跳过（开关与阈值本身由配置层给出，本前导不设）
 SU_MODE=""
 KA_DATE='$KA_DATE'
 KA_EPOCH=$KA_EPOCH
 KA_NOW_S=$KA_EPOCH
 export BB_OVERRIDE MOCK_DATE_CTL MOCK_DEVICE_DIR MOCK_RANDOM_CTL
-export MODDIR LD_DIR PL NOTIFY SU_MODE
+export MODDIR LD_DIR PL SU_MODE
 export KA_DATE KA_EPOCH KA_NOW_S
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
 
@@ -261,9 +262,17 @@ for _wm in 419 420 1284 1285 1286 1290; do
   printf 'm%s=%s\n' "$_wm" "$_r"
 done
 printf 'min_at_1285=%s\n' "$(ka_at 1285; now_minutes)"
+# 换一份配置（保活时段 08:00–20:00，走真实的配置文件与加载函数）：同一批边界随之平移
+printf 'KA_START=08:00\nKA_END=20:00\n' > mod/fafu-checkin.conf
+cfg_load
+for _wm in 419 479 480 1199 1200; do
+  ka_at "$_wm"
+  if ka_in_window; then _r=in; else _r=out; fi
+  printf 's%s=%s\n' "$_wm" "$_r"
+done
 DRIVER
   d="$KA_WORK/window.out"
-  # 上界**不含** 21:25：那一分钟起就不再保活（判据必须写成 `$now -lt 1285`，
+  # 上界**不含**：默认时段 07:00~21:25 里那一分钟起就不再保活（判据必须写成 `-lt`，
   # 这条断言就是防止「顺手写成 -le」把每个夜里的接口调用多打一次）。
   t_eq "06:59 → 窗口外（还没到 07:00）" "$(ka_val "$d" m419)" "out"
   t_eq "07:00 → 窗口内（起点含）" "$(ka_val "$d" m420)" "in"
@@ -272,6 +281,12 @@ DRIVER
   t_eq "21:26 → 窗口外" "$(ka_val "$d" m1286)" "out"
   t_eq "21:30 → 窗口外（交回签到时段）" "$(ka_val "$d" m1290)" "out"
   t_eq "窗口判定的基准是当日第几分钟（拨钟真的生效）" "$(ka_val "$d" min_at_1285)" "1285"
+  # 配置化之后，同一批判定点必须跟着配置平移（喂的是真实的配置文件 + cfg_load）
+  t_eq "换配置后 06:59 → 窗口外（新起点 08:00）" "$(ka_val "$d" s419)" "out"
+  t_eq "换配置后 07:59 → 窗口外" "$(ka_val "$d" s479)" "out"
+  t_eq "换配置后 08:00 → 窗口内（新起点含）" "$(ka_val "$d" s480)" "in"
+  t_eq "换配置后 19:59 → 窗口内（新上界的最后一分钟）" "$(ka_val "$d" s1199)" "in"
+  t_eq "换配置后 20:00 → 窗口外（新上界不含）" "$(ka_val "$d" s1200)" "out"
 }
 
 # ============================================================
@@ -565,9 +580,14 @@ ka_case_boundary() {
   t_hasnt "入口不再内联窗口下界魔数" "$T_ROOT/fafu_checkin.sh" '$now -ge 420'
   t_hasnt "入口不再内联窗口上界魔数" "$T_ROOT/fafu_checkin.sh" '$now -lt 1285'
   t_has "入口经 ka_due 判定该不该保活" "$T_ROOT/fafu_checkin.sh" 'ka_due'
-  # 上界方向本身也是不变量（判据必须是 `-lt`）：顺手写成 `-le` 会让
-  # 21:25 那一分钟多出一次接口调用，而这种「只差一分钟」的漂移肉眼极难发现。
-  t_has "窗口上界是「不含 21:25」" "$T_ROOT/lib/keepalive.sh" '[ "$m" -lt 1285 ]'
+  # 上界方向本身也是不变量（判据必须是 `-lt`）：顺手写成 `-le` 会让时段末那一分钟
+  # 多出一次接口调用，而这种「只差一分钟」的漂移肉眼极难发现。
+  t_has "窗口上界是「不含」" "$T_ROOT/lib/keepalive.sh" '[ "$m" -lt "$e" ]'
+  # 时段钟点只许来自配置层：层里不再有写死的分钟数（420 / 1285 的搬家已完成）
+  t_hasnt "窗口下界不再写死分钟数" "$T_ROOT/lib/keepalive.sh" '420'
+  t_hasnt "窗口上界不再写死分钟数" "$T_ROOT/lib/keepalive.sh" '1285'
+  t_has "窗口下界取自配置层" "$T_ROOT/lib/keepalive.sh" 'cfg_ka_start'
+  t_has "窗口上界取自配置层" "$T_ROOT/lib/keepalive.sh" 'cfg_ka_end'
 
   # 保活场景禁止唤醒屏幕：保活调用刷新时显式传 0，且这条判据只有一处
   t_has "保活刷新显式禁止唤醒屏幕（第二参数 0）" "$T_ROOT/lib/keepalive.sh" 'refresh_token "$tok" 0'

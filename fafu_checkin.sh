@@ -2,23 +2,22 @@
 # ============================================================
 # 数字FAFU 晚查寝自动签到 —— 入口脚本
 #
-# 只做装配与调度：定位模块目录 → 加载配置 → 按序加载各层 → 命令分发 → 守护主循环；
+# 只做装配与调度：定位模块目录 → 按序加载各层 → 加载配置 → 命令分发 → 守护主循环；
 # 能力实现都在同目录的 lib/ 各层里。
 #
 # 用法：sh fafu_checkin.sh [子命令]      # 不带子命令 = start（启动守护进程）
 #   子命令清单、说明与用法文本同源于 lib/commands.sh 的命令表（未知子命令会打印用法）。
 #   start 例外：守护进程的后台化与单实例判定在本文件（见 cmd_start）。
 #
-# 配置（可选）：模块目录内 fafu-checkin.conf
-#   KEEPALIVE=0     关闭白天保活（仅保留 21:30 自动签到）
-#   NOTIFY=0        关闭全部通知
-#   NOTIFY_LEAD=5   打卡页打开前的预警提前量（秒）；0 = 不加延时，仅屏幕已亮时生效
+# 配置（可选）：模块目录内 fafu-checkin.conf，键与默认值登记在 lib/config.sh
+#   KEEPALIVE=0  关闭白天保活（仅保留签到时段的自动签到）
+#   NOTIFY=0     关闭全部通知
 # ============================================================
 
 export PATH="/system/bin:/system/xbin:/data/adb/ksu/bin:/data/adb/magisk:$PATH"
 
 # ---- 定位自身与模块目录 ----
-# 入口必须先知道自己在哪，才能找到同目录的 lib/（各层与配置文件都在那里）
+# 入口必须先知道自己在哪，才能找到同目录的 lib/（各层都在那里）
 SELF="$0"
 case "$SELF" in
   /*) : ;;
@@ -28,14 +27,10 @@ MODDIR="${SELF%/*}"
 [ -f "$MODDIR/fafu_checkin.sh" ] || MODDIR="/data/adb/modules/fafu-checkin"
 [ -f "$MODDIR/fafu_checkin.sh" ] || MODDIR="/data/adb/modules_update/fafu-checkin"
 
-# ---- 加载可选配置（覆盖各层的默认值） ----
-CONFIG="$MODDIR/fafu-checkin.conf"
-[ -f "$CONFIG" ] && . "$CONFIG"
-
 # ---- 按序加载各层 ----
 # 顺序即依赖方向：一层只能引用更早加载的层（tools/check-layer-order.sh 守着这条）。
 # 注意 keepalive 必须排在 signin 之前——签到决策会调用刷新流程。
-FAFU_LAYERS="base state api device notify desc keepalive signin commands"
+FAFU_LAYERS="base config state api device notify desc keepalive signin commands"
 LIBDIR="$MODDIR/lib"
 # 库层缺失时 base 还没加载，这条失败日志的路径只能就地取（与 base 层里的那处一致）
 LOG="$MODDIR/fafu_checkin.log"
@@ -49,6 +44,9 @@ for _layer in $FAFU_LAYERS; do
   . "$LIBDIR/$_layer.sh"
 done
 unset _layer _err
+
+# ---- 加载配置（各层就位后调一次；配置文件缺失即全取默认值） ----
+cfg_load
 
 # ---- 子命令分发与守护进程启动 ----
 # 命令表（分发规则、降权探测、用法文本）在 commands 层；表里的子命令在 cmd_dispatch
@@ -139,8 +137,8 @@ while true; do
       [ $rc -eq 0 ] && done_mark
       [ $rc -eq 2 ] && { sleep 240; continue; }
     fi
-  elif [ "$KEEPALIVE" = "1" ] && ka_in_window; then
-    # ---- 白天保活 07:00~21:25，每 15 分钟一次（窗口与节流都由 keepalive 层判定）----
+  elif [ "$(cfg_keepalive)" = "1" ] && ka_in_window; then
+    # ---- 白天保活（时段由配置层给出；窗口与节流都由 keepalive 层判定）----
     now_ts=$(now_s)
     if ka_due "$now_ts"; then
       KA_LAST=$now_ts

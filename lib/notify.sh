@@ -1,19 +1,17 @@
 # ============================================================
 # notify 层 —— 通知：降权探测、文案表、发送、每日一次去重、打扰冷却
 #
-# 加载顺序：第 5 层。通知是纯增量能力：任何失败都不得影响签到主流程。
+# 加载顺序：第 6 层。通知是纯增量能力：任何失败都不得影响签到主流程。
 # 业务层只报**事件名**（sign / supp / seen / leave / failsign / failtask / nosign /
 # late / miss），tag 与文案都由本层的两张表查出来；新增一条通知要动三处
 # （事件表、tag 表、_msg_* 文案），但都只在这一个文件里，漏写会被断言报红。
 # 对外提供：probe_su / notify_event / notify_once / notify_warn / notify_lead / tag_of。
-# 配置：NOTIFY=0 关闭全部通知；NOTIFY_LEAD、NOTIFY_COOLDOWN 见下。
+# 配置：开关与阈值都经配置层的 cfg_notify / cfg_notify_lead / cfg_notify_cooldown 取值。
 # 注入点（生产环境不设置）：SU_BIN、NOTIFY_CMD、FAFU_SU_MODE。
 # ============================================================
 
-# ---- 配置（可被模块目录内的 fafu-checkin.conf 覆盖） ----
-NOTIFY="${NOTIFY:-1}"                      # 1=启用通知，0=完全关闭（零调用）
-NOTIFY_LEAD="${NOTIFY_LEAD:-5}"            # 兜底唤醒前的预警提前量（秒）
-NOTIFY_COOLDOWN="${NOTIFY_COOLDOWN:-300}"  # 同类打扰通知的最小间隔（秒）
+# ---- 配置与注入点 ----
+# 通知开关与两个阈值都经配置层读取（默认值登记在那一处，本层不再自己兜底）
 SU_BIN="${SU_BIN:-/system/bin/su}"         # su 路径（可用环境变量覆盖，供 mock 测试注入）
 
 SU_MODE=""                # 生效的降权写法，由 probe_su() 探测后写入
@@ -54,7 +52,7 @@ tag_of() { # $1=事件名 → 事件对应的 tag 后缀（未知事件输出空
 probe_su() {
   local c u su
   SU_MODE=""
-  [ "$NOTIFY" = "1" ] || return 0
+  [ "$(cfg_notify)" = "1" ] || return 0
   # 父进程已探测过（守护进程由 start 派生）→ 直接继承，避免重复探测
   if [ -n "${FAFU_SU_MODE:-}" ]; then
     SU_MODE="$FAFU_SU_MODE"
@@ -112,7 +110,7 @@ nt_send() { # $1=完整命令串：交给降权 shell 执行；调用它的是 n
 
 notify() { # $1=tag；使用文案表设好的 _NT_TITLE / _NT_TEXT；返回发送是否成功
   local t
-  [ "$NOTIFY" = "1" ] || return 0
+  [ "$(cfg_notify)" = "1" ] || return 0
   [ -n "$SU_MODE" ] || return 0
   [ -n "$1" ] || return 0
   # 命令交由 su 派生出的新 shell 执行，标题/正文必须 export 才能被子 shell 看到，
@@ -136,7 +134,7 @@ notify_event() { # $1=事件名：取文案表里的模板 → 按 tag 表拼 ta
 
 notify_once() { # $1=事件名（failsign / failtask / nosign / late / miss）；当日一次；
   local nt_tpl nt_mk  # 仅在**发送成功**时才写标记
-  [ "$NOTIFY" = "1" ] || return 0
+  [ "$(cfg_notify)" = "1" ] || return 0
   [ -n "$SU_MODE" ] || return 0
   nt_tpl=""; nt_mk=""
   eval "nt_tpl=\${_NT_TPL_$1:-}"
@@ -152,13 +150,13 @@ notify_once() { # $1=事件名（failsign / failtask / nosign / late / miss）�
   return 1
 }
 
-notify_warn() { # 开页预警：屏幕已亮且本次确实会开页时调用；打扰型，受 NOTIFY_COOLDOWN 节流。
+notify_warn() { # 开页预警：屏幕已亮且本次确实会开页时调用；打扰型，受配置的通知冷却节流。
   local nt_now   # 返回值 = 「这次真的发了」——调用方据此决定要不要留出阅读时间
-  [ "$NOTIFY" = "1" ] || return 1
+  [ "$(cfg_notify)" = "1" ] || return 1
   [ -n "$SU_MODE" ] || return 1
   # 一次刷新失败可能连锁触发多次 refresh_token，冷却用来避免连续弹同一条
   nt_now=$(now_s)
-  [ $((nt_now - $(nt_cooldown))) -ge "$NOTIFY_COOLDOWN" ] || return 1
+  [ $((nt_now - $(nt_cooldown))) -ge "$(cfg_notify_cooldown)" ] || return 1
   nt_cooldown "$nt_now"
   _NT_TITLE="🔄 正在刷新登录状态"
   _NT_TEXT="$(notify_lead) 秒后自动打开打卡页（用于刷新登录），完成后自动关闭，无需操作"
@@ -166,8 +164,10 @@ notify_warn() { # 开页预警：屏幕已亮且本次确实会开页时调用�
 }
 
 notify_lead() { # 输出预警提前量秒数；屏幕本来就黑时不延时（省下无意义的等待）
-  if [ "${WAS_ON:-0}" = "1" ] && [ "$NOTIFY_LEAD" -gt 0 ] 2>/dev/null; then
-    echo "$NOTIFY_LEAD"
+  local lead
+  lead=$(cfg_notify_lead)
+  if [ "${WAS_ON:-0}" = "1" ] && [ "$lead" -gt 0 ] 2>/dev/null; then
+    echo "$lead"
   else
     echo 0
   fi
