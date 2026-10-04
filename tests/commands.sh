@@ -199,7 +199,7 @@ cd_case_table_single_source() {
   cd_write_env
   cd_run table <<'DRIVER'
 {
-  # 表本身：九行，每行四列（名字 处理函数 探测 说明），说明非空
+  # 表本身：十行，每行四列（名字 处理函数 探测 说明），说明非空
   printf 'rows=%s\n' "$(cmd_specs | grep -c .)"
   printf 'bad=%s\n'  "$(cmd_specs | awk 'NF != 4 || $4 == "" { n++ } END { print n + 0 }')"
   # 探测集合完全由表决定
@@ -211,10 +211,10 @@ cd_case_table_single_source() {
 } > "$T_WORK/table.out"
 DRIVER
   f="$CD_WORK/table.out"
-  t_eq "命令表：九行（九个手动排查子命令）" "$(cd_val "$f" rows)" "9"
+  t_eq "命令表：十行（十个手动排查子命令）" "$(cd_val "$f" rows)" "10"
   t_eq "命令表：每行前三列合法（名字 / cmd_ 处理函数 / 0|1）且说明非空" "$(cd_val "$f" cols)" "0"
   t_eq "需要降权探测的集合取自表" "$(cd_val "$f" probed)" "notify once refresh keepalive "
-  t_eq "不需要探测的集合取自表" "$(cd_val "$f" quiet)" "stop status toggle enable disable "
+  t_eq "不需要探测的集合取自表" "$(cd_val "$f" quiet)" "stop status toggle enable disable webstate "
 
   # 分派用的确实是表里的那一列（表里 keepalive 指向 cmd_keepalive，分派就调它）
   cd_run table_call <<'DRIVER'
@@ -244,19 +244,20 @@ one() { # $1=子命令 → 单独跑一次（子 shell：命中即以 exit 收�
   printf '%s: %s | %s\n' "$1" "$(sed -n '1p' "$CD_CALLS")" "$(sed -n '2p' "$CD_CALLS")" \
     >> "$T_WORK/order.txt"
 }
-for c in notify once refresh keepalive stop status toggle enable disable; do one "$c"; done
+for c in notify once refresh keepalive stop status toggle enable disable webstate; do one "$c"; done
 DRIVER
   # 需要探测的四条：第一行是探测、第二行才是处理函数
   t_eq "notify：先探测再分发" "$(sed -n 's/^notify: //p'  "$CD_WORK/order.txt")" "probe notify | call cmd_notify rc=0"
   t_eq "once：先探测再分发"   "$(sed -n 's/^once: //p'    "$CD_WORK/order.txt")" "probe once | call cmd_once rc=0"
   t_eq "refresh：先探测再分发" "$(sed -n 's/^refresh: //p' "$CD_WORK/order.txt")" "probe refresh | call cmd_refresh rc=0"
   t_eq "keepalive：先探测再分发" "$(sed -n 's/^keepalive: //p' "$CD_WORK/order.txt")" "probe keepalive | call cmd_keepalive rc=0"
-  # 不需要探测的五条：第一个动作就是处理函数（没有多余的探测）
+  # 不需要探测的六条：第一个动作就是处理函数（没有多余的探测）
   t_eq "stop：不探测，直接分发"      "$(sed -n 's/^stop: //p'    "$CD_WORK/order.txt")" "call cmd_stop rc=0 | "
   t_eq "status：不探测，直接分发"    "$(sed -n 's/^status: //p'  "$CD_WORK/order.txt")" "call cmd_status rc=0 | "
   t_eq "toggle：不探测，直接分发"    "$(sed -n 's/^toggle: //p'  "$CD_WORK/order.txt")" "call cmd_toggle rc=0 | "
   t_eq "enable：不探测，直接分发"    "$(sed -n 's/^enable: //p'  "$CD_WORK/order.txt")" "call cmd_enable rc=0 | "
   t_eq "disable：不探测，直接分发"   "$(sed -n 's/^disable: //p' "$CD_WORK/order.txt")" "call cmd_disable rc=0 | "
+  t_eq "webstate：不探测，直接分发"  "$(sed -n 's/^webstate: //p' "$CD_WORK/order.txt")" "call cmd_webstate rc=0 | "
 }
 
 # 入口在装配阶段已经探过（结果经 FAFU_SU_MODE 传进来）时，分发这一趟不该再探一次——
@@ -304,10 +305,10 @@ cd_case_usage() {
 } > "$T_WORK/usage.out"
 DRIVER
   d="$CD_WORK/usage.out"
-  t_eq "清单：按表里的顺序列出九个命令" "$(cd_val "$d" list)" "stop status notify once refresh keepalive toggle enable disable "
+  t_eq "清单：按表里的顺序列出十个命令" "$(cd_val "$d" list)" "stop status notify once refresh keepalive toggle enable disable webstate "
   # 用法文本逐字钉住（集合来自表，start 写在说明里）
   t_eq "用法文本：逐字一致" "$(cd_val "$d" usage)" \
-    "用法: sh [stop status notify once refresh keepalive toggle enable disable start]"
+    "用法: sh [stop status notify once refresh keepalive toggle enable disable webstate start]"
   t_eq "用法文本：返回非 0（用法即失败）" "$(cd_val "$d" rc)" "1"
   t_eq "cmd_known：start 认" "$(cd_val "$d" known_start)" "0"
   t_eq "cmd_known：不带子命令认" "$(cd_val "$d" known_empty)" "0"
@@ -510,6 +511,227 @@ DRIVER
     "$(sed -n '2p' "$CD_WORK/calls")" "call cmd_status rc=0 args=[alpha two words]"
 }
 
+# ============================================================
+# 十、webstate：页面可解析的只读状态输出
+#
+# 缝是最接近页面实际行为的那一跳：把模块拷成一份可独立运行的副本，在副本里预置运行时
+# 状态文件与一份假 leveldb，然后 `sh ./fafu_checkin.sh webstate`。断言只看两样外部
+# 行为：stdout 的每一行与返回码。
+# 两处环境事实按既有注入点换掉：时钟（mock 时间源）、网络出口（api 层的 http_post）——
+# 用例因此既不依赖当天日期，也不发起任何请求。
+# ============================================================
+
+WS_DIR="$CD_WORK/webstate"
+WS_DATE='2026-10-03'                              # 拨好的墙钟日期（夹具里的「今天」）
+WS_TOKEN='2_0123456789abcdef0123456789abcdef'     # 假 leveldb 里的凭证明文（只用于负向断言）
+
+# 夹具：模块副本 + 控制目录（时钟 / 网络替身 / 假 leveldb）+ 一份关掉通知的配置。
+# 关通知是有意的：装配阶段的降权探测会因它直接返回，用例既不等 su 超时，也不受
+# 「本机有没有 su」影响，日志里也不会多出与 webstate 无关的一行。
+ws_setup() {
+  cd_setup
+  t_stage_module "$WS_DIR" >/dev/null
+  mkdir -p "$WS_DIR/ctl/ld"
+  printf '%s 21:35\n' "$WS_DATE" > "$WS_DIR/ctl/date"
+  printf '"token":"%s"' "$WS_TOKEN" > "$WS_DIR/ctl/ld/000001.log"
+  printf '{"records":[{"id":1}]}' > "$WS_DIR/ctl/body"
+  printf '0' > "$WS_DIR/ctl/rc"
+  printf 'NOTIFY=0\n' > "$WS_DIR/fafu-checkin.conf"
+  # 网络出口的替身：按控制文件应答，一个请求都不发出去
+  cat >> "$WS_DIR/lib/api.sh" <<'OVR'
+
+http_post() {
+  cat ./ctl/body 2>/dev/null
+  _ws_rc=$(cat ./ctl/rc 2>/dev/null | tr -dc '0-9')
+  return "${_ws_rc:-0}"
+}
+OVR
+}
+
+# 预置运行时状态文件（路径与 state 层登记的一致，值由用例给）
+ws_switch() { printf '%s\n' "$1" > "$WS_DIR/fafu-checkin.state"; }
+ws_sign()   { printf 'sign_date=%s\nsign_time=%s\nsign_kind=%s\n' "$1" "$2" "$3" > "$WS_DIR/fafu_checkin.status"; }
+ws_ka()     { printf 'date=%s\nok=%s\nfail=%s\nlast=%s\nlast_result=%s\ntoken=%s\n' \
+                "$1" "$2" "$3" "$4" "$5" "$6" > "$WS_DIR/fafu_keepalive.status"; }
+ws_log() { # 参数逐个作为一行写进日志文件
+  : > "$WS_DIR/fafu_checkin.log"
+  for row in "$@"; do printf '%s\n' "$row" >> "$WS_DIR/fafu_checkin.log"; done
+}
+
+# 在副本里跑一次真实的子命令。WS_LD 非空时覆盖 leveldb 目录（「取不到凭据」那一档用它）。
+ws_run() { # $1=名字（输出文件的后缀）
+  local name rc
+  name="$1"
+  (
+    cd "$WS_DIR" || exit 1
+    BB_OVERRIDE="$CD_WORK/bin/bb" MOCK_DATE_CTL='./ctl/date' LD_DIR="${WS_LD:-./ctl/ld}" \
+      $(t_sh) ./fafu_checkin.sh webstate
+  ) > "$CD_WORK/ws_$name.out" 2> "$CD_WORK/ws_$name.err"
+  rc=$?
+  echo "$rc" > "$CD_WORK/ws_$name.rc"
+  if [ -s "$CD_WORK/ws_$name.err" ]; then
+    echo "  （webstate $name 的 stderr）"
+    sed 's/^/    /' "$CD_WORK/ws_$name.err"
+  fi
+}
+
+# 输出里出现的键名（去重排序）：字段齐全与键名逐字一致都靠它
+ws_keys() { grep -o '^[a-z_]*' "$1" | sort -u | tr '\n' ' '; }
+WS_KEYS="ka_fail ka_last ka_last_result ka_ok log service sign_state sign_time token_state version "
+
+# 输出里「既不是 键=值、也不是空行」的行数。空行要排除：分发路径会给任何以换行收尾的
+# 输出补一个空行（status 子命令同样如此），那不是命令自己吐出来的东西。
+ws_stray() { awk '!/^[a-z_]*=/ && NF > 0 { n++ } END { print n + 0 }' "$1"; }
+
+cd_case_webstate_fields() {
+  local f
+  ws_setup
+  ws_switch enabled
+  ws_sign "$WS_DATE" 21:30 normal
+  ws_ka "$WS_DATE" 3 2 "$WS_DATE 21:30:14" fail "$WS_TOKEN"
+  ws_log "[$WS_DATE 21:20:00] 第 1 条" "[$WS_DATE 21:21:00] 第 2 条" "[$WS_DATE 21:22:00] 第 3 条" \
+         "[$WS_DATE 21:23:00] 第 4 条" "[$WS_DATE 21:24:00] 第 5 条" "[$WS_DATE 21:25:00] 第 6 条" \
+         "[$WS_DATE 21:26:00] 第 7 条" "[$WS_DATE 21:28:00] 第 8 条"
+  ws_run fields
+  f="$CD_WORK/ws_fields.out"
+
+  t_eq "只读子命令：返回码恒为 0" "$(cat "$CD_WORK/ws_fields.rc")" "0"
+  t_eq "服务开关：停用语义取反成 on" "$(cd_val "$f" service)" "on"
+  t_eq "今日签到状态：中文文本" "$(cd_val "$f" sign_state)" "已签到"
+  t_eq "今日签到时间" "$(cd_val "$f" sign_time)" "21:30"
+  t_eq "今日保活成功数" "$(cd_val "$f" ka_ok)" "3"
+  t_eq "今日保活失败数" "$(cd_val "$f" ka_fail)" "2"
+  t_eq "最近一次保活时间：原样来自状态层" "$(cd_val "$f" ka_last)" "$WS_DATE 21:30:14"
+  t_eq "最近一次保活结果" "$(cd_val "$f" ka_last_result)" "fail"
+  t_eq "登录状态有效：只报有效性" "$(cd_val "$f" token_state)" "ok"
+  t_eq "版本号来自模块元数据" "$(cd_val "$f" version)" "v1.2.1"
+  t_eq "字段齐全且键名逐字一致" "$(ws_keys "$f")" "$WS_KEYS"
+  t_eq "每行都是 键=值（没有别的输出混进来）" "$(ws_stray "$f")" "0"
+  t_eq "多出来的只有分发路径补的那个空行" "$(grep -c '^$' "$f")" "1"
+
+  t_eq "日志：按 status 子命令的口径只取最近 6 条" "$(grep -c '^log=' "$f")" "6"
+  t_has "日志：含最近一条" "$f" "log=[$WS_DATE 21:28:00] 第 8 条"
+  t_hasnt "日志：只取尾部，更早的不出现" "$f" "第 1 条"
+  t_hasnt "日志：只取尾部，更早的不出现" "$f" "第 2 条"
+
+  # 负向：凭证明文绝不出现在输出里（它只报有效性）
+  t_hasnt "输出里不含登录凭证明文" "$f" "$WS_TOKEN"
+  t_eq "输出里没有 token= 后跟 2_十六进制 的形态" \
+    "$(grep -cE '(^|=)2_[0-9A-Fa-f]{32}' "$f")" "0"
+
+  # 只读：跑一次不该写任何东西（status 子命令会顺带刷新描述，这里不许）
+  t_eq "只读：模块描述原样没被刷新" \
+    "$(grep -m1 '^description=' "$WS_DIR/module.prop")" \
+    "$(grep -m1 '^description=' "$T_ROOT/module.prop")"
+  t_eq "只读：签到记录文件逐字未变" "$(cat "$WS_DIR/fafu_checkin.status" | tr '\n' '|')" \
+    "sign_date=$WS_DATE|sign_time=21:30|sign_kind=normal|"
+  t_eq "只读：不留临时文件" "$(ls "$WS_DIR" | grep -c '\.tmp$')" "0"
+}
+
+cd_case_webstate_sign() {
+  local f
+  ws_setup
+  ws_switch enabled
+  ws_log "[$WS_DATE 21:20:00] 占位一行"
+
+  # ① 今天主窗口签到成功
+  ws_sign "$WS_DATE" 21:30 normal
+  ws_run sign_normal
+  f="$CD_WORK/ws_sign_normal.out"
+  t_eq "今天已签到：状态是中文" "$(cd_val "$f" sign_state)" "已签到"
+  t_eq "今天已签到：带上签到时间" "$(cd_val "$f" sign_time)" "21:30"
+
+  # ② 今天补签成功
+  ws_sign "$WS_DATE" 22:35 supplement
+  ws_run sign_supp
+  f="$CD_WORK/ws_sign_supp.out"
+  t_eq "今天补签：状态也是已签到" "$(cd_val "$f" sign_state)" "已签到"
+  t_eq "今天补签：时间是补签那一刻" "$(cd_val "$f" sign_time)" "22:35"
+
+  # ③ 今天请假：没有签到时间
+  ws_sign "$WS_DATE" "" leave
+  ws_run sign_leave
+  f="$CD_WORK/ws_sign_leave.out"
+  t_eq "今天请假：状态显示为已请假" "$(cd_val "$f" sign_state)" "已请假"
+  t_eq "今天请假：签到时间给空值" "$(cd_val "$f" sign_time)" ""
+
+  # ④ 记录停在昨天：今天仍是未签到
+  ws_sign 2026-10-02 21:31 normal
+  ws_run sign_old
+  f="$CD_WORK/ws_sign_old.out"
+  t_eq "只有昨天的记录：状态给空值" "$(cd_val "$f" sign_state)" ""
+  t_eq "只有昨天的记录：时间给空值" "$(cd_val "$f" sign_time)" ""
+
+  # ⑤ 一条记录都没有：字段仍在，值为空，退出码照旧
+  rm -f "$WS_DIR/fafu_checkin.status"
+  ws_run sign_none
+  f="$CD_WORK/ws_sign_none.out"
+  t_eq "没有任何记录：状态为空" "$(cd_val "$f" sign_state)" ""
+  t_eq "没有任何记录：时间为空" "$(cd_val "$f" sign_time)" ""
+  t_eq "没有任何记录：返回码仍为 0" "$(cat "$CD_WORK/ws_sign_none.rc")" "0"
+}
+
+cd_case_webstate_token() {
+  local f
+  ws_setup
+  ws_switch enabled
+  ws_sign "$WS_DATE" 21:30 normal
+  ws_ka "$WS_DATE" 1 0 "$WS_DATE 09:00:00" ok "$WS_TOKEN"
+  ws_log "[$WS_DATE 21:20:00] 占位一行"
+
+  # ① 取得到凭据且接口回得出任务 → ok
+  ws_run token_ok
+  f="$CD_WORK/ws_token_ok.out"
+  t_eq "登录有效：只报 ok" "$(cd_val "$f" token_state)" "ok"
+  t_hasnt "登录有效：输出里没有凭证明文" "$f" "$WS_TOKEN"
+
+  # ② 接口调用失败（替身回非 0）→ fail
+  printf '1' > "$WS_DIR/ctl/rc"
+  ws_run token_fail
+  f="$CD_WORK/ws_token_fail.out"
+  t_eq "接口调用失败：报 fail" "$(cd_val "$f" token_state)" "fail"
+  t_hasnt "接口调用失败：同样不输出凭证明文" "$f" "$WS_TOKEN"
+
+  # ③ 调用成功但响应体里没有任务 → fail（与 status 子命令同一判据）
+  printf '0' > "$WS_DIR/ctl/rc"
+  printf '{"timestamp":1}' > "$WS_DIR/ctl/body"
+  ws_run token_nobody
+  f="$CD_WORK/ws_token_nobody.out"
+  t_eq "响应体里没有任务：报 fail" "$(cd_val "$f" token_state)" "fail"
+
+  # ④ 拿不到凭据（空的 leveldb 目录）→ none
+  printf '{"records":[{"id":1}]}' > "$WS_DIR/ctl/body"
+  WS_LD='./ctl/empty'
+  ws_run token_none
+  f="$CD_WORK/ws_token_none.out"
+  t_eq "取不到凭据：报 none" "$(cd_val "$f" token_state)" "none"
+  t_eq "取不到凭据：返回码仍为 0" "$(cat "$CD_WORK/ws_token_none.rc")" "0"
+  WS_LD=''
+
+  # ⑤ 停用 + 保活统计停在前一天：统计按日归零，最近一次仍取原值
+  ws_switch disabled
+  ws_ka 2026-10-02 5 4 "2026-10-02 21:30:14" ok "$WS_TOKEN"
+  ws_run stale
+  f="$CD_WORK/ws_stale.out"
+  t_eq "停用时开关报 off" "$(cd_val "$f" service)" "off"
+  t_eq "昨天的成功数：按日滚动归零" "$(cd_val "$f" ka_ok)" "0"
+  t_eq "昨天的失败数：按日滚动归零" "$(cd_val "$f" ka_fail)" "0"
+  t_eq "最近一次保活：仍取原值（不受归零影响）" "$(cd_val "$f" ka_last)" "2026-10-02 21:30:14"
+  t_eq "最近一次结果：仍取原值" "$(cd_val "$f" ka_last_result)" "ok"
+
+  # ⑥ 副本里什么都没有：字段仍齐全（给空值），返回码仍为 0
+  rm -f "$WS_DIR/fafu-checkin.state" "$WS_DIR/fafu_checkin.status" \
+        "$WS_DIR/fafu_keepalive.status" "$WS_DIR/fafu_checkin.log"
+  ws_run bare
+  f="$CD_WORK/ws_bare.out"
+  t_eq "什么记录都没有：返回码仍为 0" "$(cat "$CD_WORK/ws_bare.rc")" "0"
+  t_eq "什么记录都没有：键集合不变" "$(ws_keys "$f")" "$WS_KEYS"
+  t_eq "什么记录都没有：开关按默认启用报 on" "$(cd_val "$f" service)" "on"
+  t_eq "什么记录都没有：日志给一行空值" "$(grep -c '^log=' "$f")" "1"
+  t_eq "什么记录都没有：日志那一行是空的" "$(cd_val "$f" log)" ""
+  t_eq "什么记录都没有：每行仍是 键=值" "$(ws_stray "$f")" "0"
+}
+
 t_case "commands · 表驱动分发与退出码" cd_case_dispatch
 t_case "commands · 分派不吞命令自己的输出" cd_case_dispatch_stdout
 t_case "commands · once 的三档返回码" cd_case_once_rc
@@ -525,3 +747,6 @@ t_case "commands · 启动路径与手动子命令共用一次降权探测" cd_c
 t_case "commands · 子命令之后的参数原样交给处理函数" cd_case_dispatch_argv
 t_case "commands · 入口把子命令之后的参数传进分发" cd_case_entry_argv
 t_case "commands · 记录桩看得见处理函数收到的参数" cd_case_stub_argv
+t_case "commands · webstate 输出页面可解析的状态" cd_case_webstate_fields
+t_case "commands · webstate 的签到状态从记录里读" cd_case_webstate_sign
+t_case "commands · webstate 的登录状态只报有效性" cd_case_webstate_token

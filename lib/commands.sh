@@ -25,6 +25,7 @@ keepalive cmd_keepalive 1 手动执行一次保活检查
 toggle    cmd_toggle    0 切换服务开关（启用 ⇄ 停用）
 enable    cmd_enable    0 启用服务
 disable   cmd_disable   0 停用服务
+webstate  cmd_webstate 0 只读输出运行状态（页面按行解析 键=值）
 SPECS
 }
 
@@ -225,6 +226,61 @@ cmd_status() {
   "$BB" tail -n 6 "$LOG" 2>/dev/null
   # 顺带刷新一次动态描述（保证日期与状态最新）
   update_desc
+}
+
+# 只读状态输出：页面按行解析「键=值」。
+# 契约（页面与断言都按它读）：每行严格「键=值」，键名固定；返回码恒为 0——它只是读数，
+# 读不到的状态给空值，不因此报错；日志条数多时允许出现多行 log=。
+# 登录凭据只报有效性（ok / fail / none），**明文绝不进输出**——明文仍只由 status 子命令提供。
+cmd_webstate() {
+  local sw state tm kind
+  # 开关：状态层是「停用」语义，这里取反成 on / off
+  if svc_is_disabled; then sw=off; else sw=on; fi
+  printf 'service=%s\n' "$sw"
+  # 今日签到状态与时间：记录不是今天的就按「今天没有记录」给空值（页面问的是今天）
+  state=""; tm=""
+  if [ "$(sign_get sign_date)" = "$(today)" ]; then
+    kind=$(sign_get sign_kind)
+    if [ -n "$kind" ]; then state=$(state_text "$kind"); fi
+    tm=$(sign_get sign_time)
+  fi
+  printf 'sign_state=%s\nsign_time=%s\n' "$state" "$tm"
+  # 今日保活成败数与最近一次：全部经 state 层的语义读数（跨日归零在那一层发生）
+  printf 'ka_ok=%s\nka_fail=%s\nka_last=%s\nka_last_result=%s\n' \
+    "$(ka_ok_count)" "$(ka_fail_count)" "$(ka_last_time)" "$(ka_last_result)"
+  printf 'token_state=%s\n' "$(_webstate_token_state)"
+  printf 'version=%s\n' "$VER"
+  _webstate_log
+  return 0
+}
+
+# 登录状态：ok=凭据可用 / fail=凭据失效或调用不通 / none=取不到凭据。
+# 判据与 status 子命令一致（调用成功且响应体里回得出 records），只是不交出凭据本身。
+_webstate_token_state() {
+  local tok resp rc st
+  tok=$(get_token)
+  [ -n "$tok" ] || { printf 'none'; return 0; }
+  # 判据写成「先取布尔值再判」：`! ... | grep -q ...` 在这条 busybox ash 链路上会判反
+  resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$tok"); rc=$?
+  st=fail
+  if [ "$rc" = "0" ]; then
+    case "$resp" in
+      *'"records"'*) st=ok ;;
+    esac
+  fi
+  printf '%s' "$st"
+}
+
+# 最近若干条日志：与 status 子命令同一口径（取尾部），一条一行 log=…
+# 没有日志可读时也交出一行空值，页面的键集合因此恒定。
+_webstate_log() {
+  local lines
+  lines=$("$BB" tail -n 6 "$LOG" 2>/dev/null)
+  if [ -n "$lines" ]; then
+    printf '%s\n' "$lines" | while IFS= read -r row; do printf 'log=%s\n' "$row"; done
+  else
+    printf 'log=\n'
+  fi
 }
 
 cmd_stop() {
