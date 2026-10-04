@@ -10,6 +10,10 @@
 
 # 读出命令表（每行「名字 处理函数 是否需要降权探测 一行说明」）。
 # 表与解析都只此一处：加子命令 = 在这里加一行，用法文本与探测集合跟着一起变。
+# CD_SENTINEL 是分发时的「退出码哨兵」前缀：处理函数以 exit 收尾，返回码只能靠一行
+# 哨兵从命令替换里带回来（见 cmd_dispatch）。它必须是不可能出现在命令输出里的串。
+CD_SENTINEL="__fafu_rc__"
+
 cmd_specs() {
   cat <<'SPECS'
 stop      cmd_stop      0 停止守护进程（不改变开关状态）
@@ -56,18 +60,28 @@ cmd_known() {
 # 这里什么都不做、正常返回（未知子命令在入口就被拦下，不会走到这里）。
 #
 # 命中处理函数即终局：它做完这件事就以它的返回码**退出整个进程**（起止都在它自己体内）。
-# 处理函数在管道右侧的子 shell 里跑，它的 exit 只能结束子 shell，所以这里把退出码接回来：
-# 处理函数自己的输出走 fd 3（脚本自己的 stdout），只有「返回码」进 $( )。
-# 两者混在一起会两头都坏 —— 输出被吞掉、$? 里还夹着文字。
+# 输出与返回码必须分开走（混在一条流里会两头都坏：输出被吞掉、$? 里夹着文字），
+# 分开的办法是**一层命令替换 + 一行哨兵**，全程只用 fd 1：
+#
+#   rc=$( { "$handler"; echo "$CD_SENTINEL$?"; } )
+#
+# 处理函数是**以 exit 收尾**的（cmd_stop / status / notify 都是），故它必须待在 `{ }` 里的
+# 子 shell 中——直接写就会连哨兵那行一起带走，退出码再也拿不回来。哨兵行由调用方
+# 从末尾剥掉，剩下的就是处理函数自己的输出，原样送回 stdout。
+#
+# 为什么不用 fd 3：它是**调用者的环境事实**，root shell（管理器的 WebUI / 交互终端）常常是
+# 关着 fd 3 exec 出本脚本的，而这类 shell 下「重定向一个未打开的 fd」是**致命错误**——
+# 脚本当场以非 0 退出，`||` 兜底分支根本执行不到。所以分发路径不能依赖 fd 3，
+# 也不能靠「先试一下 fd 3 可不可用」来兜底：那一下本身就是致命的那次重定向。
 cmd_dispatch() {
-  local cmd name handler probe desc rc _cd_in _cd_line
+  local cmd name handler probe desc rc _cd_in _cd_line cd_rc cd_out
   cmd="${1:-start}"
   # 今日日期 tag（YYYYMMDD）：通知 tag 与「当日首次」判定都用它。
   # 守护主循环每轮会重算一次——进程常驻，跨日后 tag 不应仍停在启动那天。
   PL=$(today_tag)
   # 一、降权探测（只对表里标了 1 的命令）。
-  # 这一趟读的是 here-doc 而不是管道：管道右侧的 while 在子 shell 里跑，probe_su
-  # 写下的 SU_MODE 会随子 shell 一起丢掉（表现为探测成功、通知却发不出去）。
+  # 这一趟读的是 here-doc 而不是管道：管道右侧的 while 在子 shell 里跑，探测写下的
+  # SU_MODE 会随子 shell 一起丢掉（表现为探测成功、通知却发不出去）。
   # read 逐行读、set -- 再按空白拆列，行尾的说明文本落在第 4 列。
   _cd_in=$(cmd_specs)
   while read -r _cd_line; do
@@ -76,24 +90,28 @@ cmd_dispatch() {
   done <<EOF
 $_cd_in
 EOF
-  # 二、分发。fd 3 在 $( ) **外面**接给脚本自己的 stdout：处理函数的输出走 fd 3，
-  # 于是 $( ) 里只剩退出码（在 $( ) 里面接 3>&1 就晚了——那时 fd 1 已经是捕获管道）。
-  rc=$(cmd_dispatch_rc "$cmd") 3>&1
-  [ -n "$rc" ] || return 0
-  exit "$rc"
+  # 二、分发：哨兵行告诉调用方「处理函数真的跑过了、它的返回码是多少」
+  rc=$(cmd_dispatch_rc "$cmd")
+  case "$rc" in
+    *"$CD_SENTINEL"*)
+      # 哨兵之后是返回码；哨兵之前是处理函数的输出（原样送回 stdout，顺序不受影响）
+      cd_rc="${rc##*"$CD_SENTINEL"}"
+      cd_out="${rc%"$CD_SENTINEL"*}"
+      [ -n "$cd_out" ] && printf '%s\n' "$cd_out"
+      exit "$cd_rc"
+      ;;
+  esac
+  return 0
 }
 
-# 按命令表找到那一行并调用它的处理函数，把它的退出码写到**标准输出**（没命中则输出空）。
-# 处理函数的正常输出被转到 fd 3（调用方接到自己的 stdout 上），于是这里只剩下退出码。
-# 退出码先存进变量再输出：紧接着的 $? 是上一条命令的状态，不存就会被下一步覆盖。
+# 命令表里那一行 → 调它的处理函数；**只输出「处理函数的输出 + 一行哨兵+退出码」**。
+# 没命中时不输出任何东西（调用方按「这个子命令不归命令表管」处理）。
 cmd_dispatch_rc() {
-  local name handler probe desc want rc
+  local name handler probe desc want
   want="$1"
   cmd_specs | while read -r name handler probe desc; do
     if [ -n "$name" ] && [ "$name" = "$want" ]; then
-      "$handler" >&3
-      rc=$?
-      echo "$rc"
+      { "$handler"; echo "$CD_SENTINEL$?"; }
       exit 0
     fi
   done

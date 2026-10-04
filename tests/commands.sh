@@ -332,22 +332,75 @@ cd_case_one_row() {
 cd_case_entry_shape() {
   local entry
   entry="$T_ROOT/fafu_checkin.sh"
-  # 入口不再自己列一遍命令：分派规则、降权探测与用法文本都在 commands 层
+  # 入口不再自己列一遍命令：分派规则、用法文本、手动子命令的降权探测都在 commands 层
   t_hasnt "入口不再内联子命令 case 分支" "$entry" 'once)      run_once'
-  t_hasnt "入口不再内联降权探测" "$entry" 'probe_su'
   t_hasnt "入口不再内联用法文本" "$entry" 'echo "用法: sh $SELF ['
   t_has "入口经 cmd_dispatch 分发" "$entry" 'cmd_dispatch "$CMD"'
   t_has "入口用 cmd_known 认子命令" "$entry" 'cmd_known "$CMD"'
   t_has "入口保留了后台化（nohup）" "$entry" 'nohup sh "$SELF" start'
   t_has "入口保留了单实例判定" "$entry" '已有实例(PID $oldpid)在运行，退出'
   t_has "入口保留了守护主循环" "$entry" 'while true; do'
+  # 装配阶段的那一次探测（启动路径与手动子命令共用）：守护进程是入口派生出来再 exec
+  # 自己的，它自己不探，所以这一次必须在派生**之前**发生，否则 daemon 会带着空的
+  # SU_MODE 常驻、它发出的通知全部静默丢弃。
+  # 锚点用带参数的调用形态（`probe_su "$CMD"`）：入口里这句是**顶格**写的，t_call 那种
+  # 「前面留一个空格」的写法在这儿锚不到；带 $CMD 又能把注释里的函数名排掉。
+  t_eq "静态锚点自证：入口里真的调了探测" \
+    "$(grep -cF 'probe_su "$CMD"' "$entry")" "1"
+  t_before "代码顺序：装配阶段的探测排在启动分支之前" "$entry" \
+    'probe_su "$CMD"' '[ -z "$FAFU_DAEMON" ] && cmd_start'
+  t_before "代码顺序：装配阶段的探测排在命令分发之前" "$entry" \
+    'probe_su "$CMD"' 'cmd_dispatch "$CMD"'
   # 「探测先于分发」的结构保证（静态那一半）：探测那一趟排在分发调用之前。
   # 删掉探测那一趟、只留分发，这条会立刻报红；行为那一半见上面的「降权探测先于任何分发」。
+  # 锚点用带参数的调用形态：层里注释也提到过这个函数名，用 t_call 会锚到注释上。
   t_before "代码顺序：探测那一趟排在分发之前" "$T_ROOT/lib/commands.sh" \
-    "$(t_call probe_su)" 'rc=$(cmd_dispatch_rc "$cmd")'
+    'probe_su "$cmd"' 'rc=$(cmd_dispatch_rc "$cmd")'
 }
 
-# ---- 注册（顺序即执行顺序） ----
+# ============================================================
+# 七、分发不依赖调用者的 fd：fd 3 关着时也要能拿到输出与退出码
+# ============================================================
+
+# 调用者的 fd 3 关着时也必须能用。fd 3 是调用者的环境事实，root shell（管理器的 WebUI /
+# 交互终端）常常就是关着它 exec 出来的；而这类 shell 下「重定向一个未打开的 fd」是**致命
+# 错误**（脚本当场非 0 退出，`||` 兜底都执行不到），所以分发路径根本不能碰 fd 3。
+# 驱动脚本先把 fd 3 关掉，再验输出仍然到得了 stdout、返回码仍然原样出来。
+cd_case_dispatch_without_fd3() {
+  cd_setup
+  cd_write_env real
+  cd_run_real no_fd3 <<'DRIVER'
+exec 3>&-
+cmd_stop() { echo "处理函数说了话"; return 5; }
+cmd_dispatch stop
+DRIVER
+  t_has "fd 3 关闭：处理函数的输出仍进 stdout" "$CD_WORK/no_fd3.out" "处理函数说了话"
+  t_eq "fd 3 关闭：返回码仍原样传出去" "$(cat "$CD_WORK/no_fd3.rc")" "5"
+  t_hasnt "fd 3 关闭：没有 Bad file descriptor" "$CD_WORK/no_fd3.err" "Bad file descriptor"
+}
+
+# ============================================================
+# 八、降权探测：启动路径与手动子命令共用同一次探测结果
+# ============================================================
+
+# 守护进程是入口 `nohup` 派生出来、再 exec 一次自己的后台进程；它继承的是入口的环境，
+# 自己不再探（probe_su 里的 FAFU_SU_MODE 分支就是为这条继承链准备的）。所以那一次探测
+# 必须发生在派生**之前**——否则 daemon 的 SU_MODE 为空，而空的 SU_MODE 会让 notify()
+# 直接返回：自动签到那几条通知静默消失，日志里也没有任何报错。
+#
+# 判据是静态的：source 整个入口这条路走不通（入口里 `SELF="$0"` 是无条件赋值，source 时
+# $0 是驱动脚本，入口会据此猜模块目录并因「缺少库层」退出），故这里钉**相对顺序**。
+cd_case_probe_before_daemon() {
+  local entry
+  entry="$T_ROOT/fafu_checkin.sh"
+  t_before "启动路径：装配阶段的探测排在守护进程派生之前" "$entry" \
+    'probe_su "$CMD"' '[ -z "$FAFU_DAEMON" ] && cmd_start'
+  # 继承那一半：探测函数认 FAFU_SU_MODE，daemon 才不必重复探测
+  t_has "启动路径：探测结果可由 FAFU_SU_MODE 继承" "$T_ROOT/lib/notify.sh" 'FAFU_SU_MODE'
+  t_has "启动路径：派生时把探测结果放进环境" "$entry" 'FAFU_SU_MODE="$SU_MODE"'
+}
+
+
 
 t_case "commands · 表驱动分发与退出码" cd_case_dispatch
 t_case "commands · 分派不吞命令自己的输出" cd_case_dispatch_stdout
@@ -358,3 +411,5 @@ t_case "commands · 降权探测先于任何分发" cd_case_probe_first
 t_case "commands · 用法文本与实际命令集合一致" cd_case_usage
 t_case "commands · 新增子命令只需表里加一行" cd_case_one_row
 t_case "commands · 入口只剩装配与调度（静态）" cd_case_entry_shape
+t_case "commands · fd 3 关闭时分发仍可用" cd_case_dispatch_without_fd3
+t_case "commands · 启动路径与手动子命令共用一次降权探测" cd_case_probe_before_daemon

@@ -55,6 +55,11 @@ unset _layer _err
 # 里就干完并退出，走到下面的只剩「不带子命令」与 `start`。
 CMD="$1"
 cmd_known "$CMD" || { cmd_usage; exit 1; }
+# 降权写法在这里探一次，**启动路径与手动子命令共用**：守护进程是下面 cmd_start 派生出来的
+# 后台进程，它自己不再探（从 FAFU_SU_MODE 继承）。漏掉这一句，daemon 的 SU_MODE 就是空的，
+# 而空的 SU_MODE 会让 notify() 直接返回——自动签到那几条通知会静默消失且没有任何报错。
+# cmd_dispatch 里那一趟是给手动子命令探的（它分发的进程与守护进程不是同一个）。
+probe_su "$CMD"
 cmd_dispatch "$CMD"
 
 # 后台化 + 单实例：不是自己重启出来的（FAFU_DAEMON 空）= 命令行上确实要启动守护进程
