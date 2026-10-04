@@ -594,15 +594,17 @@ nt_case_callsites() {
   src="$NT_WORK/program.sh"
   t_write_program "$src" || { _t_fail "无法拼出全程序文本"; return 0; }
 
-  # 十个业务事件 + 预警 + 测试通知的调用点：每个都必须还在
+  # 业务事件与预警的调用点：每个都必须还在。
+  # 未签提醒三条（nosign / late / miss）的事件名、文案与去重机制仍在本层（上面刚验过），
+  # 但它们的**调用点**要按任务数据推算时刻，随数据驱动版一起补回：
+  # 在补齐之前，入口里不该再出现按写死钟点发的这三条（见 tests/poll.sh 的静态判据）。
   miss=""
   for c in 'notify_event sign'        'notify_event supp'     'notify_event seen' \
            'notify_event leave'       'notify_once failsign'  'notify_once failtask' \
-           'notify_once nosign'       'notify_once late'      'notify_once miss' \
            'notify_warn'              'tag_of test'; do
     grep -qF "$c" "$src" 2>/dev/null || miss="$miss [$c]"
   done
-  t_eq "十二个通知调用点齐全" "[$miss]" "[]"
+  t_eq "八个通知调用点齐全" "[$miss]" "[]"
 
   # 业务层不再自己发通知：signin / keepalive 里不出现底层发送与文案表
   t_hasnt "signin 层不直接调文案表" "$T_ROOT/lib/signin.sh" '_msg_'
