@@ -8,7 +8,7 @@
 #      dv_setup 把四个包装器放进 $DV_WORK/bin 并排到 PATH 最前，包装器再调
 #      tests/mock/busybox 的对应 applet（它记录命令行并注入输出）；
 #      refresh_token 的时序由注入 get_token 驱动（连续调用返回「旧 → 新」）；
-#   3) 不变：两条实测确认的时序——「取不到新 token 时不提前关页」「拿到新 token 后
+#   3) 不变：两条时序——「取不到新 token 时不提前关页」「拿到新 token 后
 #      立即移除页面」；设备命令的 fd 加固（`</dev/null >/dev/null 2>&1`，不接管道）。
 #
 # 断言直接加载真实的层文件（tests/harness.sh 的 TEST_LIB_FILES），不抽源码片段、不绑行号。
@@ -27,11 +27,11 @@ DV_DEV="./dev"
 DV_CAPS="screen_is_on:device app_task_ids:device act_count:device open_page:device close_page:device"
 
 # 无头活动记录：这些行里的任务号就是 app_task_ids / act_count 要输出的东西。
-# 一条记录里有两处「t<数字>」，都与重构前的正则取法一致（见下面 dv_case_tasks 的说明）
+# 一条记录里有两处「t<数字>」，都要取到（见下面 dv_case_tasks 的说明）
 DV_RECS_A='* ActivityRecord{aa11 t123 u0 cn.edu.fafu.iportal/xxx t42}'
 DV_RECS_B='* ActivityRecord{bb22 t456 u0 cn.edu.fafu.iportal/yyy t7}'
 
-# 每处系统命令调用都必须自带的加固尾巴（见 mock 的 fd 见证与 §3.1）
+# 每处系统命令调用都必须自带的加固尾巴（由 mock 的 fd 见证一起守住）
 DV_HARDEN='</dev/null >/dev/null 2>&1'
 
 # 设备命令替身需要的 PATH 包装器：真机上它们都在 /system/bin 下（不是 busybox applet），
@@ -192,7 +192,7 @@ printf 'n=%s\n'   "$(act_count)"
 DRIVER
 
   d="$DV_WORK/tasks.out"
-  # 任务号有两处来源（重构前的取法与它逐字一致）：记录里 "u0 " 之后的任务号，以及记录
+  # 任务号有两处来源，取到的是同一个号：记录里 "u0 " 之后的，以及记录
   # 末尾 "}" 之前那个；同一行并排两条记录也都要取到。去重后升序、空格分隔、结尾带空格。
   t_eq "任务号：并排两条记录 + 两处来源都取到（去重升序）" "$(dv_val "$d" ids)" "123 42 456 7 "
   # 活动数按「去重后的记录条数」算：种子两行 + 并排那行 + 重复两行 → 3 条唯一记录
@@ -227,7 +227,7 @@ DRIVER
 
   d="$DV_WORK/pages.out"
   t_eq "open_page 正常返回" "$(dv_val "$d" open_rc)" "0"
-  t_has "交给系统的开页命令行与重构前逐字一致" "$d" \
+  t_has "交给系统的开页命令行逐字一致" "$d" \
     "calls=-|am|start|--user|0|-n|cn.edu.fafu.iportal/huawei.w3.ui.welcome.W3SplashScreenActivity|-a|com.huawei.works.action.shortcut|-c|android.shortcut.conversation|-d|http://stuhealth.fafu.edu.cn/declarew/#/fafu/login|--ei|src|202"
   t_eq "页面无残留时的收尾日志不变" "$(dv_val "$d" log)" "[$(dv_val "$d" log | cut -c2-20)] 页面关闭检查: 残留活动=0"
   t_has "开页用 am start" "$DV_WORK/dev/calls" "-|am|start|--user|0|-n|cn.edu.fafu.iportal/"
@@ -301,7 +301,7 @@ DRIVER
 # 观察到，而不是靠 stub 出来的两行 echo 自证——把被测对象整个换掉，断言就只剩空转了。
 #
 # 统计口径：每段在**取到返回值之后**数一次记录文件。关页自己也是被观察的行为，
-# 中途快照会读到它正在写的半截记录（本机踩过：快照少了后面几条），所以只在段末计数。
+# 中途快照会读到它正在写的半截记录（快照因此少了后面几条），所以只在段末计数。
 # ============================================================
 
 dv_case_timing() {

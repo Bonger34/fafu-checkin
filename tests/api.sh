@@ -7,7 +7,7 @@
 #   2) 缝：全程序只有 http_post() 一处真正发起网络请求——断言里覆盖同名函数即可
 #      注入响应体 / 失败 / 超时；真实命令行（含超时选项探测）与被丢弃的 stderr
 #      在同一个缝上用替身 busybox 断言（tests/mock/busybox 的 MOCK_WGET_DIR）；
-#   3) 不变：既有调用点的请求路径、查询参数、请求头与重构前逐字一致（静态断言）。
+#   3) 不变：调用点的请求路径、查询参数与请求头逐字钉住（静态断言）。
 #
 # 断言直接加载真实的层文件（tests/harness.sh 的 TEST_LIB_FILES），不抽源码片段、不绑行号。
 # ============================================================
@@ -265,12 +265,12 @@ DRIVER
   d="$AP_WORK/seam.out"
   t_eq "成功：返回 0" "$(ap_val "$d" ok_rc)" "0"
   t_eq "成功：响应体原样透传（不做解析）" "$(ap_val "$d" ok_body)" '{"records":[{"id":7,"signState":0}]}'
-  t_eq "查询：URL 与重构前一致" "$(ap_val "$d" ok_url)" \
+  t_eq "查询：URL 与既有调用点一致" "$(ap_val "$d" ok_url)" \
     "http://stuhtapi.fafu.edu.cn/health-api/sign_in/student/my/page?rows=3&pageNum=1"
   t_eq "查询：签名用的是不含查询串的 URL" "$(ap_val "$d" ok_sig_url)" "yes"
   t_eq "失败：退出码原样交给调用方（1）" "$(ap_val "$d" fail_rc)" "1"
   t_eq "失败：响应体为空（不伪造正文）" "$(ap_val "$d" fail_body)" "[]"
-  t_eq "提交签到：URL 与重构前一致" "$(ap_val "$d" fail_url)" \
+  t_eq "提交签到：URL 与既有调用点一致" "$(ap_val "$d" fail_url)" \
     "http://stuhtapi.fafu.edu.cn/health-api/sign_in/7/student/sign?lng=119.243462&lat=26.088417"
   t_eq "提交签到：签名 URL 同样不含查询串" "$(ap_val "$d" fail_sig_url)" "yes"
   t_eq "超时：退出码原样交给调用方（143）" "$(ap_val "$d" timeout_rc)" "143"
@@ -310,7 +310,7 @@ DRIVER
   t_eq "网络层退出码原样返回（7）" "$(ap_val "$d" rc)" "7"
   t_eq "响应体原样返回" "$(ap_val "$d" body)" "RESP-BODY-1"
   t_eq "探测到 -T：超时选项就位" "$(ap_val "$d" wget_t)" "[-T 20]"
-  t_eq "命令行与重构前逐字一致（含超时选项、请求头、POST 语义）" "$(ap_val "$d" cmd)" \
+  t_eq "命令行与既有调用点逐字一致（含超时选项、请求头、POST 语义）" "$(ap_val "$d" cmd)" \
     'wget|-q|-T|20|-O|-|--header=Authorization: AUTH-VALUE|--post-data=|http://host/health-api/x?q=1|'
   t_eq "一次调用只发一次请求" "$(ap_val "$d" calls)" "1"
   t_hasnt "wget 的报错正文被 2>/dev/null 吞掉（不进调用方 stderr）" "$AP_WORK/wget_t.err" "报错正文"
@@ -330,7 +330,7 @@ DRIVER
 #
 # 这里只用两类判据：**命令位**（行首缩进后的真实调用，注释里提到 wget 不算）与
 # **产品数据**（调用的路径、查询参数）。不绑局部变量名与参数位次——名字是各层的
-# 内部事，改个名不该制造假红灯（见开发文档 §5.1）。
+# 内部事，改个名不该制造假红灯。
 # ============================================================
 
 ap_case_boundary() {
@@ -348,14 +348,14 @@ ap_case_boundary() {
   done
   t_eq "网络调用只在 api 层" "$(printf '%s\n' $owners | sort | tr '\n' ' ')" "api.sh "
 
-  # 既有调用点：请求路径与查询参数与重构前逐字一致（比对的是产品数据，不是写法）
+  # 既有调用点：请求路径与查询参数逐字钉住（比对的是产品数据，不是写法）
   t_has "查询任务：路径与参数不变" "$src" 'sign_in/student/my/page" "rows=3&pageNum=1'
   t_has "保活与手动排查：路径与参数不变" "$src" 'sign_in/student/my/page" "rows=1&pageNum=1'
   t_has "提交签到：路径与参数不变" "$src" 'sign_in/$rid/student/sign" "lng=$lng&lat=$lat'
 
   # 失败判定以退出码为准：每个调用点都在调完之后立刻取退出码。
-  # （响应体的形状只用于判断「取到的是不是任务列表」，不是失败判据——这是重构前的
-  # 既有行为，签到层怎么分流由它自己的断言覆盖，这里只守住「退出码没有被丢掉」。）
+  # （响应体的形状只用于判断「取到的是不是任务列表」，不是失败判据；签到层怎么分流
+  # 由它自己的断言覆盖，这里只守住「退出码没有被丢掉」。）
   n_api=$(grep -cE -e '\$\(api "' "$src" 2>/dev/null)
   n_rc=$(grep -cE -e '\$\(api "[^"]*" "[^"]*" "[^"]*"\); rc=\$\?' "$src" 2>/dev/null)
   t_ne "调用点数量不为零（否则下面的等式会空转）" "$n_api" "0"

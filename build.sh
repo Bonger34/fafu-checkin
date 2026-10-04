@@ -1,21 +1,13 @@
 #!/bin/sh
 # ============================================================
-# 数字FAFU 晚查寝自动签到 —— 打包脚本
-# 生成可刷入的模块 zip（输出到 dist/）
+# 数字FAFU 晚查寝自动签到 —— 打包脚本：生成可刷入的模块 zip（输出到 dist/）
 #
-# 用法:
-#   sh build.sh          发布构建 → dist/fafu-checkin-<版本>.zip
+# 用法：
+#   sh build.sh          发布构建 → dist/fafu-checkin-<版本>.zip（保留 updateJson）
 #   sh build.sh dev      开发构建 → dist/fafu-checkin-<版本>-dev.<commit>.zip
+#                        （带 commit 标识，移除 updateJson 以免被提示升级到正式版）
 #
-# 说明:
-#   - dev 构建用于日常测试（带 commit 标识，可追溯），
-#     并会移除 module.prop 中的 updateJson（不参与管理器更新检测，
-#     避免开发版被提示升级到正式版）；
-#   - 发布构建保留 updateJson，文件名与 update.json 的 zipUrl 对应；
-#   - 库层清单从入口脚本的 FAFU_LAYERS 读（唯一真源，与层序守卫、断言同源）；
-#   - 层文件是只读数据：给 644，不带可执行位；
-#   - 打包完成后逐个核对产物里确实有每个文件，缺一个就构建失败——
-#     半装（少一层）是最难排查的失败模式，必须在这里拦住。
+# 依赖与配置：Info-ZIP 的 zip / unzip；层清单从入口的 FAFU_LAYERS 读（唯一真源）。
 # ============================================================
 set -e
 cd "$(dirname "$0")"

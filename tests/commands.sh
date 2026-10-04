@@ -17,7 +17,7 @@ CD_WORK="$T_WORK_ROOT/commands"
 # 而 $T_WORK_ROOT 就在仓库根的 tests/ 下，故往上两级即仓库根。
 # 它是驱动脚本加载层文件的**兜底**：Windows 上 $T_ROOT 形如 D:/.../fafu-checkin，
 # Linux 与随附 busybox 下可直接用，但 git-bash 只认 /d/... 形式
-# （踩过：source 会静默找到别处的同名文件，断言全绿而其实没加载被测代码）。
+# （不兜底时 source 会静默找到别处的同名文件，断言全绿而其实没加载被测代码）。
 CD_REL="../../"
 
 # 每个用例自备环境：替身 busybox + 模块目录
@@ -42,7 +42,7 @@ CD_CALLS='./calls'
 CD_RC=0
 export MODDIR BB_OVERRIDE CD_CALLS CD_RC
 # 层文件按**加载顺序**从仓库根加载。$T_ROOT 在 Windows 上形如 D:/.../fafu-checkin，
-# Linux 与随附 busybox 下直接可用；git-bash 只认 /d/... 形式（踩过：source 静默找错文件），
+# Linux 与随附 busybox 下直接可用；git-bash 只认 /d/... 形式（否则 source 会静默找错文件），
 # 故先试一个探针文件，不行再退回「从本工作目录往上数」的相对路径。
 if [ -r "\$T_ROOT/lib/base.sh" ]; then CD_ROOT="\$T_ROOT"; else CD_ROOT='$CD_REL'; fi
 for _f in $TEST_LIB_FILES; do . "\$CD_ROOT/\$_f"; done
@@ -278,8 +278,8 @@ cd_case_usage() {
 DRIVER
   d="$CD_WORK/usage.out"
   t_eq "清单：按表里的顺序列出九个命令" "$(cd_val "$d" list)" "stop status notify once refresh keepalive toggle enable disable "
-  # 用法文本逐字与重构前一致（集合来自表，start 写在说明里）
-  t_eq "用法文本：与重构前逐字一致" "$(cd_val "$d" usage)" \
+  # 用法文本逐字钉住（集合来自表，start 写在说明里）
+  t_eq "用法文本：逐字一致" "$(cd_val "$d" usage)" \
     "用法: sh [stop status notify once refresh keepalive toggle enable disable start]"
   t_eq "用法文本：返回非 0（用法即失败）" "$(cd_val "$d" rc)" "1"
   t_eq "cmd_known：start 认" "$(cd_val "$d" known_start)" "0"

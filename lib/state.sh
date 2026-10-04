@@ -1,27 +1,20 @@
 # ============================================================
-# state 层 —— 运行时状态：服务开关、签到记录、保活统计、完成标记、通知标记
+# state 层 —— 运行时状态：服务开关、签到记录、保活统计、完成标记、通知标记、冷却基准
 #
-# 加载顺序：第 2 层。本层是模块目录内运行时文件的**唯一归属地**：其余层与入口
-# 只经这里的函数访问，不再自己读写这些文件（文件名、字段名、字段顺序都收在本层）。
-# 文件名称、字段名与字段顺序是对使用者可见的契约：升级后不丢当日记录，不要改。
-#
-# 状态分五类，读写各走本层的语义函数：
-#   开关       svc_is_disabled / svc_set
-#   签到记录   sign_get / sign_set
-#   保活统计   ka_counts / ka_ok_count / ka_fail_count / ka_last_time / ka_last_result / ka_is_today / ka_note
-#   完成标记   done_marked / done_mark
-#   通知标记   notify_marked / notify_mark（四类事件）/ nt_cooldown（冷却基准）
-#
-# 「按日滚动」的三处判定都在这里（跨日归零只发生在本层）：
-#   保活统计、当日完成标记、通知的「一日一次」——判据都是文件里的日期是否等于今天。
+# 加载顺序：第 2 层。本层是模块目录内运行时文件的**唯一归属地**：其余层与入口只经
+# 这里的函数访问，不自己读写这些文件。
+# 对外提供：svc_is_disabled / svc_set、sign_get / sign_set、
+#   ka_counts / ka_ok_count / ka_fail_count / ka_last_time / ka_last_result / ka_is_today /
+#   ka_note、done_marked / done_mark、notify_marked / notify_mark、nt_cooldown。
+# 契约：文件名、字段名、字段顺序与内容格式对使用者可见——升级后不丢当日记录，不要改。
+# 「按日滚动」的三处判定（保活统计、完成标记、通知的「一日一次」）都只在本层发生。
 # ============================================================
 
 STATE="$MODDIR/fafu-checkin.state"       # 服务开关（enabled / disabled）
 STATUS="$MODDIR/fafu_checkin.status"     # 最近签到记录（动态描述用）
 KASTAT="$MODDIR/fafu_keepalive.status"   # 保活统计（今日成功/失败、最近 token）
 DONE="$MODDIR/.fafu_checkin_done"        # 当日签到完成标记
-# 三个未签时点各自独立标记：若共用标记，22:00 先发会让 22:30 / 23:00 永远发不出来，
-# 而 23:00 那条「今晚未能自动签到」恰恰是本功能存在的理由
+# 三个未签时点各自独立标记：共用标记会让先到的那个时点把后面的永久挡住
 NFAIL="$MODDIR/.fafu_notify_fail"        # 当日「失败类通知」已发标记
 NNOSIGN="$MODDIR/.fafu_notify_nosign"    # 22:00 未签提醒已发标记
 NLATE="$MODDIR/.fafu_notify_late"        # 22:30 窗口切换提醒已发标记
@@ -29,8 +22,7 @@ NMISS="$MODDIR/.fafu_notify_miss"        # 23:00 最终未签提醒已发标记
 NTLAST="$MODDIR/.fafu_notify_last"       # 打扰型通知的冷却基准（unix 秒）
 
 # 事件名 → 标记文件。文件名与上面逐个对应，不要改（改了等于当天提醒重来一遍）。
-# 事件名由调用方以字面量传入（notify_once "$tag" fail 等四种），写错等于该类提醒
-# 静默失效，故这一层要能一眼看出名字与文件的对应关系。
+# 事件名由调用方以字面量传入（notify_once 的四种事件），写错等于该类提醒静默失效。
 _state_mark() { # $1=事件名 → 输出该事件的标记文件路径（未知事件输出空）
   case "$1" in
     fail) printf '%s' "$NFAIL" ;;
@@ -54,8 +46,8 @@ svc_is_disabled() {
 }
 
 svc_set() { # $1=enabled|disabled
-  # 原子写（临时文件 + 改名）：开关是「停用 = 不再有任何网络请求」的唯一依据，
-  # 宁可保持旧值，也不要留下半截内容被读成「启用」。字段格式与旧版逐字节一致。
+  # 用原子写：开关是「停用 = 不再有任何网络请求」的唯一依据，宁可保持旧值，
+  # 也不要留下半截内容被读成「启用」
   printf '%s\n' "$1" | write_atomic "$STATE"
 }
 

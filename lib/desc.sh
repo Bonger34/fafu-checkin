@@ -1,12 +1,10 @@
 # ============================================================
 # desc 层 —— 模块描述：读状态层生成描述文本，并写入
 #
-# 加载顺序：第 6 层。描述文本只读状态层（开关 + 最近签到记录），本层不碰任何文件格式。
-# 写入沿用「KernelSU 官方覆盖优先、失败回退改写模块元数据」，且改写前必须校验：
-# grep 失败会留下空文件，直接 mv 会把 module.prop 清空（模块元数据全丢，管理器里
-# 连模块名都没了）——故先写临时文件、验非空、再原子改名。
-# 触发点（签到成功 / 检测到已签到或请假 / 开关切换或 status / 服务启动 / 守护进程定时自检）
-# 由调用方决定，本层只提供 update_desc；8 处调用点见 tests/state.sh 的「desc · 触发点」。
+# 加载顺序：第 6 层。描述文本只读状态层（开关 + 最近签到记录），本层不碰任何文件格式；
+# 触发点由调用方决定，本层只提供这三个函数。
+# 对外提供：desc_text（生成文本）/ set_desc（写入）/ update_desc（内容变化时才写）。
+# 写入方式：KernelSU 官方覆盖优先，失败回退改写模块元数据。
 # ============================================================
 
 # 当前生效的描述：KernelSU 覆盖值为空时回退读模块元数据（否则会重复写入同一条描述）
@@ -51,7 +49,8 @@ set_desc() { # $1=描述文本；优先 KernelSU 官方覆盖，失败则改写 
   [ -f "$MODDIR/module.prop" ] || return 1
   tmp="$MODDIR/module.prop.tmp"
   "$BB" grep -v '^description=' "$MODDIR/module.prop" > "$tmp" 2>/dev/null
-  # 校验：grep 失败会留下空文件，直接 mv 会把 module.prop 清空（模块元数据全丢）
+  # 改写前必须校验：grep 失败会留下空文件，直接 mv 会把 module.prop 清空
+  # （模块元数据全丢，管理器里连模块名都没了）
   [ -s "$tmp" ] || { rm -f "$tmp" 2>/dev/null; return 1; }
   printf 'description=%s\n' "$1" >> "$tmp"
   "$BB" mv -f "$tmp" "$MODDIR/module.prop" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }

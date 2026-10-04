@@ -2,10 +2,10 @@
 # api 层 —— 接口：token 提取、请求签名、HTTP 调用
 #
 # 加载顺序：第 3 层。业务层不自己拼签名、也不直接调网络，一律经 api()；
-# 全程序只有 http_post() 一处真正发起网络请求——覆盖它即可离线复现
-# 「响应体 / 失败 / 超时」三条路径，签到判定的分支因此不必上机就能跑。
-# 失败判定以 wget 退出码为准：busybox wget 拿不到错误响应正文（见开发文档 §3.2）。
-# 测试注入（生产环境不设置）：LD_DIR=token 目录，BB_OVERRIDE=busybox 替身。
+# 全程序只有 http_post() 一处真正发起网络请求。
+# 失败判定以 wget 退出码为准：busybox wget 拿不到错误响应正文。
+# 对外提供：get_token / mk_auth / api / http_post。
+# 配置 / 注入点（生产环境不设置）：LD_DIR=token 目录，BB_OVERRIDE=busybox 替身。
 # ============================================================
 
 SECRET="AtPs2O1xEnhwkKDV"

@@ -3,39 +3,22 @@
 #
 # 三条口径：
 #   1) **只报事件名**：业务层说「发生了什么」（sign / supp / …），tag 拼法与文案都在
-#      notify 层里查表。断言因此数的是「第 N 个事件产生了哪条命令、什么标题正文」，
-#      而不是去源码里找某个字面量调用点（那种写法一改调用方式就假红，也测不出映射本身）；
-#   2) **降权探测判的是身份**：替身 su 复现设备上的真实语义 —— `su - shell -c` 可能
-#      根本没执行命令、退出码却是 0。断言要求探测读 `id -u` 的输出等于 2000 才认，
-#      并且会依次尝试三个候选写法；
-#   3) **冷却基准必须落盘**：refresh_token 总在 $( ) 子 shell 里调用预警，内存变量活不过
-#      那个子 shell。断言在**子 shell 里**发预警，再看基准是否真的写到了 state 层的文件上。
+#      notify 层里查表；断言数的是「哪个事件产生了哪条命令、什么标题正文」；
+#   2) **降权探测判的是身份**：替身 su 复现 `su - shell -c` 没执行命令、退出码却是 0
+#      这条语义，断言要求探测读到 `id -u` 输出 2000 才认，并依次尝试三个候选写法；
+#   3) **冷却基准必须落盘**：在 $( ) 子 shell 里发预警，再看基准是否真写到 state 层的文件上。
 #
-# 加载方式：直接 source 真实的层文件（tests/harness.sh 的 TEST_LIB_FILES，顺序取自入口的
-# FAFU_LAYERS），不抽源码片段、不绑行号。
-#
-# 观察面只有一个：覆写 nt_send（发送层上的缝，与 api 层的 http_post 同理）把
-# **最终构造出的命令串**记下来；消息文案直接读 _NT_TITLE / _NT_TEXT。
-#
-# 本机（Windows + busybox）踩过的四个坑，改这个文件前先看：
-#   1) 驱动脚本的 stdin 是调用方的 heredoc，所以主体必须先落临时文件再与前导拼接，
-#      不能 `cat > "$name.sh"` 之后追加——那样写出来顺序正好颠倒；
-#   2) 包装脚本的第一行必须是 `#!<busybox> sh`（Windows 上扩展名缺失时只认这种 shebang），
-#      解释器会把一个多余的 `sh` 留在参数最前面；
-#   3) su 是 busybox 的内建 applet，PATH 上的同名文件拦不到它，探测因此一律走 $SU_BIN；
-#   4) 路径里带空格，`$变量` 当命令名时会因词分割执行失败——要顶掉命令就用同名函数，
-#      不要用「把变量指向函数名」的写法。
-#
-# 覆盖不到的（只能上机目视确认）：su / cmd notification post 的真实送达、Doze 投递延迟。
+# 加载：直接 source 真实层文件（harness 的 TEST_LIB_FILES，顺序取自入口的 FAFU_LAYERS）。
+# 观察面：覆写 nt_send 记下**最终构造出的命令串**；消息文案读 _NT_TITLE / _NT_TEXT。
+# 覆盖不到（只能上机目视确认）：su / cmd notification post 的真实送达、Doze 投递延迟。
 # ============================================================
 
 # 事件名 → 期待的输出（tag 后缀）。「tag 格式与按日滚动不变」就钉在这张表上。
 NT_TAGS="sign:sign supp:supp seen:sign leave:leave failsign:failsign failtask:failtask nosign:t2200 late:t2230 miss:miss warn:warn test:test"
 
-# 工作目录与环境：每个驱动一份干净的（同一个用例里的多个驱动互不影响），
-# 目录名带上驱动名，跑完留在 tests/.work/notify-<驱动>/ 供排查。
-# 踩过的坑：把工作目录做成「每条用例清一次、用例内复用」，第二个驱动的替身就找不到
-# 第一个驱动留下的记录文件，断言静默变成空转。
+# 工作目录与环境：每个驱动一份干净的，目录名带上驱动名，跑完留在 tests/.work/notify-<驱动>/。
+# 必须按驱动分开：同一条用例里的多个驱动共用一个目录时，后一个会覆盖前一个留下的记录，
+# 断言静默变成空转。
 NT_WORK=""
 nt_setup() { # $1=驱动名（决定工作目录）
   NT_WORK="$T_WORK_ROOT/notify-$1"
@@ -49,7 +32,8 @@ nt_setup() { # $1=驱动名（决定工作目录）
 }
 
 # 降权链路的替身：**只顶掉 su 这个可执行文件**，probe_su 与 notify 都跑真实实现。
-# 两条约束决定了它必须是文件、且必须挂在 $SU_BIN 上（见文件头的坑 3、4）。
+# 两条约束决定了它必须是文件、且必须挂在 $SU_BIN 上：su 是 busybox 的内建 applet，
+# PATH 上的同名文件拦不到它；而路径里带空格时「把变量指向命令名」会因词分割执行失败。
 #   探测：`su <arrangement> -c 'id -u'` → 记一行、输出 MOCK_SU_ID（默认 2000）
 #         MOCK_SU_EMPTY=1 时**空手退出 0**（KernelSU 上 `-c` 落空、命令根本没跑）
 #   发送：`su <arrangement> -c 'cmd notification post ...'` → 替身真的把它跑掉，
@@ -72,7 +56,7 @@ STUB
 # 「按调用次数分档」的替身：前 4 次调用空手退出（命令没跑、rc 却是 0），第 5 次才真的
 # 给出身份。用来验「候选依次尝试」——能通过校验的必然是第三个候选（每个候选试两次）。
 # 它是**独立完整**的替身（不叠加在默认替身上）：叠加会让默认替身先输出 uid，
-# 分档就永远轮不到（踩过）。
+# 分档就永远轮不到。
 nt_stub_seq() { # $1=可执行文件路径 $2=控制目录
   cat <<STUB > "$1"
 #!$(t_find_busybox) sh
@@ -87,7 +71,7 @@ STUB
 
 # 驱动脚本的公共前导：替身 busybox 排在 PATH 最前、模块目录、固定的当日 tag。
 # 用「heredoc 直接重定向」而不是 `cat > file <<EOF`：后者让外部 cat 去读 stdin，
-# 在把 stdin 挂在管道上的运行器里会一直等（踩过）。
+# 在把 stdin 挂在管道上的运行器里会一直等。
 # $1=noprobe 时不自动探测（探测类用例自己控制调用次数）
 nt_env() {
   cat <<ENV > "$NT_WORK/_env.sh"
@@ -282,9 +266,9 @@ DRIVER
   t_has "使用 bigtext 样式" "$d" '-S bigtext'
   t_has "标题保留给子 shell 展开" "$d" '$_NT_TITLE'
   t_has "正文回退写法保留" "$d" '${_NT_TEXT:-$_NT_TITLE}'
-  # sign 与 seen 用同一个 tag（复刻重构前的行为）：同日重复检测到已签到时互相覆盖，
-  # 通知栏不堆积；这两个 tag 相同是**对外契约**，不是巧合
-  t_has "seen 与 sign 同 tag（复刻重构前）" "$d" "fafu-sign-20261001" 2
+  # sign 与 seen 用同一个 tag：同日重复检测到已签到时互相覆盖，通知栏不堆积；
+  # 这两个 tag 相同是**对外契约**，不是巧合
+  t_has "seen 与 sign 同 tag" "$d" "fafu-sign-20261001" 2
 
   # warn 与 test 的 tag 由各自的真实调用方驱动：它们不在业务事件表里，但同样要按日滚动。
   # 标题与正文直接取发送时的那两个变量（命令串里存的是给子 shell 展开的写法）
@@ -395,8 +379,8 @@ DRIVER
 }
 
 # 「这次到底发没发」的返回值：调用方（keepalive）据此决定要不要留出阅读时间。
-# 旧写法把 sleep 放在「冷却已过」的分支里，等价于「发了才等」——这条不变量必须保住，
-# 否则通知关闭 / 降权不可用 / 冷却期内的每次亮屏刷新都会白等 5 秒。
+# sleep 只能排在返回 0 的分支上，等价于「发了才等」——否则通知关闭 / 降权不可用 /
+# 冷却期内的每次亮屏刷新都会白等 5 秒。
 nt_case_warn_return() {
   local d
   nt_setup warnret
@@ -454,7 +438,7 @@ nt_case_warn_order() {
   nt_setup dv
   # 这份工作目录里再放上设备命令替身（真机上 am / dumpsys 同样在 /system/bin 下）：
   # 前导里的 PATH='./bin:...' 正好命中 dv_tools 写的那些包装器。
-  # DV_WORK 必须在 nt_setup 之后取——那之前 NT_WORK 还是上一条用例的目录（踩过）
+  # DV_WORK 必须在 nt_setup 之后取——那之前 NT_WORK 还是上一条用例的目录
   DV_WORK="$NT_WORK"
   dv_tools
   nt_run order <<DRIVER

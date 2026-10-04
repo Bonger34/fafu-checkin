@@ -58,7 +58,7 @@ ENV
 
 # 跑一个驱动脚本；用法：st_run <名字>，主体从 stdin 读入（公共前导自动接在前面）。
 # 关键：**在 $ST_WORK 里以相对路径**运行脚本，前导里的 MODDIR / BB_OVERRIDE 才是相对路径，
-# 否则 Windows 上的 D:/ 绝对路径在 sh 里会被当成 /mod 这样的残缺路径（踩过）。
+# 否则 Windows 上的 D:/ 绝对路径在 sh 里会被当成 /mod 这样的残缺路径。
 st_run() {
   local name rc
   name="$1"
@@ -76,7 +76,7 @@ st_run() {
 
 # 从驱动输出里取一行（形如 key=value）。
 # 用 cut 而不是 sed：sed 的替换串里 `&` 会展开成「整个匹配」，键名恰好含 & 时
-# 或模式不匹配时会把整行原样吐回来（踩过），cut 没有这层语义。
+# 或模式不匹配时会把整行原样吐回来，cut 没有这层语义。
 st_val() { # $1=文件 $2=键
   grep "^$2=" "$1" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '\r\n'
 }
@@ -562,8 +562,8 @@ st_case_desc_trigger() {
   # 入口三处：启动落定、停用分支、守护循环里的定时自检
   t_eq "触发点：入口三处（启动 / 停用 / 定时自检）" "$n_entry" "3"
   t_eq "触发点：全程序共 8 处描述刷新" "$n_app" "8"
-  t_before "触发点：守护循环里定时刷新排在日志轮转之前" "$src" \
-    "$(t_call update_desc)" "$(t_call rotate_log)"
+  t_before_re "触发点：守护循环里定时刷新排在日志轮转之前" "$src" \
+    "$(t_call_re update_desc)" "$(t_call_re rotate_log)"
 }
 
 # ============================================================
@@ -577,7 +577,7 @@ st_case_desc_trigger() {
 #       带引号的字符串（uninstall.sh 的删除清单，与模块目录一起被管理器整体移除）也不算。
 # 允许的两个持有者：
 #   lib/state.sh  —— 归属地本身
-#   service.sh    —— 开机脚本，不加载库层，启动前只读一次开关文件（见开发文档 §2.1）
+#   service.sh    —— 开机脚本，不加载库层，启动前只读一次开关文件
 st_case_ownership() {
   local pat owners files
   pat='(^|[^"[:alnum:]_/])(>|>>|cat|grep|read|printf|rm|kill|mv|cp)[[:space:]]+"?\$(STATE|STATUS|KASTAT|DONE|NFAIL|NNOSIGN|NLATE|NMISS|NTLAST)"?'

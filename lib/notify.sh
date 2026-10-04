@@ -3,14 +3,11 @@
 #
 # 加载顺序：第 5 层。通知是纯增量能力：任何失败都不得影响签到主流程。
 # 业务层只报**事件名**（sign / supp / seen / leave / failsign / failtask / nosign /
-# late / miss），tag 后缀与文案模板的对应关系都在下面那两张表里；新增一条通知要动
-# 三处（事件表、tag 表、_msg_* 文案），但都只在这一个文件里，且三处都得写才会生效
-# ——漏写不会静默，测试会报红。
-# 三条硬约束（cmd notification post 的实现，改这里会坏什么）：
-#   1) 通知 id 恒为 2020，只能靠 tag 区分事件；同 tag 会覆盖（静默更新）
-#   2) channel 恒为 shell_cmd，重要性 / 声音 / 图标均不可调
-#   3) 不支持 ongoing / autoCancel / 按钮
-# tag 用含日期的「按日滚动」，同事件次日覆盖前一天，通知栏条数恒有上限。
+# late / miss），tag 与文案都由本层的两张表查出来；新增一条通知要动三处
+# （事件表、tag 表、_msg_* 文案），但都只在这一个文件里，漏写会被断言报红。
+# 对外提供：probe_su / notify_event / notify_once / notify_warn / notify_lead / tag_of。
+# 配置：NOTIFY=0 关闭全部通知；NOTIFY_LEAD、NOTIFY_COOLDOWN 见下。
+# 注入点（生产环境不设置）：SU_BIN、NOTIFY_CMD、FAFU_SU_MODE。
 # ============================================================
 
 # ---- 配置（可被模块目录内的 fafu-checkin.conf 覆盖） ----
@@ -39,6 +36,7 @@ _NT_MARK_nosign=nosign;    _NT_MARK_late=late;        _NT_MARK_miss=miss
 # ---- tag 表：事件名 → 通知 tag 后缀（完整 tag = fafu-<后缀>-<当日 tag>） ----
 # 默认后缀就是事件名本身，只有两个例外：seen 与 sign 同 tag（同为「已签到」，同日互相
 # 覆盖不堆积），三个未签时点用 t2200 / t2230 / miss。这两个例外是**对外契约**，别顺手改。
+# tag 里含日期，故整条策略是「按日滚动」：同事件次日覆盖前一天，通知栏条数恒有上限。
 tag_of() { # $1=事件名 → 事件对应的 tag 后缀（未知事件输出空）
   case "$1" in
     seen)   echo sign ;;
@@ -105,6 +103,8 @@ _msg_miss()   { _NT_TITLE="❌ 今晚未能自动签到"
                 _NT_TEXT="$PL 23:00 重试结束仍未签到，请手动处理"; }
 
 # ---- 发送 ----
+# cmd notification post 的能力被 AOSP 限死（改这里会坏什么）：通知 id 恒为 2020，只能靠
+# tag 区分事件；channel 恒为 shell_cmd，重要性 / 声音 / 图标 / ongoing / 按钮均不可调。
 nt_send() { # $1=完整命令串：交给降权 shell 执行；调用它的是 notify()
             # 独立一函数是为让断言能替换掉「执行」这一步，看到真正构造出的命令串
   $SU_MODE "$1" </dev/null >/dev/null 2>&1

@@ -78,6 +78,7 @@ cat /data/adb/modules/fafu-checkin/fafu_checkin.log
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh status    # 查看开关 / 服务 / 保活 / token 状态
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh notify    # 发一条测试通知（确认通知能否送达）
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh keepalive # 手动执行一次保活检查
+sh /data/adb/modules/fafu-checkin/fafu_checkin.sh refresh   # 手动刷新 token（测试用）
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh toggle    # 切换服务开关（启用 ⇄ 停用）
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh enable    # 启用服务
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh disable   # 停用服务
@@ -85,6 +86,10 @@ sh /data/adb/modules/fafu-checkin/fafu_checkin.sh once      # 立即检查一次
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh start     # 启动服务（若已停用则忽略）
 sh /data/adb/modules/fafu-checkin/fafu_checkin.sh stop      # 停止服务（不改变开关状态）
 ```
+
+> 不加子命令等于 `start`；写错子命令会打印完整的用法（命令集合取自命令表）。
+> 除 `start`（它就是不带子命令）之外，全部子命令的清单与说明都在源码 `lib/commands.sh`
+> 的命令表里，一眼看全。
 
 ## ⚙️ 配置（可选）
 
@@ -250,10 +255,10 @@ sh build.sh dev      # 开发构建 → dist/fafu-checkin-<版本>-dev.<commit>.
 | `sh build.sh` | `fafu-checkin-v1.2.0.zip` | **发布**（文件名与 `update.json` 的 `zipUrl` 对应） |
 | `sh build.sh dev` | `fafu-checkin-v1.2.0-dev.5c1a6a4.zip` | **日常测试**（带 commit 标识，可追溯） |
 
-CI 的自动构建使用 **dev 模式**：产物名带短 commit（如 `fafu-checkin-dev-5c1a6a4`），
-便于在多次 push 之间区分；dev 版会移除 `module.prop` 的 `updateJson`
-（不参与管理器更新检测，避免开发版被提示升级到正式版）；
-正式发布时使用干净的发布构建产物。
+CI 的自动构建使用 **dev 模式**：Actions 产物（artifact）名为 `fafu-checkin-dev-<短commit>`，
+里面的 zip 仍是 `fafu-checkin-<版本>-dev.<短commit>.zip`，便于在多次 push 之间区分；
+dev 版会移除 `module.prop` 的 `updateJson`（不参与管理器更新检测，避免开发版被提示升级到
+正式版）；正式发布时使用干净的发布构建产物。
 
 ### 安装到设备
 
