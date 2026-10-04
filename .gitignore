@@ -24,3 +24,6 @@ __pycache__/
 
 # 并行实施用的本地工作树（不入库）
 .worktrees/
+
+# 浏览器自动化产物（本机调试用，不入库）
+.playwright-mcp/
