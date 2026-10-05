@@ -737,8 +737,9 @@ nohup sh /sdcard/Download/device-smoke.sh > /sdcard/Download/fafu-smoke.log 2>&1
 
 **验证记录（2026-10-04，重构后的真机走查，`dev.4e1f8ae` + 两处修复）**：
 小米 13 Ultra / Android 17 / SDK 37，开发构建装一次后逐项走完。
-走查用的产物自报 `v1.2.0`（它就是重构后的那版代码）；修复之后版本号升到 v1.2.1，
-两者的**可执行代码逐字节相同**（差异只在注释与版本行），故这份记录对 v1.2.1 同样成立：
+走查用的产物自报 `v1.2.0`（它就是重构后的那版代码）；此后 `module.prop` 升到 `v1.2.1`
+但**从未发过版**（配置页那一批一并留在「未发布」里），两者的**可执行代码逐字节相同**
+（差异只在注释与版本行），故这份记录对当前未发布的代码同样成立：
 
 - 启动完整性：层文件齐全（数量与入口 `FAFU_LAYERS` 对齐）、权限 644、无符号链接；
   日志无「模块不完整」/「缺少库层」。
@@ -753,7 +754,8 @@ nohup sh /sdcard/Download/device-smoke.sh > /sdcard/Download/fafu-smoke.log 2>&1
 - 保活：daemon 启动即保活一次（`[15:47:28]`），冒烟脚本手动校验一次（`[15:48:13]`），
   随后**在无人干预下按 15 分钟节拍到点**：`[16:03:14] 保活: ✅ … token 有效 (今日 3 成功 / 0 失败)`
   —— 与上一次相差 15 分 01 秒；`fafu_keepalive.status` 记 `ok=3 fail=0 last=16:03:14`
-- **本次走查查出并修掉两处只在真机暴露的缺陷**（详见 [CHANGELOG](../CHANGELOG.md) v1.2.1）：
+- **本次走查查出并修掉两处只在真机暴露的缺陷**（它们都由同批的「命令表驱动」重构引入、
+  并在发布前修掉，故升级者见不到；记在这里是因为 CHANGELOG 只对使用者讲「会经历什么」）：
   ① 开机启动的守护进程降权写法为空 → 它发出的通知全部静默消失（启动行此前是 `notify=[不可用]`）；
   ② 调用者的 fd 3 关闭时（管理器的 WebUI shell / 交互 root 终端就是这种），命令分发以
   `3: Bad file descriptor` 告败，四条手动命令连同守护进程一起废掉
@@ -791,7 +793,7 @@ nohup sh /sdcard/Download/device-smoke.sh > /sdcard/Download/fafu-smoke.log 2>&1
 ## 六、维护约定
 
 - **发布**：手动流程——CI 只构建（产物见 Actions artifact），Release 由维护者手动创建；
-  发布说明以 [CHANGELOG.md](../CHANGELOG.md) 对应小节为唯一来源（构建时提取为 `release-notes.md` 草稿）
+  发布说明以 [CHANGELOG.md](../CHANGELOG.md) 对应小节为唯一来源（发布时从该小节取出）
 - **版本号**：手动维护（`module.prop` 的 `version` / `versionCode`），不自动递增
 - **文案**：日期用绝对形式（如 `09-14`），不用「今日」等相对表述——守护进程退出后信息不失真
 - **代码**：一次性 / 临时的逻辑不入代码，在会话中给出命令即可

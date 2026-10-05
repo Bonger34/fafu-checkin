@@ -55,56 +55,9 @@ jobs:
       - name: 构建模块 zip（开发版）
         run: sh build.sh dev
 
-      - name: 生成发布说明草稿（供手动发布使用）
-        run: |
-          VER=$(sed -n 's/^version=//p' module.prop | head -n1)
-          awk -v hdr="## ${VER}" '
-            $0 == hdr { capture = 1; next }
-            capture && /^## / { exit }
-            capture { print }
-          ' CHANGELOG.md > dist/release-notes.md
-          if [ ! -s dist/release-notes.md ]; then
-            echo "（CHANGELOG 中缺少 ${VER} 小节，请在发布时补充说明）" > dist/release-notes.md
-          fi
-          echo "---------- 发布说明草稿（${VER}）----------"
-          cat dist/release-notes.md
-
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: fafu-checkin-dev-${{ steps.vars.outputs.short_sha }}
-          path: |
-            dist/*.zip
-            dist/release-notes.md
+          path: dist/*.zip
           if-no-files-found: error
-
-      - name: 输出手动发布提示
-        run: |
-          VER=$(sed -n 's/^version=//p' module.prop | head -n1)
-          {
-            echo "### 📦 构建完成：${VER} (dev.${{ steps.vars.outputs.short_sha }})"
-            echo ""
-            echo "Artifact \`fafu-checkin-dev-${{ steps.vars.outputs.short_sha }}\` 包含："
-            echo "开发版 zip（带 commit 标识、已移除 updateJson，不参与更新检测）与发布说明草稿。"
-            echo ""
-            echo "**手动发布步骤：**"
-            echo ""
-            echo '```sh'
-            echo "# 1. 发布构建（干净文件名，与 update.json 的 zipUrl 对应）"
-            echo "sh build.sh"
-            echo ""
-            echo "# 2. 打 tag 并推送"
-            echo "git tag -a ${VER} -m \"${VER}：一句话摘要\""
-            echo "git push origin ${VER}"
-            echo ""
-            echo "# 3. 创建 Release（说明用 release-notes.md）"
-            echo "gh release create ${VER} ./dist/fafu-checkin-${VER}.zip \\"
-            echo "  --title \"${VER}：一句话摘要\" \\"
-            echo "  --notes-file dist/release-notes.md"
-            echo ""
-            echo "# 4. 同步 update.json 并推送"
-            echo "python3 scripts/sync_update_json.py ${VER} <versionCode> \\"
-            echo "  \"https://github.com/\${GITHUB_REPOSITORY}/releases/download/${VER}/fafu-checkin-${VER}.zip\""
-            echo "git commit -am \"chore(release): 同步 update.json 至 ${VER}\" && git push"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
