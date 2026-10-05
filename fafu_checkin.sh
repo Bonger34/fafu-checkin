@@ -121,6 +121,7 @@ while true; do
   ROT_TICK=$((ROT_TICK-1))
   now=$(now_hm)
   PL=$(today_tag)   # 每轮重算：守护进程常驻，跨日后 tag 不应仍停在启动那天
+  rc_wait=60        # 本轮的休眠时长：查看任务时可能被改短或被放宽（任务异常档 4 分钟）
   if [ ! "$now" \< "$POLL_START" ] && [ ! "$now" \> "$POLL_END" ]; then
     # ---- 轮询范围内：查看今晚的任务（该不该签由服务端任务数据决定）----
     # 时刻比较直接用 now_hm 的零填充字符串：字典序即时间序，不必换算分钟；
@@ -129,11 +130,14 @@ while true; do
     if ! signin_resolved_today; then
       run_once; rc=$?
       [ $rc -eq 0 ] && done_mark
-      [ $rc -eq 2 ] && { sleep 240; continue; }
       # 「任务未发布」兜底：到 min(轮询范围止, 本地 23 点) 仍未取得任务就喊一条。
       # 它挂本地时钟、不看任务数据，但目标时刻必然落在轮询范围内，故判定就在这里，
       # 不另开一条不看时间的旁路。当日已解决时同样一条都不发。
+      # **它必须排在那条「任务异常就跳 4 分钟」之前**：rc=2 恰恰就是「取不到任务」——
+      # 也就是最该喊这一条的情形，跳过去等于把兜底静默吞掉。
       signin_remind_notask "$now"
+      # 任务异常（取不到任务）时下一轮排到 4 分钟后，与上面那条提醒互不相干
+      [ $rc -eq 2 ] && rc_wait=240
     fi
   fi
   # ---- 白天保活：与「轮询范围内」并列，不受当日是否已解决影响 ----
@@ -146,5 +150,5 @@ while true; do
       keepalive_ping
     fi
   fi
-  sleep 60
+  sleep "$rc_wait"
 done

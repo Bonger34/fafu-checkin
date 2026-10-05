@@ -328,6 +328,21 @@ POLL_END=22:15'
   poll_start
   t_eq "当日已解决：兜底提醒一次都不调" \
     "$(grep -c . "$POLL_WORK/ctl/notask" 2>/dev/null)" "0"
+
+  # 任务异常档（rc=2，即「取不到任务」）恰恰是最该喊这条兜底的情形：
+  # 主循环因此不能在这一档上就地跳过本轮剩下的动作，只能把休眠时长放宽到 4 分钟。
+  poll_setup notask-taskerr
+  poll_config 'KEEPALIVE=0
+POLL_START=19:30
+POLL_END=22:15'
+  poll_rc '2'
+  poll_plan '22:15
+22:19'
+  poll_inject_notask
+  poll_start
+  t_eq "任务异常档：到了兜底时刻仍然把它调到（这一档不能跳过它）" \
+    "$(tr '\n' '|' < "$POLL_WORK/ctl/notask")" "22:15|"
+  t_eq "任务异常档：下一轮仍排在 4 分钟后" "$(poll_slept)" "240|60|"
 }
 
 # ============================================================

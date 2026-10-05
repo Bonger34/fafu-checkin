@@ -718,8 +718,14 @@ sg_case_boundary() {
 
   # 主循环的两条分支（返回码的用处所在）：0 → 写当日完成标记；2 → 4 分钟后重试。
   # 删掉任何一条，三档返回码就退化成「只有日志不同」。
+  # 重试那一档的写法是「把本轮的休眠时长改成 240」，不是就地 continue——就地跳过会连
+  # 同一轮里排在它后面的兜底提醒一起吞掉（那正是最该喊「任务还没发布」的情形）。
   t_has "主循环：返回 0 写当日完成标记" "$T_ROOT/fafu_checkin.sh" '[ $rc -eq 0 ] && done_mark'
-  t_has "主循环：返回 2 四分钟后重试" "$T_ROOT/fafu_checkin.sh" '[ $rc -eq 2 ] && { sleep 240; continue; }'
+  t_has "主循环：返回 2 改成本轮 4 分钟后重试" "$T_ROOT/fafu_checkin.sh" '[ $rc -eq 2 ] && rc_wait=240'
+  t_has "主循环：休眠时长由本轮结论决定" "$T_ROOT/fafu_checkin.sh" 'sleep "$rc_wait"'
+  # 兜底提醒必须排在那条「任务异常跳 4 分钟」之前：rc=2 就是「取不到任务」。
+  t_before "主循环：兜底提醒排在任务异常跳档之前" "$T_ROOT/fafu_checkin.sh" \
+    'signin_remind_notask' 'rc_wait=240'
   # 三档语义写在文件头：改判定顺序前先读到这里
   t_has "文件头写明「已解决」档" "$T_ROOT/lib/signin.sh" '0 = 已解决'
   t_has "文件头写明「可重试」档" "$T_ROOT/lib/signin.sh" '1 = 可重试'
