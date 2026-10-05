@@ -133,6 +133,30 @@ DRIVER
   t_eq "开关项：2 拒绝" "$(cf_val "$d" sw_two)" "1"
   t_eq "开关项：1x 拒绝" "$(cf_val "$d" sw_yes)" "1"
   t_eq "开关项：空值拒绝" "$(cf_val "$d" sw_empty)" "1"
+
+  # 「能不能收」与「为什么不能收」必须永远说同一件事：判据与理由是两处代码，
+  # 只钉各自的样本挡不住它们漂移（收得下却给不出理由、或拒绝了却报「合法」）。
+  # 这条对**每一个登记键**同时看两侧，故加一个键就自动被覆盖。
+  cf_run reason <<'DRIVER'
+{
+  for k in $(cfg_keys); do
+    for v in "" 0 1 2 abc 25:00 23:59 07:00 5 300 601 86401; do
+      rc=$(cfg_valid "$k" "$v"; echo $?)
+      why=$(cfg_reason "$k" "$v")
+      if [ "$rc" = "0" ] && [ -n "$why" ]; then
+        printf 'mismatch %s=%s 收下了却给了理由[%s]\n' "$k" "$v" "$why"
+      elif [ "$rc" != "0" ] && [ -z "$why" ]; then
+        printf 'mismatch %s=%s 拒绝了却没给理由\n' "$k" "$v"
+      fi
+    done
+  done
+  printf 'checked=%s\n' "$(cfg_keys | grep -c .)"
+} > "$T_WORK/reason.txt"
+DRIVER
+  d="$CF_WORK/reason.txt"
+  t_eq "理由与判据不打架（每个登记键 × 12 个样本）" \
+    "$(grep -c '^mismatch' "$d")" "0"
+  t_ne "自证：这条断言真的遍历了登记键（不是空转）" "$(cf_val "$d" checked)" "0"
 }
 
 # ============================================================

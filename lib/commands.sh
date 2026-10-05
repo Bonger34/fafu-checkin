@@ -77,12 +77,18 @@ cmd_known() {
 cmd_dispatch() {
   local cmd name handler probe desc rc _cd_in cd_rc cd_out
   cmd="${1:-start}"
+  # 摘掉子命令名，位置参数里剩下的才是要转交处理函数的参数。
+  # `$# -eq 0` 是「连子命令都没给」（入口按 start 处理）时的保护：那时没有可摘的东西，
+  # 摘了会把 $0 挪进 $1，处理函数就多收到一个参数。**不要给 $# 加引号**——
+  # 在 sh 的 test 里 `"$#"` 会被当成注释开头，整条判断静默失效。
   [ $# -eq 0 ] || shift
   # 今日日期 tag（YYYYMMDD）：通知 tag 与「当日首次」判定都用它。
   # 守护主循环每轮会重算一次——进程常驻，跨日后 tag 不应仍停在启动那天。
   PL=$(today_tag)
   # 一、降权探测：入口在装配阶段已经探过一次，结果经 FAFU_SU_MODE 随环境传了进来
   # （守护进程就是靠它才带着写法常驻）。这里只处理没继承到的情形，省掉重复的 su 调用。
+  # 通知开关的生效值落在同名变量上（配置层加载时写入），读变量与读 cfg_notify 等价；
+  # 断言也以「覆盖变量」这条既有缝注入，故这里保持直接读变量。
   if [ "$NOTIFY" = "1" ] && [ -z "${FAFU_SU_MODE:-}" ] && [ -z "$SU_MODE" ]; then
     _cd_in=$(cmd_specs)
     # 这一趟读的是 here-doc 而不是管道：管道右侧的 while 在子 shell 里跑，探测写下的
@@ -116,6 +122,7 @@ EOF
 cmd_dispatch_rc() {
   local name handler probe desc want
   want="$1"
+  # 同 cmd_dispatch：摘掉子命令名，剩下的原样转交（$# 为 0 时没有可摘的；$# 不加引号）
   [ $# -eq 0 ] || shift
   cmd_specs | while read -r name handler probe desc; do
     if [ -n "$name" ] && [ "$name" = "$want" ]; then
@@ -161,6 +168,8 @@ cmd_keepalive() {
 }
 
 cmd_notify() { # 发一条测试通知，用来确认通知链路是否真的能送到
+  # 直接读 $NOTIFY 而不是经 cfg_notify：通知开关的生效值本来就落在同名变量上
+  # （配置层加载时写入），断言也以「覆盖变量」这条既有缝注入，读变量与读函数等价。
   if [ "$NOTIFY" != "1" ]; then
     echo "通知已关闭（配置 NOTIFY=0）"
     return 1
