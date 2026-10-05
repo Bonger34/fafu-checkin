@@ -18,8 +18,8 @@ SG_WORK=""
 SG_EPOCH=0             # 2026-10-01 00:00（本地时区的当日零点），由 sg_epoch 算出
 SG_DATE='2026-10-01'   # 夹具日期；拨钟的墙钟与 %s 的 EPOCH 都从这一天出发
 
-# 六个 signin 能力只有 signin 层定义（能力名 = 函数的唯一真源，改名会在这里报红）
-SG_CAPS="state_text:signin run_once:signin signin_fetch:signin signin_parse:signin signin_decide:signin signin_submit:signin"
+# 签到与提醒的能力都只有 signin 层定义（能力名 = 函数的唯一真源，改名会在这里报红）
+SG_CAPS="state_text:signin run_once:signin signin_fetch:signin signin_parse:signin signin_decide:signin signin_submit:signin signin_ms_hm:signin signin_remind_due:signin signin_remind_30min:signin signin_remind_deadlines:signin signin_notask_target:signin signin_notask_due:signin signin_remind_notask:signin"
 # 判定链用**调用形状**钉住，不绑函数体里的行号
 SG_CHAIN="out=\$(signin_fetch  signin_parse \"\$resp\"  signin_decide \"\$resp\" \"\$tok\""
 
@@ -65,6 +65,15 @@ sg_body() {
 # 已签到的夹具：signTime 落在 EPOCH+$2 分钟（断言据此验「记录的时间由 signTime 换算」）
 sg_body_seen() { # $1=任务开始偏移 $2=signTime 偏移
   sg_body "$1" 1 ",\"signTime\":$(( SG_EPOCH * 1000 + ${2:-0} * 60000 ))"
+}
+
+# 三个时点各自指定的响应体：$1=任务开始分钟 $2=主窗口截止分钟 $3=补签截止分钟
+# （sg_body 的三个时点是绑在一起的固定形状；提醒的锚点由任务数据推算，故要能分别摆）
+sg_task_span() {
+  printf '{"records":[{"id":88123,"name":"晚查寝签到","beginTime":%s,"supplementEndTime":%s,"endTime":%s,"signInStudent":{"signState":0},"lng":119.243462,"lat":26.088417}]}\n' \
+    "$(( SG_EPOCH * 1000 + $1 * 60000 ))" \
+    "$(( SG_EPOCH * 1000 + $3 * 60000 ))" \
+    "$(( SG_EPOCH * 1000 + $2 * 60000 ))"
 }
 
 # ---- 工作目录与环境 ----
@@ -685,7 +694,7 @@ sg_case_boundary() {
     done
     [ "$owner" = "${cap##*:}.sh" ] || miss="$miss $cap→${owner:-无}"
   done
-  t_eq "签到决策的六个能力都定义在 signin 层" "[$miss]" "[]"
+  t_eq "签到与提醒的能力都定义在 signin 层" "[$miss]" "[]"
 
   # 「取任务 / 解析 / 判定 / 提交」四步的定义顺序（= 依赖顺序，也是读代码的顺序）
   chain=""
@@ -717,10 +726,148 @@ sg_case_boundary() {
   t_has "文件头写明「任务异常」档" "$T_ROOT/lib/signin.sh" '2 = 任务异常'
 }
 
+# ============================================================
+# 九、三条截止提醒的判定：纯函数，喂毫秒值即可断言
+#
+# 判定与取数分开：这一节只喂毫秒值，不碰网络、不碰通知、不读时钟。
+# 「哪一刻真的发出去、正文里写的是哪几个钟点」由下一节（拨钟 + run_once）
+# 与 notify 层的文案用例分别守。
+# ============================================================
+
+sg_case_remind_due() {
+  local d
+  sg_setup remind-due
+  sg_run remind_due <<'DRIVER'
+# 到点未办完：锚点 1000、窗口 600 → [1000, 1600)
+due() { signin_remind_due "$1" "$2" "$3" && printf 'due' || printf 'no'; }
+printf 'before=%s\n'   "$(due 1000 600 999)"
+printf 'at=%s\n'       "$(due 1000 600 1000)"
+printf 'inside=%s\n'   "$(due 1000 600 1599)"
+printf 'edge=%s\n'     "$(due 1000 600 1600)"
+printf 'zero=%s\n'     "$(due 1000 0 1000)"
+printf 'neg=%s\n'      "$(due 1000 -1 1000)"
+printf 'noanchor=%s\n' "$(due '' 600 5000)"
+# 前 30 分钟那一档：锚点是「截止前 30 分钟」，窗口就是这 30 分钟 → [截止-1800000, 截止)
+half() { signin_remind_30min "$1" "$2" && printf 'due' || printf 'no'; }
+printf 'h_before=%s\n' "$(half 10000000 8199999)"
+printf 'h_at=%s\n'     "$(half 10000000 8200000)"
+printf 'h_last=%s\n'   "$(half 10000000 9999999)"
+printf 'h_edge=%s\n'   "$(half 10000000 10000000)"
+printf 'h_none=%s\n'   "$(half '' 8200000)"
+DRIVER
+  d="$SG_WORK/remind_due.out"
+  t_eq "锚点前一刻：不到期" "$(sg_val "$d" before)" "no"
+  t_eq "刚过锚点：到期" "$(sg_val "$d" at)" "due"
+  t_eq "窗口内：到期" "$(sg_val "$d" inside)" "due"
+  t_eq "窗口左闭右开（右边界那一刻交给下一档）" "$(sg_val "$d" edge)" "no"
+  t_eq "窗口为 0：不到期（没有可喊的时间）" "$(sg_val "$d" zero)" "no"
+  t_eq "窗口为负：不到期" "$(sg_val "$d" neg)" "no"
+  t_eq "锚点缺失（任务没给该字段）：不到期" "$(sg_val "$d" noanchor)" "no"
+  t_eq "前 30 分钟：截止前 30 分钟差 1 毫秒还不到期" "$(sg_val "$d" h_before)" "no"
+  t_eq "前 30 分钟：正好落在截止前 30 分钟时到期" "$(sg_val "$d" h_at)" "due"
+  t_eq "前 30 分钟：截止前 1 毫秒仍在档内" "$(sg_val "$d" h_last)" "due"
+  t_eq "前 30 分钟：到了截止那一刻交给下一档" "$(sg_val "$d" h_edge)" "no"
+  t_eq "前 30 分钟：截止缺失时不到期" "$(sg_val "$d" h_none)" "no"
+}
+
+# ============================================================
+# 十、三条截止提醒真的发出去：拨钟到各档锚点，看业务层报了哪几个事件
+#
+# 任务数据用**非默认**钟点（主窗口 21:00~21:40、补签截止 22:10），于是三档锚点
+# 分别是 21:10 / 21:40 / 22:10——与任何写死的钟点都对不上，实现里留着旧写法就会分叉。
+# 提交一律失败（响应体带 timestamp），于是每一格都停在「可重试」档、当日不会变成已解决，
+# 提醒才有机会发出来：这正是三条提醒存在的场景（自动签不上，喊人手动处理）。
+# ============================================================
+
+sg_case_remind_events() {
+  local d
+  sg_setup remind-events
+  sg_task_span 1260 1300 1330 > "$SG_WORK/ctl/body.page"
+  printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/body.sign"
+
+  # 20:55：三档锚点都还没到
+  sg_at 1255
+  printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run remind_1255 <<'DRIVER'
+run_once >/dev/null 2>&1
+printf 'nosign=%s\n' "$(grep -c '^nosign$' ctl/events 2>/dev/null)"
+printf 'late=%s\n'   "$(grep -c '^late$' ctl/events 2>/dev/null)"
+printf 'miss=%s\n'   "$(grep -c '^miss$' ctl/events 2>/dev/null)"
+DRIVER
+  d="$SG_WORK/remind_1255.out"
+  t_eq "20:55（第一档锚点 21:10 之前）：第一档不发" "$(sg_val "$d" nosign)" "0"
+  t_eq "20:55：第二档不发" "$(sg_val "$d" late)" "0"
+  t_eq "20:55：第三档不发" "$(sg_val "$d" miss)" "0"
+
+  # 21:20：落在 [21:10, 21:40) → 只有第一档
+  sg_at 1280
+  printf 'page:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run remind_1280 <<'DRIVER'
+run_once >/dev/null 2>&1
+printf 'rc=%s\n'     "$?"
+printf 'nosign=%s\n' "$(grep -c '^nosign$' ctl/events 2>/dev/null)"
+printf 'late=%s\n'   "$(grep -c '^late$' ctl/events 2>/dev/null)"
+printf 'miss=%s\n'   "$(grep -c '^miss$' ctl/events 2>/dev/null)"
+DRIVER
+  d="$SG_WORK/remind_1280.out"
+  t_eq "21:20（主窗口截止前 30 分钟内）：第一档发一次" "$(sg_val "$d" nosign)" "1"
+  t_eq "21:20：第二档还没到" "$(sg_val "$d" late)" "0"
+  t_eq "21:20：第三档还没到" "$(sg_val "$d" miss)" "0"
+
+  # 21:45：落在 [21:40, 22:10) → 只有第二档
+  sg_at 1305
+  printf 'page:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run remind_1305 <<'DRIVER'
+run_once >/dev/null 2>&1
+printf 'nosign=%s\n' "$(grep -c '^nosign$' ctl/events 2>/dev/null)"
+printf 'late=%s\n'   "$(grep -c '^late$' ctl/events 2>/dev/null)"
+printf 'miss=%s\n'   "$(grep -c '^miss$' ctl/events 2>/dev/null)"
+DRIVER
+  d="$SG_WORK/remind_1305.out"
+  t_eq "21:45（过了主窗口截止）：第一档已过，不再发" "$(sg_val "$d" nosign)" "0"
+  t_eq "21:45：第二档发一次" "$(sg_val "$d" late)" "1"
+  t_eq "21:45：第三档还没到" "$(sg_val "$d" miss)" "0"
+
+  # 22:15：过了补签截止 22:10 → 只有第三档
+  sg_at 1335
+  printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run remind_1335 <<'DRIVER'
+run_once >/dev/null 2>&1
+printf 'nosign=%s\n' "$(grep -c '^nosign$' ctl/events 2>/dev/null)"
+printf 'late=%s\n'   "$(grep -c '^late$' ctl/events 2>/dev/null)"
+printf 'miss=%s\n'   "$(grep -c '^miss$' ctl/events 2>/dev/null)"
+DRIVER
+  d="$SG_WORK/remind_1335.out"
+  t_eq "22:15（过了补签截止）：第一档不再发" "$(sg_val "$d" nosign)" "0"
+  t_eq "22:15：第二档已过，不再发" "$(sg_val "$d" late)" "0"
+  t_eq "22:15：第三档发一次" "$(sg_val "$d" miss)" "1"
+
+  # 当日已解决：同一批时刻一条提醒都不发；把记录去掉后同一时刻照常发（对照）
+  sg_setup remind-resolved
+  sg_task_span 1260 1300 1330 > "$SG_WORK/ctl/body.page"
+  printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/body.sign"
+  printf 'sign_date=%s\nsign_time=21:05\nsign_kind=normal\n' "$SG_DATE" > "$SG_WORK/mod/fafu_checkin.status"
+  sg_at 1335
+  printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run remind_resolved <<'DRIVER'
+run_once >/dev/null 2>&1
+printf 'events=%s\n' "$(tr '\n' ',' < ctl/events 2>/dev/null)"
+DRIVER
+  t_eq "当日已解决：过了补签截止也一条提醒都不发" \
+    "$(sg_val "$SG_WORK/remind_resolved.out" events)" ""
+
+  : > "$SG_WORK/mod/fafu_checkin.status"
+  sg_run remind_resolved_ctl <<'DRIVER'
+run_once >/dev/null 2>&1
+printf 'miss=%s\n' "$(grep -c '^miss$' ctl/events 2>/dev/null)"
+DRIVER
+  t_eq "对照：同一时刻去掉当日记录后，第三档照常发" \
+    "$(sg_val "$SG_WORK/remind_resolved_ctl.out" miss)" "1"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
-t_case "signin · 时钟与夹具自证" sg_case_clock
-t_case "signin · 三档返回码（成功 / 可重试 / 任务异常）" sg_case_codes
+t_case "signin · 时钟与夹具自证" sg_case_clockt_case "signin · 三档返回码（成功 / 可重试 / 任务异常）" sg_case_codes
 t_case "signin · 分支：已签到（记录 + 通知）" sg_case_branch_seen
 t_case "signin · 分支：已请假（记录 + 通知）" sg_case_branch_leave
 t_case "signin · 分支：窗口内提交（normal）" sg_case_branch_window
@@ -735,3 +882,5 @@ t_case "signin · 提交失败当日仅首次通知" sg_case_submit_failed
 t_case "signin · 窗口边界（21:29 / 21:30 / 22:30 / 22:59 / 23:00）" sg_case_boundaries
 t_case "signin · token 失效后刷新重试" sg_case_token_refresh
 t_case "signin · 判定链与主循环分支（静态）" sg_case_boundary
+t_case "signin · 截止提醒的判定（纯函数）" sg_case_remind_due
+t_case "signin · 三条截止提醒按任务数据各发一次" sg_case_remind_events

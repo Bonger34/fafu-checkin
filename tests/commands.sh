@@ -578,7 +578,7 @@ ws_run() { # $1=名字（输出文件的后缀）
 
 # 输出里出现的键名（去重排序）：字段齐全与键名逐字一致都靠它
 ws_keys() { grep -o '^[a-z_]*' "$1" | sort -u | tr '\n' ' '; }
-WS_KEYS="ka_fail ka_last ka_last_result ka_ok log service sign_state sign_time token_state version "
+WS_KEYS="ka_fail ka_last ka_last_result ka_ok keepalive log notify notify_cooldown notify_lead poll_end poll_start service sign_state sign_time token_state version "
 
 # 输出里「既不是 键=值、也不是空行」的行数。空行要排除：分发路径会给任何以换行收尾的
 # 输出补一个空行（status 子命令同样如此），那不是命令自己吐出来的东西。
@@ -606,6 +606,16 @@ cd_case_webstate_fields() {
   t_eq "最近一次保活结果" "$(cd_val "$f" ka_last_result)" "fail"
   t_eq "登录状态有效：只报有效性" "$(cd_val "$f" token_state)" "ok"
   t_eq "版本号来自模块元数据" "$(cd_val "$f" version)" "v1.2.1"
+  # 配置项生效值：页面显示的六项就取自这里，故「没写配置文件」时必须给出默认值，
+  # 而不是空值——页面拿不到值时只能自带一份默认值表，那必然会与配置层漂移。
+  t_eq "配置生效值：保活开关取默认" "$(cd_val "$f" keepalive)" "1"
+  t_eq "配置生效值：轮询范围起取默认" "$(cd_val "$f" poll_start)" "20:00"
+  t_eq "配置生效值：轮询范围止取默认" "$(cd_val "$f" poll_end)" "23:59"
+  # 注意 NOTIFY 这一项不是默认值 1：夹具为了让装配阶段的降权探测直接返回，
+  # 在配置文件里写了 NOTIFY=0 —— 于是这条断言同时也是「文件真的被读进来了」的证据。
+  t_eq "配置生效值：通知开关读的是夹具写下的 0（不是默认值）" "$(cd_val "$f" notify)" "0"
+  t_eq "配置生效值：预警提前量取默认" "$(cd_val "$f" notify_lead)" "5"
+  t_eq "配置生效值：通知冷却取默认" "$(cd_val "$f" notify_cooldown)" "300"
   t_eq "字段齐全且键名逐字一致" "$(ws_keys "$f")" "$WS_KEYS"
   t_eq "每行都是 键=值（没有别的输出混进来）" "$(ws_stray "$f")" "0"
   t_eq "多出来的只有分发路径补的那个空行" "$(grep -c '^$' "$f")" "1"
@@ -627,6 +637,34 @@ cd_case_webstate_fields() {
   t_eq "只读：签到记录文件逐字未变" "$(cat "$WS_DIR/fafu_checkin.status" | tr '\n' '|')" \
     "sign_date=$WS_DATE|sign_time=21:30|sign_kind=normal|"
   t_eq "只读：不留临时文件" "$(ls "$WS_DIR" | grep -c '\.tmp$')" "0"
+}
+
+# 配置项生效值必须来自真实的那份配置文件：页面显示的六项就是从这里读的，
+# 若它给的是自带默认值，页面上「当前生效值」四个字就不成立了。
+cd_case_webstate_config() {
+  local f
+  ws_setup
+  printf 'KEEPALIVE=0\nPOLL_START=19:30\nPOLL_END=22:15\nNOTIFY=1\nNOTIFY_LEAD=12\nNOTIFY_COOLDOWN=600\n' \
+    > "$WS_DIR/fafu-checkin.conf"
+  ws_log "[$WS_DATE 21:20:00] 占位一行"
+  ws_run cfg
+  f="$CD_WORK/ws_cfg.out"
+
+  t_eq "配置生效值：保活开关读配置文件" "$(cd_val "$f" keepalive)" "0"
+  t_eq "配置生效值：轮询范围起读配置文件" "$(cd_val "$f" poll_start)" "19:30"
+  t_eq "配置生效值：轮询范围止读配置文件" "$(cd_val "$f" poll_end)" "22:15"
+  t_eq "配置生效值：通知开关读配置文件" "$(cd_val "$f" notify)" "1"
+  t_eq "配置生效值：预警提前量读配置文件" "$(cd_val "$f" notify_lead)" "12"
+  t_eq "配置生效值：通知冷却读配置文件" "$(cd_val "$f" notify_cooldown)" "600"
+  t_eq "配置生效值：键集合仍然逐字一致" "$(ws_keys "$f")" "$WS_KEYS"
+
+  # 手改坏的文件不该改变页面看到的东西：非法值按配置层的口径退回默认值
+  printf 'POLL_START=25:00\n' > "$WS_DIR/fafu-checkin.conf"
+  ws_run cfg_bad
+  f="$CD_WORK/ws_cfg_bad.out"
+  t_eq "坏配置文件：保活开关退回默认" "$(cd_val "$f" keepalive)" "1"
+  t_eq "坏配置文件：非法时刻退回默认" "$(cd_val "$f" poll_start)" "20:00"
+  t_eq "坏配置文件：返回码仍为 0" "$(cat "$CD_WORK/ws_cfg_bad.rc")" "0"
 }
 
 cd_case_webstate_sign() {
@@ -905,6 +943,7 @@ t_case "commands · 记录桩看得见处理函数收到的参数" cd_case_stub_
 t_case "commands · webstate 输出页面可解析的状态" cd_case_webstate_fields
 t_case "commands · webstate 的签到状态从记录里读" cd_case_webstate_sign
 t_case "commands · webstate 的登录状态只报有效性" cd_case_webstate_token
+t_case "commands · webstate 给出配置项的生效值" cd_case_webstate_config
 t_case "commands · setconfig 写入合法值并回显生效值" cd_case_setconfig_ok
 t_case "commands · setconfig 部分给也能用" cd_case_setconfig_partial
 t_case "commands · setconfig 拒非法值且旧值不变" cd_case_setconfig_reject

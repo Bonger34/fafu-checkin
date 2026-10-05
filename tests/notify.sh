@@ -14,7 +14,7 @@
 # ============================================================
 
 # 事件名 → 期待的输出（tag 后缀）。「tag 格式与按日滚动不变」就钉在这张表上。
-NT_TAGS="sign:sign supp:supp seen:sign leave:leave failsign:failsign failtask:failtask nosign:t2200 late:t2230 miss:miss warn:warn test:test"
+NT_TAGS="sign:sign supp:supp seen:sign leave:leave failsign:failsign failtask:failtask nosign:t2200 late:t2230 miss:miss nopub:nopub warn:warn test:test"
 
 # 工作目录与环境：每个驱动一份干净的，目录名带上驱动名，跑完留在 tests/.work/notify-<驱动>/。
 # 必须按驱动分开：同一条用例里的多个驱动共用一个目录时，后一个会覆盖前一个留下的记录，
@@ -223,7 +223,7 @@ for m in $(grep -o '_NT_TPL_[A-Za-z0-9_][A-Za-z0-9_]*' "$T_ROOT/lib/notify.sh" |
 done
 DRIVER
   d="$NT_WORK/msg.txt"
-  t_lines "九个业务事件的文案都取到了" "$d" 9
+  t_lines "十个业务事件的文案都取到了" "$d" 10
   # 判定用正则而不是写死制表符：文案表的「事件 ⇥ 标题 ⇥ 正文」逐字比对在这里，
   # 但不该因为排版（空格量）变化制造假红灯
   t_has_re "A1 标题" "$d" '^sign[	 ]+✅ 查寝签到成功'
@@ -232,11 +232,11 @@ DRIVER
   t_has_re "C 标题" "$d" '^leave[	 ]+🏖 今日查寝已请假'
   t_has_re "D 标题" "$d" '^failsign[	 ]+⚠️ 查寝签到失败'
   t_has_re "E 标题" "$d" '^failtask[	 ]+⚠️ 拿不到查寝任务'
-  t_has_re "F1 标题（22:00 还剩 30 分钟）" "$d" '^nosign[	 ]+⏰ 尚未签到，主窗口还剩 30 分钟'
-  t_has_re "F2 标题（22:30 进入补签）" "$d" '^late[	 ]+⏰ 主窗口已过，进入补签时段'
-  t_has_re "F3 标题（23:00 未能签到）" "$d" '^miss[	 ]+❌ 今晚未能自动签到'
+  t_has_re "F1 标题（主窗口还剩 30 分钟）" "$d" '^nosign[	 ]+⏰ 尚未签到，主窗口还剩 30 分钟'
+  t_has_re "F2 标题（主窗口已过）" "$d" '^late[	 ]+⏰ 主窗口已过，进入补签时段'
+  t_has_re "F3 标题（今晚未能签到）" "$d" '^miss[	 ]+❌ 今晚未能自动签到'
+  t_has_re "F4 标题（今晚任务还没发布）" "$d" '^nopub[	 ]+📭 今晚还没查到查寝任务'
   t_has "A1 正文含日期" "$d" "20261001 已签到（晚查寝签到）"
-  t_has "F3 正文逐字不变" "$d" "20261001 23:00 重试结束仍未签到，请手动处理"
   # 文案不得出现任何分数/扣分字样（用户明确要求：不替用户判断补签的得失）。
   # 「30 分钟」里的「分」是时间单位，故只匹配真正的计分表述。
   if grep -qE '得分|扣分|计分|加分|满分|少得|[0-9] *分[^钟]' "$d" 2>/dev/null; then
@@ -244,17 +244,32 @@ DRIVER
   else
     _t_pass "文案不含任何分数/扣分表述"
   fi
+  # 四条提醒（三条截止 + 任务未发布）的标题里不含任何钟点，正文也全交给调用方：
+  # 钟点由 signin 层按任务数据拼好，模板覆写 _NT_TEXT 就等于把数据驱动的正文丢掉。
+  nt_setup remindtpl
+  nt_run remindtpl <<'DRIVER'
+nt_send() { printf '%s\n' "$1" >> "$T_WORK/cmd.log"; }
+for ev in nosign late miss nopub; do
+  _NT_TEXT="调用方拼好的正文"
+  notify_event "$ev"
+  printf '%s=%s\n' "$ev" "$_NT_TEXT"
+done
+DRIVER
+  d="$NT_WORK/remindtpl.out"
+  for ev in nosign late miss nopub; do
+    t_eq "$ev 的模板不覆写调用方给的正文" "$(nt_val "$d" "$ev")" "调用方拼好的正文"
+  done
 
   # tag 表：十个业务事件都拼得出 tag，且命令串逐字保留那三段（缺一个就是该类提醒静默失效）
   nt_setup tag
   nt_run tag <<'DRIVER'
 nt_send() { printf '%s\n' "$1" >> "$T_WORK/tag.log"; }
-for ev in sign supp seen leave failsign failtask nosign late miss; do
+for ev in sign supp seen leave failsign failtask nosign late miss nopub; do
   notify_event "$ev"
 done
 DRIVER
   d="$NT_WORK/tag.log"
-  t_lines "九个业务事件都拼出了 tag" "$d" 9
+  t_lines "十个业务事件都拼出了 tag" "$d" 10
   for tag in $NT_TAGS; do
     case "${tag%%:*}" in
       warn|test) : ;;                 # 这两个没有文案模板，由各自的调用方驱动（见下）
@@ -575,9 +590,152 @@ nt_case_boundary() {
     _t_pass "文案正文不含引号与命令替换"
   fi
 
+  # 提醒文案里不再有写死的钟点：三条截止提醒的钟点一律从任务数据格式化而来，
+  # 文案表里再出现具体钟点就等于又把它写死了一遍。
+  t_hasnt "文案表里不再写死第一档钟点" "$T_ROOT/lib/notify.sh" '22:00'
+  t_hasnt "文案表里不再写死主窗口末" "$T_ROOT/lib/notify.sh" '22:30'
+  t_hasnt "文案表里不再写死补签时段末" "$T_ROOT/lib/notify.sh" '22:59'
+  t_hasnt "文案表里不再写死补签截止" "$T_ROOT/lib/notify.sh" '23:00'
+  t_hasnt "入口不再写死那三个钟点" "$T_ROOT/fafu_checkin.sh" '22:00'
+  t_hasnt "入口不再写死主窗口末" "$T_ROOT/fafu_checkin.sh" '22:30'
+  t_hasnt "入口不再写死补签截止" "$T_ROOT/fafu_checkin.sh" '23:00'
+
   # 「降权探测必须在子命令分发之前」这条不变量的两条判据都在 tests/commands.sh：
   # 命令表那一趟探测（结构）与按时间顺序的记录（行为）。这里只看通知层自己的调用点还在。
   t_has "notify 层仍提供降权探测入口" "$T_ROOT/lib/notify.sh" 'probe_su() {'
+}
+
+# ============================================================
+# 八、三条截止提醒的正文：钟点从任务数据来
+#
+# 正文由 signin 层拼好后经 _NT_TEXT 交给通知层，故这里直接调 signin 层的发送入口，
+# 再用 nt_send 缝看那一刻的标题与正文。
+# 任务时间取**非默认**值（主窗口截止 21:40、补签截止 22:10），三档锚点因此是
+# 21:10 / 21:40 / 22:10——与任何写死的钟点都不重合，实现里留着旧写法就会分叉。
+# ============================================================
+
+nt_case_remind_text() {
+  local d q bt
+  nt_setup remind-text
+  nt_run remind-text <<'DRIVER'
+nt_send() { printf '%s\t%s\n' "$_NT_TITLE" "$_NT_TEXT" >> "$T_WORK/sent.log"; }
+ms() { printf '%s' $(( $("$BB" date -d "2026-10-01 $1:00" +%s) * 1000 )); }
+ET=$(ms 21:40)
+SUP=$(ms 22:10)
+at_pair() { # $1=补签截止 $2=主窗口截止 $3=当前毫秒 → 这一格发出去的「标题 ⇥ 正文」
+  _NT_TITLE=""; _NT_TEXT=""
+  signin_remind_deadlines "$1" "$2" "$3"
+  [ -n "$_NT_TITLE$_NT_TEXT" ] || { printf 'none'; return 0; }
+  printf '%s\t%s\n' "$_NT_TITLE" "$_NT_TEXT"
+}
+at() { at_pair "$SUP" "$ET" "$1"; }
+printf 'early=%s\n'  "$(at $(ms 21:00))"
+printf 'nosign=%s\n' "$(at $(ms 21:20))"
+printf 'late=%s\n'   "$(at $(ms 21:45))"
+printf 'miss=%s\n'   "$(at $(ms 22:15))"
+# 任务没给 supplementEndTime（解析时回退成主窗口截止）：补签时段的长度为 0，
+# 第二档不该喊「进入补签」，第三档在原地接管。
+# 第三档先前已经发过（当日标记已落），故先清掉标记，标题才是这一格的答案。
+printf 'late_w0=%s\n' "$(signin_remind_due "$ET" $(( ET - ET )) "$(ms 21:45)" && echo due || echo no)"
+rm -f mod/.fafu_notify_miss
+printf 'nosupp=%s\n' "$(at_pair "$ET" "$ET" "$(ms 21:45)")"
+DRIVER
+  d="$NT_WORK/remind-text.out"
+  t_eq "21:00（三档锚点都没到）：一条都不发" "$(nt_val "$d" early)" "none"
+  t_eq "21:20：只有第一档发出去" "$(nt_val "$d" nosign | cut -f1)" "⏰ 尚未签到，主窗口还剩 30 分钟"
+  t_eq "21:45：只有第二档发出去" "$(nt_val "$d" late | cut -f1)" "⏰ 主窗口已过，进入补签时段"
+  t_eq "22:15：只有第三档发出去" "$(nt_val "$d" miss | cut -f1)" "❌ 今晚未能自动签到"
+  t_eq "没有补签时段：第二档的窗口长度为 0，到点也不喊" "$(nt_val "$d" late_w0)" "no"
+  t_eq "没有补签时段：第三档在原地接管" "$(nt_val "$d" nosupp | cut -f1)" "❌ 今晚未能自动签到"
+  t_has "第一档正文的钟点来自任务数据（连几点 21:10、主窗口截止 21:40）" "$d" \
+    "20261001 21:10 还没签到，主窗口 21:40 关闭；现在可在 App 内手动签到"
+  t_has "第二档正文的钟点来自任务数据（主窗口截止 21:40）" "$d" \
+    "20261001 21:40 仍未签到，模块会继续自动重试，也可在 App 内手动补签"
+  t_has "第三档正文的钟点来自任务数据（补签截止 22:10）" "$d" \
+    "20261001 22:10 重试结束仍未签到，请手动处理"
+  # 三段正文与三个标题里都不该再有写死的钟点（含旧版正文里那个补签时段末）
+  if grep -qE '22:00|22:30|22:59|23:00' "$d" 2>/dev/null; then
+    _t_fail "提醒的标题与正文里不再出现写死的钟点"
+  else
+    _t_pass "提醒的标题与正文里不再出现写死的钟点"
+  fi
+  # 正文直接进 su 派生的子 shell 展开：引号或命令替换会让引号失配，
+  # 通知带着空正文发出去、rc 却仍是 0。用 -F 逐个字面量匹配，避开转义。
+  q="'"; bt='`'
+  if grep -qF -e "$q" -e "$bt" -e '$(' "$d" 2>/dev/null; then
+    _t_fail "提醒正文里没有引号与命令替换（有的话会带着空正文发出去）"
+  else
+    _t_pass "提醒正文里没有引号与命令替换（有的话会带着空正文发出去）"
+  fi
+}
+
+# ============================================================
+# 九、「任务未发布」兜底：到 min(轮询范围止, 23:00) 且当日未取得任务时发一条
+#
+# 它挂本地时钟、不看任务数据——数据驱动的三条在「任务根本没发布」时永远不会响。
+# 去重依据是 state 层当日的「已取得任务」标记：真的取到任务时落它，兜底发出去时
+# 也落它（发送成功才落），于是两件事共用一份、当日至多打扰一次。
+# ============================================================
+
+nt_case_notask() {
+  local d
+  nt_setup notask
+  nt_run notask_default <<'DRIVER'
+nt_send() { printf '%s\n' "$_NT_TITLE|$_NT_TEXT" >> "$T_WORK/sent.log"; }
+: > "$T_WORK/sent.log"   # 先建好：否则「一次都没发」那一格读到的是空串而不是 0
+printf 'target=%s\n' "$(signin_notask_target)"
+for t in 22:59 23:00 23:30; do
+  printf 'due_%s=%s\n' "$t" "$(signin_notask_due "$t" && echo yes || echo no)"
+done
+signin_remind_notask 22:59
+printf 'calls_2259=%s\n' "$(grep -c . "$T_WORK/sent.log" 2>/dev/null)"
+signin_remind_notask 23:00
+printf 'calls_2300=%s\n' "$(grep -c . "$T_WORK/sent.log" 2>/dev/null)"
+signin_remind_notask 23:30
+printf 'calls_2330=%s\n' "$(grep -c . "$T_WORK/sent.log" 2>/dev/null)"
+printf 'body=%s\n' "$(cut -d'|' -f2 "$T_WORK/sent.log")"
+DRIVER
+  d="$NT_WORK/notask_default.out"
+  t_eq "默认轮询范围止（23:59）→ 目标时刻收敛到 23:00" "$(nt_val "$d" target)" "23:00"
+  t_eq "22:59：还没到目标时刻" "$(nt_val "$d" due_22:59)" "no"
+  t_eq "23:00：整点算到点" "$(nt_val "$d" due_23:00)" "yes"
+  t_eq "22:59 那一刻不发" "$(nt_val "$d" calls_2259)" "0"
+  t_eq "23:00 发一条" "$(nt_val "$d" calls_2300)" "1"
+  t_eq "23:30 不再重复发（当日一次）" "$(nt_val "$d" calls_2330)" "1"
+  t_has "正文说的是「还没查到任务」并给出当日 tag" "$d" \
+    "20261001 今晚还没查到查寝任务"
+
+  # 轮询范围止早于 23:00 → 目标时刻跟着提前
+  nt_setup notask-early
+  printf 'POLL_END=22:15\n' > "$NT_WORK/mod/fafu-checkin.conf"
+  nt_run notask_early <<'DRIVER'
+cfg_load
+nt_send() { printf '%s\n' "$_NT_TITLE|$_NT_TEXT" >> "$T_WORK/sent.log"; }
+: > "$T_WORK/sent.log"
+printf 'target=%s\n' "$(signin_notask_target)"
+signin_remind_notask 22:14
+printf 'calls_2214=%s\n' "$(grep -c . "$T_WORK/sent.log" 2>/dev/null)"
+signin_remind_notask 22:15
+printf 'calls_2215=%s\n' "$(grep -c . "$T_WORK/sent.log" 2>/dev/null)"
+DRIVER
+  d="$NT_WORK/notask_early.out"
+  t_eq "轮询范围止 22:15 → 目标时刻跟着提前" "$(nt_val "$d" target)" "22:15"
+  t_eq "22:14 那一刻不发" "$(nt_val "$d" calls_2214)" "0"
+  t_eq "22:15 那一刻发一条" "$(nt_val "$d" calls_2215)" "1"
+
+  # 当日已取得任务 → 到点也不发
+  nt_setup notask-seen
+  nt_run notask_seen <<'DRIVER'
+nt_send() { printf '%s\n' "$_NT_TITLE" >> "$T_WORK/sent.log"; }
+: > "$T_WORK/sent.log"
+task_seen_mark
+printf 'marked=%s\n' "$(task_seen_marked && echo yes || echo no)"
+signin_remind_notask 23:30
+printf 'calls=%s\n' "$(grep -c . "$T_WORK/sent.log" 2>/dev/null)"
+DRIVER
+  d="$NT_WORK/notask_seen.out"
+  t_eq "取得任务后当日标记落地" "$(nt_val "$d" marked)" "yes"
+  t_eq "当日已取得任务：到点也不发兜底" "$(nt_val "$d" calls)" "0"
 }
 
 # ============================================================
@@ -595,16 +753,17 @@ nt_case_callsites() {
   t_write_program "$src" || { _t_fail "无法拼出全程序文本"; return 0; }
 
   # 业务事件与预警的调用点：每个都必须还在。
-  # 未签提醒三条（nosign / late / miss）的事件名、文案与去重机制仍在本层（上面刚验过），
-  # 但它们的**调用点**要按任务数据推算时刻，随数据驱动版一起补回：
-  # 在补齐之前，入口里不该再出现按写死钟点发的这三条（见 tests/poll.sh 的静态判据）。
+  # 三条未签提醒的调用点按任务数据推算时刻（signin 层的 signin_remind_deadlines），
+  # 兜底那条按本地时钟（signin_remind_notask）：调用点没了，上面所有函数级断言都还在跑，
+  # 但设备上那件事根本不会发生。
   miss=""
   for c in 'notify_event sign'        'notify_event supp'     'notify_event seen' \
            'notify_event leave'       'notify_once failsign'  'notify_once failtask' \
-           'notify_warn'              'tag_of test'; do
+           'notify_once nosign'       'notify_once late'      'notify_once miss' \
+           'notify_once nopub'        'notify_warn'           'tag_of test'; do
     grep -qF "$c" "$src" 2>/dev/null || miss="$miss [$c]"
   done
-  t_eq "八个通知调用点齐全" "[$miss]" "[]"
+  t_eq "十二个通知调用点齐全" "[$miss]" "[]"
 
   # 业务层不再自己发通知：signin / keepalive 里不出现底层发送与文案表
   t_hasnt "signin 层不直接调文案表" "$T_ROOT/lib/signin.sh" '_msg_'
@@ -625,4 +784,6 @@ t_case "notify · 预警返回值与调用方的等待" nt_case_warn_return
 t_case "notify · 预警排在打开打卡页之前" nt_case_warn_order
 t_case "notify · 静默跳过（降权不可用 / 通知关闭）" nt_case_silent
 t_case "notify · 能力收口与相对顺序（静态）" nt_case_boundary
+t_case "notify · 截止提醒的正文与钟点" nt_case_remind_text
+t_case "notify · 任务未发布的兜底提醒" nt_case_notask
 t_case "notify · 调用点齐全（静态）" nt_case_callsites

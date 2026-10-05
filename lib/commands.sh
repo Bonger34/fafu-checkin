@@ -251,6 +251,11 @@ cmd_webstate() {
     "$(ka_ok_count)" "$(ka_fail_count)" "$(ka_last_time)" "$(ka_last_result)"
   printf 'token_state=%s\n' "$(_webstate_token_state)"
   printf 'version=%s\n' "$VER"
+  # 配置项的**生效值**：页面要显示的就是这个（不是「刚填进去的值」）。
+  # 与 cfg_* 读数同源，故页面不必自带一份键登记表——两份默认值必然漂移。
+  printf 'keepalive=%s\npoll_start=%s\npoll_end=%s\nnotify=%s\nnotify_lead=%s\nnotify_cooldown=%s\n' \
+    "$(cfg_keepalive)" "$(cfg_poll_start)" "$(cfg_poll_end)" "$(cfg_notify)" \
+    "$(cfg_notify_lead)" "$(cfg_notify_cooldown)"
   _webstate_log
   return 0
 }

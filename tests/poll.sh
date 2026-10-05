@@ -68,6 +68,16 @@ sleep() {
 INJECT
 }
 
+# 兜底提醒的调用点观察面：只记「哪一刻被调到了」。判定（目标时刻、当日一次、
+# 当日已取得任务就不发）在 tests/notify.sh 里用 nt_send 缝断言，这里不重复。
+poll_inject_notask() {
+  : > "$POLL_WORK/ctl/notask"
+  cat >> "$POLL_WORK/mod/lib/commands.sh" <<'INJECT'
+
+signin_remind_notask() { printf '%s\n' "$1" >> ./ctl/notask; }
+INJECT
+}
+
 # 生效的配置文件（键=值；未提到的键由配置层取默认值）
 poll_config() { printf '%s\n' "$1" > "$POLL_WORK/mod/fafu-checkin.conf"; }
 
@@ -272,6 +282,52 @@ poll_case_static() {
   t_hasnt "入口不再写死补签时段末（22:59 = 1379）" "$src" '1379'
   t_hasnt "入口不再写死提醒第一档（22:00 = 1320）" "$src" '1320'
   t_hasnt "入口不再写死提醒第三档（23:00 = 1380）" "$src" '1380'
+
+  # 「任务未发布」兜底提醒：它挂本地时钟，但不新开一条不看时间的旁路，
+  # 调用点就落在轮询范围内那一支里（行为面由下一节拨钟钉住）。
+  t_has "入口在轮询范围内调兜底提醒" "$src" 'signin_remind_notask'
+  t_before "兜底提醒排在查看任务之后（同一支，不是并列旁路）" "$src" \
+    'run_once; rc=$?' 'signin_remind_notask'
+}
+
+# ============================================================
+# 七、「任务未发布」兜底提醒的调用点：只在轮询范围内被调到
+#
+# 判定本身（目标时刻、当日一次、已取得任务就不发）由 tests/notify.sh 用 nt_send 缝断言；
+# 这里只看主循环有没有在对的时刻把它调到——调用点没了，那条兜底在设备上根本不会发生。
+# 范围端点前后各拨一分钟：范围外那一刻不调，正是「它没有脱离轮询分支」的证据。
+# ============================================================
+
+poll_case_notask_site() {
+  poll_setup notask-site
+  poll_config 'KEEPALIVE=0
+POLL_START=19:30
+POLL_END=22:15'
+  poll_rc '1'
+  poll_plan '19:29
+19:30
+22:15
+22:16'
+  poll_inject_notask
+  poll_start
+  t_eq "兜底提醒只在轮询范围内被调到（范围起点与止点各一次）" \
+    "$(tr '\n' '|' < "$POLL_WORK/ctl/notask")" "19:30|22:15|"
+  t_eq "范围外那两刻一次都没调到" \
+    "$(grep -c '^19:29$\|^22:16$' "$POLL_WORK/ctl/notask")" "0"
+
+  # 当日已解决：整支都不进，兜底提醒自然也不该被调到
+  poll_setup notask-resolved
+  poll_config 'KEEPALIVE=0
+POLL_START=19:30
+POLL_END=22:15'
+  poll_rc '1'
+  poll_status "$POLL_DATE" normal
+  poll_plan '19:30
+19:31'
+  poll_inject_notask
+  poll_start
+  t_eq "当日已解决：兜底提醒一次都不调" \
+    "$(grep -c . "$POLL_WORK/ctl/notask" 2>/dev/null)" "0"
 }
 
 # ============================================================
@@ -318,3 +374,4 @@ t_case "poll · 提交失败继续重试到范围止" poll_case_retry
 t_case "poll · 任务异常四分钟后重试" poll_case_task_error
 t_case "poll · 范围来自配置、钟点不再写死（静态）" poll_case_static
 t_case "poll · 当日已解决只停查看任务、不停保活" poll_case_keepalive_on_resolved
+t_case "poll · 兜底提醒的调用点只在轮询范围内" poll_case_notask_site
