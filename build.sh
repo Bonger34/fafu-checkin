@@ -25,6 +25,12 @@ done
 . "$ROOT/tools/lib.sh"
 LIBFILES=$(read_layers "$ROOT")
 [ -n "$LIBFILES" ] || { echo "打包失败：读不出层清单（$ROOT/fafu_checkin.sh 里的 FAFU_LAYERS）" >&2; exit 1; }
+# 清单里点名的层文件必须都在：缺一个就点名报出来。
+# 不能靠后面的 cp 失败来暴露——那时报的是 cp 自己的话，看不出缺的是哪一层，
+# 而「半装」正是最难排查的失败模式。
+for f in $LIBFILES; do
+  [ -f "$f" ] || { echo "打包失败：缺少 $f（入口的 FAFU_LAYERS 点名了它）" >&2; exit 1; }
+done
 
 VER=$(sed -n 's/^version=//p' module.prop | head -n1)
 FILES="module.prop customize.sh service.sh action.sh uninstall.sh fafu_checkin.sh"
@@ -34,8 +40,11 @@ PAGE="webroot/index.html"
 # ---- 页面资源的结构断言（源树那两条放在打包之前，免得留下一个已经坏掉的 zip） ----
 # 断言一：入口文件在源树里——清单写的路径必须真的存在
 [ -f "$PAGE" ] || { echo "打包失败：源树里没有页面入口文件 $PAGE" >&2; exit 1; }
-# 断言三：页面文本不含任何外部 URL——离线可用是硬要求，判据只有 tools/lib.sh 一份
-PAGE_URLS=$(ext_url_hits "$PAGE")
+# 断言三：页面文本不含任何外部 URL——离线可用是硬要求，判据只有 tools/lib.sh 一份。
+# 尾部的 `|| true` 不能省：页面干净时 grep 以「没匹配到」的 1 退出，而本脚本开着 set -e，
+# 那会让整个构建当场静默退出（零输出的失败最难查）。判据本身的契约是「恒以 0 退出」，
+# 这里再兜一层，等于不把成败押在判据的返回值上。
+PAGE_URLS=$(ext_url_hits "$PAGE" || true)
 if [ -n "$PAGE_URLS" ]; then
   echo "打包失败：页面引用了外部资源，离线可用是硬要求：" >&2
   printf '%s\n' "$PAGE_URLS" >&2

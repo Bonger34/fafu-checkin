@@ -110,6 +110,8 @@ MODDIR='./mod'
 # token 目录：LD 只在 api 层加载时取一次，这里指向驱动的工作目录（一定存在），
 # 于是「取不到 token」不会把判定链挡在门外；「没有应用数据」那一档由用例自己改 LD
 LD_DIR='.'
+# 等 App 数据就绪时用的 sleep 替身（等待本身要断言的用例自己换掉它：真等 30 秒没有意义）
+SLEEP_OVERRIDE="${SLEEP_OVERRIDE:-}"
 PL=20261001
 NOTIFY=1
 SU_MODE=""
@@ -117,7 +119,7 @@ SG_DATE='$SG_DATE'
 SG_EPOCH=$SG_EPOCH
 SG_NOW_S=$SG_NOW_S
 export BB_OVERRIDE MOCK_DATE_CTL MOCK_WGET_DIR MOCK_DEVICE_DIR MOCK_RANDOM_CTL
-export MODDIR LD_DIR PL NOTIFY SU_MODE
+export MODDIR LD_DIR PL NOTIFY SU_MODE SLEEP_OVERRIDE
 export SG_EPOCH SG_NOW_S
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
 
@@ -274,14 +276,71 @@ run_once; printf 'rc=%s\n' "$?"
 DRIVER
   t_eq "返回码 2：任务异常（取不到任务）" "$(sg_val "$SG_WORK/code2.out" rc)" "2"
 
-  # ④ 没有应用数据 → 2（同样是任务异常）；这一档不发通知，故单开一份工作目录
+  # ④ 没有应用数据 → 2（同样是任务异常）；这一档不发通知，故单开一份工作目录。
+  # 装上 sleep 替身：默认实现会先等最多 30 秒再判（见 lib/signin.sh 的等待），
+  # 真等满没有意义，替身把这一段跳掉而判定链一字不改
   sg_setup code2b
   sg_run code2b <<'DRIVER'
+SLEEP_OVERRIDE=:
 LD=./mod/definitely-not-there
 run_once; printf 'rc=%s\n' "$?"
 DRIVER
   t_eq "返回码 2：没有应用数据" "$(sg_val "$SG_WORK/code2b.out" rc)" "2"
   t_eq "无应用数据：一条通知都不发" "$(grep -c . "$SG_WORK/ctl/events" 2>/dev/null)" "0"
+}
+
+# 等 App 数据就绪：重启后的头几秒目录还不可读，这时应当短等一会儿再判，
+# 而不是直接判成任务异常、白等主循环那 4 分钟。
+# 观察面：等待真的发生了（替身被调用）、等到就接着走（rc=0），等不到仍有界地退回 2。
+# 两边都用 sleep 替身：等待的长度由常量决定，它在断言里不是重点，次数与结果才是。
+sg_case_wait_appdata() {
+  # ① 等到：第 3 次探测时目录出现 → 本次照常取到任务（rc=0），且确实等过
+  sg_setup wait_ok
+  sg_at 1290
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"
+  printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run wait_ok <<'DRIVER'
+mkdir -p ./probe
+printf '0\n' > ./probe/n
+# sleep 替身：记一次调用，并在第 3 次时把「App 数据目录」造出来
+cat > ./probe/sleep <<'SHIM'
+n=`cat ./probe/n`
+n=$((n + 1))
+printf '%s\n' "$n" > ./probe/n
+[ "$n" -ge 3 ] && mkdir -p ./mod/appdata
+exit 0
+SHIM
+SLEEP_OVERRIDE=./probe/sleep
+export SLEEP_OVERRIDE
+LD=./mod/appdata
+run_once; printf 'rc=%s\n' "$?"
+printf 'calls=%s\n' "$(cat ./probe/n 2>/dev/null)"
+printf 'dir=%s\n' "$([ -d ./mod/appdata ] && echo yes || echo no)"
+DRIVER
+  t_eq "等到就绪：照常取到任务（rc=0）" "$(sg_val "$SG_WORK/wait_ok.out" rc)" "0"
+  t_eq "等到就绪：确实等过（替身被调用，次数=目录出现的那一次）" "$(sg_val "$SG_WORK/wait_ok.out" calls)" "3"
+  t_eq "等到就绪：此时目录已经在了" "$(sg_val "$SG_WORK/wait_ok.out" dir)" "yes"
+
+  # ② 等不到：等满上限后仍按任务异常返回 2（主循环的 4 分钟兜底接手），且不发通知
+  sg_setup wait_timeout
+  sg_run wait_timeout <<'DRIVER'
+mkdir -p ./probe
+printf '0\n' > ./probe/n
+# sleep 替身：只记调用次数，永远不造目录 —— 模拟「App 真的没装/数据一直读不到」
+cat > ./probe/sleep <<'SHIM'
+n=`cat ./probe/n`
+printf '%s\n' "$((n + 1))" > ./probe/n
+exit 0
+SHIM
+SLEEP_OVERRIDE=./probe/sleep
+export SLEEP_OVERRIDE
+LD=./mod/definitely-not-there
+run_once; printf 'rc=%s\n' "$?"
+printf 'calls=%s\n' "$(cat ./probe/n)"
+DRIVER
+  t_eq "等满上限：仍返回 2（有界，不会挂住）" "$(sg_val "$SG_WORK/wait_timeout.out" rc)" "2"
+  t_eq "等满上限：等待次数就是上限（10 次）" "$(sg_val "$SG_WORK/wait_timeout.out" calls)" "10"
+  t_eq "等满上限：一条通知都不发" "$(grep -c . "$SG_WORK/ctl/events" 2>/dev/null)" "0"
 }
 
 # ============================================================
@@ -873,7 +932,9 @@ DRIVER
 
 # ---- 注册（顺序即执行顺序） ----
 
-t_case "signin · 时钟与夹具自证" sg_case_clockt_case "signin · 三档返回码（成功 / 可重试 / 任务异常）" sg_case_codes
+t_case "signin · 时钟与夹具自证" sg_case_clock
+t_case "signin · 三档返回码（成功 / 可重试 / 任务异常）" sg_case_codes
+t_case "signin · 等 App 数据就绪（等到就用，等不到有界退回）" sg_case_wait_appdata
 t_case "signin · 分支：已签到（记录 + 通知）" sg_case_branch_seen
 t_case "signin · 分支：已请假（记录 + 通知）" sg_case_branch_leave
 t_case "signin · 分支：窗口内提交（normal）" sg_case_branch_window
