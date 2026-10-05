@@ -50,6 +50,10 @@ run() { # $1=命令名：把「时刻 + 退出码 + 输出」记进报告，输�
   say "$OUT_LAST"
 }
 ka_count() { grep -ac '保活' "$LOG" 2>/dev/null; }
+# 降权探测行的条数：只有会用到降权写法的命令（notify / once / refresh / keepalive）与启动路径
+# 会写下它，守护进程自己不探（写法是从启动路径继承的）——所以它不会因守护进程并发写日志而变，
+# 前后各数一次就能判出「这条只读命令有没有白探」。
+probe_count() { grep -ac '通知链路' "$LOG" 2>/dev/null; }
 # 现在几点（当日第几分钟）：只看当前时刻，不读模块的任何状态
 smoke_now_minutes() { date '+%H %M' | { read -r h m; echo $((h * 60 + m)); }; }
 # 保活窗口的起止（当日第几分钟）：向模块的配置层要，避免在这里再抄一份钟点。
@@ -150,7 +154,11 @@ has "$STATUS_OUT" "描述:" "status：有描述预览"
 expect "$STATUS_OUT" "token: 有效" "status：token 可用"
 forbid "$STATUS_OUT" "未找到（应用未安装或未登录过）" "status：没有落到「未找到 token」"
 
-# webstate 是配置页读数据的那条路（只读）：字段齐不齐、有没有吐出凭证明文都在这里先看
+# webstate 是配置页读数据的那条路（只读）：字段齐不齐、有没有吐出凭证明文都在这里先看。
+# 另核一件与页面显示直接相关的事：它不该探降权——探测会往日志里写一行，而 webstate 的输出
+# 里就带着日志尾部（页面的「最近日志」），读一次状态就会让页面第一条变成与本次操作无关的
+# 「通知链路: 降权写法 … 可用」。
+PROBE_BEFORE=$(probe_count)
 run webstate
 WS_OUT="$OUT_LAST"
 for k in service sign_state sign_time ka_ok ka_fail ka_last ka_last_result token_state version keepalive poll_start poll_end notify notify_lead notify_cooldown; do
@@ -166,6 +174,13 @@ case "$TOK_FULL" in
   ""|*"未找到"*) : ;;
   *) forbid "$WS_OUT" "$TOK_FULL" "webstate：不吐凭证明文（只有有效性）" ;;
 esac
+PROBE_AFTER=$(probe_count)
+PROBE_NEW=$(( ${PROBE_AFTER:-0} - ${PROBE_BEFORE:-0} ))
+if [ "$PROBE_NEW" = "0" ]; then
+  ok "webstate：只读命令没有白探降权（日志没有新增探测行）"
+else
+  bad "webstate：这一趟往日志里写了 $PROBE_NEW 条降权探测行（只读命令不该探）"
+fi
 
 run notify
 expect "$OUT_LAST" "已发送" "notify：通知已交给系统发送"

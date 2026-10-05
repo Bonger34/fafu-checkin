@@ -285,6 +285,35 @@ DRIVER
   t_eq "未继承且表里标 0 的命令：不探测" "$(sed -n '3p' "$CD_WORK/inherit.out")" "status=0"
 }
 
+# 探不探只由命令表决定（入口那一跳问的是 cmd_probe_needed）：表里标 1 的四条 + 启动路径
+# （`start` 与不带子命令）要探，其余七条不探。
+# 只读与配置写入类命令白探一次的代价不只是慢：探测写下的那行会落进 webstate / status
+# 自己交出的日志尾部——页面「最近日志」的第一条成了与这次操作无关的降权行。
+cd_case_probe_needed() {
+  cd_setup
+  cd_write_env
+  cd_run probe_needed <<'DRIVER'
+{
+  # 启动路径：守护进程是入口派生出来的后台进程、它自己不探，故这两条必须为真
+  printf 'empty=%s\n' "$(cmd_probe_needed; echo $?)"
+  printf 'start=%s\n' "$(cmd_probe_needed start; echo $?)"
+  # 其余命令逐个问表，答案按「要探 / 不探」两组列出（名单取自表，不另抄一份）
+  yes=""; no=""
+  for c in $(dispatch_cmds); do
+    if cmd_probe_needed "$c"; then yes="$yes$c "; else no="$no$c "; fi
+  done
+  printf 'yes=%s\nno=%s\n' "$yes" "$no"
+} > "$T_WORK/probe_needed.out"
+DRIVER
+  t_eq "启动路径：不带子命令要探（守护进程靠它继承写法）" \
+    "$(cd_val "$CD_WORK/probe_needed.out" empty)" "0"
+  t_eq "启动路径：start 要探" "$(cd_val "$CD_WORK/probe_needed.out" start)" "0"
+  t_eq "要探的集合与表里第三列逐字一致" \
+    "$(cd_val "$CD_WORK/probe_needed.out" yes)" "notify once refresh keepalive "
+  t_eq "只读与配置写入类命令不探" \
+    "$(cd_val "$CD_WORK/probe_needed.out" no)" "stop status toggle enable disable webstate setconfig "
+}
+
 # ============================================================
 # 四、用法文本：集合与顺序取自表；未知子命令打印用法并非 0 退出
 # ============================================================
@@ -376,6 +405,9 @@ cd_case_entry_shape() {
   # 「前面留一个空格」的写法在这儿锚不到；带 $CMD 又能把注释里的函数名排掉。
   t_eq "静态锚点自证：入口里真的调了探测" \
     "$(grep -cF 'probe_su "$CMD"' "$entry")" "1"
+  # 探之前先按命令表问一次「要不要探」：只读与配置写入类命令因此不再白探一次 su，
+  # 也就不会把探测那行写进 webstate / status 自己交出的日志尾部（页面的「最近日志」）
+  t_has "入口：探测前先按命令表判要不要探" "$entry" 'cmd_probe_needed "$CMD" && probe_su "$CMD"'
   t_before "代码顺序：装配阶段的探测排在启动分支之前" "$entry" \
     'probe_su "$CMD"' '[ -z "$FAFU_DAEMON" ] && cmd_start'
   t_before "代码顺序：装配阶段的探测排在命令分发之前" "$entry" \
@@ -559,14 +591,32 @@ ws_log() { # 参数逐个作为一行写进日志文件
   for row in "$@"; do printf '%s\n' "$row" >> "$WS_DIR/fafu_checkin.log"; done
 }
 
+# 降权链路的替身：每次调用记一行，并输出身份 2000（于是候选写法第一条即通过校验）。
+# 与 tests/notify.sh 的替身同构——两条约束决定了它必须是文件、且必须挂在 $SU_BIN 上：
+# su 是 busybox 的内建 applet，PATH 上的同名文件拦不到它；shebang 借随附 busybox
+# （Windows 上「可执行」要求存在解释器，只有 busybox 认这个写法）。
+ws_su_stub() {
+  mkdir -p "$WS_DIR/bin"
+  cat <<STUB > "$WS_DIR/bin/su"
+#!$(t_find_busybox) sh
+# 由 tests/commands.sh 生成：降权链路替身（记录调用并应答身份）
+printf '%s\n' "\$*" >> '$WS_DIR/bin/su.calls'
+printf '2000\n'
+STUB
+  chmod +x "$WS_DIR/bin/su" 2>/dev/null || true
+  : > "$WS_DIR/bin/su.calls"
+}
+
 # 在副本里跑一次真实的子命令。WS_LD 非空时覆盖 leveldb 目录（「取不到凭据」那一档用它）。
-ws_run() { # $1=名字（输出文件的后缀）
+# SU_BIN 指向夹具里的降权替身（由 ws_su_stub 生成；没生成时那个文件不存在 = 探不到 su）。
+ws_run() { # $1=名字（输出文件的后缀） [$2=子命令，默认 webstate]
   local name rc
   name="$1"
   (
     cd "$WS_DIR" || exit 1
     BB_OVERRIDE="$CD_WORK/bin/bb" MOCK_DATE_CTL='./ctl/date' LD_DIR="${WS_LD:-./ctl/ld}" \
-      $(t_sh) ./fafu_checkin.sh webstate
+      SU_BIN="$WS_DIR/bin/su" \
+      $(t_sh) ./fafu_checkin.sh "${2:-webstate}"
   ) > "$CD_WORK/ws_$name.out" 2> "$CD_WORK/ws_$name.err"
   rc=$?
   echo "$rc" > "$CD_WORK/ws_$name.rc"
@@ -665,6 +715,37 @@ cd_case_webstate_config() {
   t_eq "坏配置文件：保活开关退回默认" "$(cd_val "$f" keepalive)" "1"
   t_eq "坏配置文件：非法时刻退回默认" "$(cd_val "$f" poll_start)" "20:00"
   t_eq "坏配置文件：返回码仍为 0" "$(cat "$CD_WORK/ws_cfg_bad.rc")" "0"
+}
+
+# 只读命令不该探降权（配置页读数据走的就是 webstate 这一条路）：探了不仅白等一次 su，
+# 探测写下的那行还会落进 webstate / status 自己交出的日志尾部——命令是「读状态」，
+# 页面的「最近日志」第一条却在说通知链路，读的人会以为这次操作动了通知。
+# 判据是两个外部可见的事实：日志文件逐字节未变、降权替身一次都没被调用；
+# 同一份夹具里再跑一条表里标 1 的命令（notify）作对照——它必须探到并写信，否则是假绿。
+cd_case_readonly_no_probe() {
+  local f
+  ws_setup
+  ws_su_stub
+  printf 'NOTIFY=1\n' > "$WS_DIR/fafu-checkin.conf"   # 探不探只由命令表决定，与通知开关无关
+  ws_log "[$WS_DATE 21:20:00] 既有的一行"
+  cp "$WS_DIR/fafu_checkin.log" "$CD_WORK/noprobe.before"
+
+  ws_run noprobe_webstate webstate
+  f="$CD_WORK/ws_noprobe_webstate.out"
+  t_eq "只读：webstate 一次都没调过 su" "$(grep -c . "$WS_DIR/bin/su.calls")" "0"
+  t_eq "只读：webstate 没往日志里添行" \
+    "$(cat "$WS_DIR/fafu_checkin.log")" "$(cat "$CD_WORK/noprobe.before")"
+  t_eq "只读：交给页面的日志尾部就是既有那一行" "$(cd_val "$f" log)" "[$WS_DATE 21:20:00] 既有的一行"
+  t_eq "只读：输出里没有降权探测行" "$(grep -c '通知链路' "$f")" "0"
+
+  ws_run noprobe_status status
+  t_eq "只读：status 也没往日志里添行" \
+    "$(cat "$WS_DIR/fafu_checkin.log")" "$(cat "$CD_WORK/noprobe.before")"
+
+  ws_run noprobe_notify notify
+  t_ne "对照：notify 探了降权写法（替身确实拦得住）" "$(grep -c . "$WS_DIR/bin/su.calls")" "0"
+  t_eq "对照：notify 的探测结果写进日志（恰好一行）" \
+    "$(grep -c '通知链路' "$WS_DIR/fafu_checkin.log")" "1"
 }
 
 cd_case_webstate_sign() {
@@ -932,6 +1013,7 @@ t_case "commands · 不在表里的名字不分发" cd_case_unknown
 t_case "commands · 一张表驱动分发 / 探测 / 用法" cd_case_table_single_source
 t_case "commands · 降权探测先于任何分发" cd_case_probe_first
 t_case "commands · 已继承探测结果时不重复探测" cd_case_probe_once
+t_case "commands · 探不探由命令表决定" cd_case_probe_needed
 t_case "commands · 用法文本与实际命令集合一致" cd_case_usage
 t_case "commands · 新增子命令只需表里加一行" cd_case_one_row
 t_case "commands · 入口只剩装配与调度（静态）" cd_case_entry_shape
@@ -944,6 +1026,7 @@ t_case "commands · webstate 输出页面可解析的状态" cd_case_webstate_fi
 t_case "commands · webstate 的签到状态从记录里读" cd_case_webstate_sign
 t_case "commands · webstate 的登录状态只报有效性" cd_case_webstate_token
 t_case "commands · webstate 给出配置项的生效值" cd_case_webstate_config
+t_case "commands · 只读命令不探降权也不写日志" cd_case_readonly_no_probe
 t_case "commands · setconfig 写入合法值并回显生效值" cd_case_setconfig_ok
 t_case "commands · setconfig 部分给也能用" cd_case_setconfig_partial
 t_case "commands · setconfig 拒非法值且旧值不变" cd_case_setconfig_reject

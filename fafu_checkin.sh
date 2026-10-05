@@ -56,11 +56,11 @@ CMD="$1"
 # 下面转发时 $@ 才只剩参数（不会把子命令名算成一个）
 [ $# -eq 0 ] || shift
 cmd_known "$CMD" || { cmd_usage; exit 1; }
-# 降权写法在这里探一次，**启动路径与手动子命令共用**：守护进程是下面 cmd_start 派生出来的
-# 后台进程，它自己不再探（从 FAFU_SU_MODE 继承）。漏掉这一句，daemon 的 SU_MODE 就是空的，
-# 而空的 SU_MODE 会让 notify() 直接返回——自动签到那几条通知会静默消失且没有任何报错。
-# cmd_dispatch 里那一趟是给手动子命令探的（它分发的进程与守护进程不是同一个）。
-probe_su "$CMD"
+# 降权写法在这里探一次（探不探由 cmd_probe_needed 按命令表判）：启动路径必探——守护进程是
+# 下面 cmd_start 派生出来的后台进程，它自己不再探（从 FAFU_SU_MODE 继承）。漏探则 daemon 的
+# SU_MODE 为空，而空的 SU_MODE 会让 notify() 直接返回——自动签到那几条通知会静默消失且没有
+# 任何报错。只读与配置写入类子命令不探（白等一次 su，且探测日志会落进它们自己交出的日志尾部）。
+cmd_probe_needed "$CMD" && probe_su "$CMD"
 cmd_dispatch "$CMD" "$@"
 
 # 后台化 + 单实例：不是自己重启出来的（FAFU_DAEMON 空）= 命令行上确实要启动守护进程
