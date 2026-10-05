@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>服服签到 · 配置</title>
+<style>
+/* 配色只在这一处定义：浅色打底，深色整段覆盖。跟随系统，不做手动切换。 */
+:root{
+  color-scheme:light dark;
+  --bg:#f2f4f7; --card:#fff; --fg:#1b1f24; --muted:#667085; --line:#e4e7ec;
+  --accent:#2f6fed; --ok:#0f7b52; --bad:#b42318; --warn:#b54708;
+  --input:#fff; --chip:#eef2f6; --shadow:0 1px 3px rgba(16,24,40,.14);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0f1216; --card:#191d23; --fg:#e7eaee; --muted:#98a2b3; --line:#2a3038;
+    --accent:#7aa2f7; --ok:#3ddc97; --bad:#ff8a80; --warn:#f5b544;
+    --input:#12161b; --chip:#222831; --shadow:0 1px 3px rgba(0,0,0,.5);
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--fg);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;
+  font-size:15px; line-height:1.6;
+}
+/* 刘海屏：安全区用 CSS 原生 env()，配 viewport-fit=cover 才会给出非零值 */
+.wrap{
+  max-width:660px; margin:0 auto;
+  padding:calc(14px + env(safe-area-inset-top,0px)) calc(14px + env(safe-area-inset-right,0px)) calc(28px + env(safe-area-inset-bottom,0px)) calc(14px + env(safe-area-inset-left,0px));
+}
+h1{font-size:19px; margin:0 0 2px}
+.sub{color:var(--muted); font-size:13px; margin:0 0 14px}
+.card{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:6px 14px; margin:0 0 14px}
+.card h2{display:flex; align-items:center; justify-content:space-between; gap:10px;
+  font-size:13px; letter-spacing:.05em; color:var(--muted); margin:12px 0 2px; font-weight:600}
+.row{display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:11px 0}
+.row + .row{border-top:1px solid var(--line)}
+.row .txt{flex:1 1 190px; min-width:0}
+.row .txt b{display:block; font-weight:600}
+.row .txt small{display:block; color:var(--muted); font-size:12px}
+.eff{color:var(--accent) !important}
+input[type=text]{
+  flex:0 0 auto; width:92px; padding:8px 10px; text-align:center;
+  background:var(--input); color:var(--fg); border:1px solid var(--line); border-radius:9px;
+  font-family:inherit; font-size:15px;
+}
+input[type=text]:focus{outline:2px solid var(--accent); outline-offset:1px}
+input.bad{border-color:var(--bad)}
+.sep{color:var(--muted)}
+.sw{appearance:none; -webkit-appearance:none; flex:0 0 auto; width:48px; height:28px; margin:0;
+  border:1px solid var(--line); border-radius:999px; background:var(--chip); position:relative; cursor:pointer}
+.sw::after{content:""; position:absolute; top:2px; left:2px; width:22px; height:22px; border-radius:50%;
+  background:#fff; box-shadow:var(--shadow); transition:transform .15s ease}
+.sw:checked{background:var(--accent); border-color:var(--accent)}
+.sw:checked::after{transform:translateX(22px)}
+.sw:disabled{opacity:.5}
+.tip{border-left:3px solid var(--accent); background:var(--chip); border-radius:8px;
+  padding:10px 12px; margin:10px 0 2px; font-size:13px}
+.actions{display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin:12px 0 0}
+button{font-family:inherit; font-size:15px; font-weight:600; padding:11px 24px; border-radius:10px;
+  border:1px solid transparent; background:var(--accent); color:#fff}
+button:disabled{opacity:.55}
+button.ghost{background:transparent; color:var(--accent); border-color:var(--line);
+  font-size:13px; font-weight:500; padding:5px 12px}
+#msg{margin:10px 0 8px; font-size:13px; min-height:21px}
+#msg.ok{color:var(--ok)} #msg.bad{color:var(--bad)} #msg.busy{color:var(--muted)}
+.banner{border:1px solid var(--line); border-left:4px solid var(--warn); background:var(--card);
+  border-radius:12px; padding:12px 14px; margin:0 0 14px; font-size:13px}
+dl.status{display:grid; grid-template-columns:auto 1fr; gap:7px 14px; margin:6px 0 12px; font-size:14px}
+dl.status dt{color:var(--muted)}
+dl.status dd{margin:0}
+pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0 0 12px;
+  font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-all; max-height:170px; overflow:auto;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.last{color:var(--muted); font-size:12px; margin:0 0 10px; word-break:break-all}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>服服签到 · 配置</h1>
+  <p class="sub">改完点「保存」即生效；页面显示的是当前生效值，不是刚填进去的值。</p>
+
+  <div class="banner" id="nobridge" hidden></div>
+
+  <main id="app" hidden>
+    <section class="card">
+      <h2>主界面</h2>
+
+      <div class="row">
+        <div class="txt"><b>服务开关</b><small id="h_service">当前：读取中…</small></div>
+        <input class="sw" type="checkbox" id="f_service" aria-label="服务开关">
+      </div>
+
+      <div class="row">
+        <div class="txt">
+          <b>保活开关</b>
+          <small>关闭后白天不再保活（白天不会为了刷新登录状态而短暂弹出打卡页），只保留签到时段的自动签到。</small>
+          <small class="eff" id="h_keepalive">当前生效值：读取中…</small>
+        </div>
+        <input class="sw" type="checkbox" id="f_keepalive" aria-label="保活开关">
+      </div>
+
+      <div class="row">
+        <div class="txt">
+          <b>轮询范围</b>
+          <small>从这一刻开始去查看今晚的任务，最晚查到这一刻。这不是签到时段——签到窗口由服务端任务数据决定。</small>
+          <small class="eff" id="h_poll">当前生效值：读取中…</small>
+        </div>
+        <input type="text" id="f_poll_start" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="轮询范围起">
+        <span class="sep">~</span>
+        <input type="text" id="f_poll_end" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="轮询范围止">
+      </div>
+
+      <div class="row">
+        <div class="txt">
+          <b>通知开关</b>
+          <small>关闭后零通知（同时也就不再需要降权调用、不再写通知标记）。</small>
+          <small class="eff" id="h_notify">当前生效值：读取中…</small>
+        </div>
+        <input class="sw" type="checkbox" id="f_notify" aria-label="通知开关">
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>高级</h2>
+      <p class="tip">轮询范围要覆盖你学校发布任务的时间。范围之外本模块不会去查看任务，设窄了就会错过自动签到；兜底是到点仍未取得今晚任务时给你发一条提醒，收到后手动打开 App 签一下仍来得及——所以设窄的代价是「收到提醒、自己补救」，而不是静默漏签。</p>
+
+      <div class="row">
+        <div class="txt">
+          <b>预警提前量</b>
+          <small>亮屏时打开打卡页之前先弹一条提醒，并留出这么多秒给你读完；0 表示不加延时。</small>
+          <small class="eff" id="h_lead">当前生效值：读取中…</small>
+        </div>
+        <input type="text" id="f_lead" inputmode="numeric" maxlength="3" placeholder="秒" aria-label="预警提前量（秒）">
+      </div>
+
+      <div class="row">
+        <div class="txt">
+          <b>通知冷却</b>
+          <small>同类打扰型通知的最小间隔秒数；调小更容易被连续提醒，调大更清静。</small>
+          <small class="eff" id="h_cooldown">当前生效值：读取中…</small>
+        </div>
+        <input type="text" id="f_cooldown" inputmode="numeric" maxlength="6" placeholder="秒" aria-label="通知冷却（秒）">
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="actions">
+        <button type="button" id="save">保存</button>
+        <span class="sep">保存成功后会自动重启后台服务，新配置立刻生效。</span>
+      </div>
+      <p id="msg"></p>
+    </section>
+
+    <section class="card">
+      <h2>运行状态 <button class="ghost" type="button" id="refresh">刷新</button></h2>
+      <dl class="status">
+        <dt>服务开关</dt><dd id="s_service">—</dd>
+        <dt>今日签到</dt><dd id="s_sign">—</dd>
+        <dt>今日保活</dt><dd id="s_ka">—</dd>
+        <dt>最近保活</dt><dd id="s_kalast">—</dd>
+        <dt>登录状态</dt><dd id="s_token">—</dd>
+        <dt>模块版本</dt><dd id="s_ver">—</dd>
+      </dl>
+      <h2>最近日志</h2>
+      <pre class="logs" id="s_log">—</pre>
+      <p class="last" id="s_last">最近一次命令：—</p>
+    </section>
+  </main>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var MODDIR = '/data/adb/modules/fafu-checkin';
+  var ENTRY  = MODDIR + '/fafu_checkin.sh';
+  /* 六项配置：写入用登记表里的键名，读取用 webstate 给的小写字段名（同源，故页面不自带默认值）。 */
+  var CFG = [
+    { key: 'KEEPALIVE',       field: 'keepalive' },
+    { key: 'POLL_START',      field: 'poll_start' },
+    { key: 'POLL_END',        field: 'poll_end' },
+    { key: 'NOTIFY',          field: 'notify' },
+    { key: 'NOTIFY_LEAD',     field: 'notify_lead',     min: 0, max: 600 },
+    { key: 'NOTIFY_COOLDOWN', field: 'notify_cooldown', min: 0, max: 86400 }
+  ];
+
+  var eff = {};   /* 上一次从 webstate 读到的六项生效值（空串 = 脚本没给这一项） */
+  var st  = {};   /* webstate 的完整读数 */
+  var seq = 0;    /* 回调名后缀：每次调用取一个，避免同名覆盖 */
+
+  function el(id) { return document.getElementById(id); }
+  function setText(id, s) { el(id).textContent = s; }
+  function row(k) {
+    for (var i = 0; i < CFG.length; i++) { if (CFG[i].key === k) return CFG[i]; }
+    return null;
+  }
+  function onOff(v) { return v === '1' ? '开' : '关'; }
+  function isTime(v) { return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(v); }
+  function isInt(v) { return /^[0-9]+$/.test(v); }
+  function inRange(v, min, max) { return isInt(v) && Number(v) >= min && Number(v) <= max; }
+  function mins(v) { return Number(v.slice(0, 2)) * 60 + Number(v.slice(3, 5)); }
+  /* 起点严格早于终点；不支持跨午夜——与配置层的判定同构 */
+  function orderOk(a, b) { return isTime(a) && isTime(b) && mins(a) < mins(b); }
+  /* 生效值缺失时就显示「没有取到」，不代入页面自己的默认值：两份默认值必然漂移 */
+  function hint(text) { return text === '' ? '当前生效值：没有取到（点「刷新」重试）' : '当前生效值：' + text; }
+  function nowText(v) { return v === '' ? '现在是空的' : '当前 ' + v; }
+
+  /* 解析脚本的 键=值 输出。分发路径会给以换行收尾的输出补一个空行，
+     故空行一律跳过；log= 允许多行，单独收成数组。 */
+  function parseKV(text) {
+    var out = {}, rows = String(text == null ? '' : text).split('\n'), i, at, k, v;
+    for (i = 0; i < rows.length; i++) {
+      if (rows[i] === '') continue;
+      at = rows[i].indexOf('=');
+      if (at < 0) continue;
+      k = rows[i].slice(0, at);
+      v = rows[i].slice(at + 1);
+      if (k === 'log') { if (!out.log) out.log = []; out.log.push(v); }
+      else { out[k] = v; }
+    }
+    return out;
+  }
+
+  function supported() {
+    return typeof ksu !== 'undefined' && typeof ksu.exec === 'function';
+  }
+
+  /* 桥接契约：exec(完整命令行, 选项 JSON, 全局回调名)，回调收 (退出码, stdout, stderr)。
+     管理器不设置工作目录，故显式传 cwd，命令里同时用绝对路径。 */
+  function run(line) {
+    return new Promise(function (resolve) {
+      if (!supported()) {
+        resolve({ errno: 127, stdout: '', stderr: '当前环境没有提供 KernelSU 的页面调用接口' });
+        return;
+      }
+      seq += 1;
+      var cb = '__fafu_webui_' + seq;
+      window[cb] = function (errno, stdout, stderr) {
+        delete window[cb];
+        resolve({
+          errno: Number(errno),
+          stdout: String(stdout == null ? '' : stdout),
+          stderr: String(stderr == null ? '' : stderr)
+        });
+      };
+      try {
+        ksu.exec(line, JSON.stringify({ cwd: MODDIR }), cb);
+      } catch (e) {
+        delete window[cb];
+        resolve({ errno: 127, stdout: '', stderr: '调用失败：' + (e && e.message ? e.message : e) });
+      }
+    }).then(function (r) {
+      setText('s_last', '最近一次命令：' + line + '（退出码 ' + r.errno + '）');
+      return r;
+    });
+  }
+
+  function script(args) { return run('sh ' + ENTRY + ' ' + args); }
+
+  /* 失败原因优先取 stderr（闸门把原因打在那一侧），空则退回 stdout；压成一行免得挤坏布局 */
+  function reason(r) {
+    var t = String(r.stderr || '').replace(/\s+$/, '') || String(r.stdout || '').replace(/\s+$/, '');
+    if (!t) t = '脚本返回退出码 ' + r.errno + '（没有给出原因）';
+    return t.split('\n').join('　');
+  }
+  function firstLine(s) { return String(s || '').split('\n')[0]; }
+
+  function effSummary() {
+    return '保活 ' + onOff(eff.KEEPALIVE) + '、轮询 ' + eff.POLL_START + '~' + eff.POLL_END +
+      '、通知 ' + onOff(eff.NOTIFY) + '、预警 ' + eff.NOTIFY_LEAD + ' 秒、冷却 ' + eff.NOTIFY_COOLDOWN + ' 秒';
+  }
+
+  function renderForm() {
+    el('f_keepalive').checked = eff.KEEPALIVE === '1';
+    el('f_notify').checked = eff.NOTIFY === '1';
+    el('f_poll_start').value = eff.POLL_START;
+    el('f_poll_end').value = eff.POLL_END;
+    el('f_lead').value = eff.NOTIFY_LEAD;
+    el('f_cooldown').value = eff.NOTIFY_COOLDOWN;
+    setText('h_keepalive', hint(eff.KEEPALIVE === '' ? '' : onOff(eff.KEEPALIVE)));
+    setText('h_poll', hint(eff.POLL_START === '' || eff.POLL_END === '' ? '' : eff.POLL_START + ' ~ ' + eff.POLL_END));
+    setText('h_notify', hint(eff.NOTIFY === '' ? '' : onOff(eff.NOTIFY)));
+    setText('h_lead', hint(eff.NOTIFY_LEAD === '' ? '' : eff.NOTIFY_LEAD + ' 秒'));
+    setText('h_cooldown', hint(eff.NOTIFY_COOLDOWN === '' ? '' : eff.NOTIFY_COOLDOWN + ' 秒'));
+  }
+
+  function renderState() {
+    var svc = st.service === 'on' ? '🟢 已启用' : (st.service === 'off' ? '⏸ 已停用' : '未知');
+    el('f_service').checked = st.service === 'on';
+    setText('s_service', svc);
+    setText('h_service', '当前：' + svc + ' · 点一下立即生效，与模块卡片的操作按钮是同一个开关');
+
+    setText('s_sign', st.sign_state ? (st.sign_state + (st.sign_time ? ' · ' + st.sign_time : '')) : '今天还没有记录');
+    setText('s_ka', (st.ka_ok === '' || st.ka_ok == null) && (st.ka_fail === '' || st.ka_fail == null)
+      ? '今天还没有记录' : ('成功 ' + (st.ka_ok || 0) + ' 次 · 失败 ' + (st.ka_fail || 0) + ' 次'));
+    setText('s_kalast', st.ka_last
+      ? (st.ka_last + ' · ' + (st.ka_last_result === 'ok' ? '成功' : (st.ka_last_result === 'fail' ? '失败' : '结果未知')))
+      : '还没有记录');
+    setText('s_token', { ok: '✅ 有效', fail: '⚠️ 已失效或接口不通', none: '未登录（没有可用凭据）' }[st.token_state] || '未知');
+    setText('s_ver', st.version || '未知');
+    setText('s_log', (st.log && st.log.length) ? st.log.join('\n') : '暂无日志');
+  }
+
+  /* 生效值一律取自 webstate（与脚本侧 cfg_* 同源），页面不另存一份默认值表 */
+  function refreshState() {
+    return script('webstate').then(function (r) {
+      if (r.errno !== 0) { return null; }
+      st = parseKV(r.stdout);
+      for (var i = 0; i < CFG.length; i++) {
+        var v = st[CFG[i].field];
+        eff[CFG[i].key] = typeof v === 'string' ? v : '';
+      }
+      renderForm();
+      renderState();
+      return st;
+    });
+  }
+
+  function note(text, kind) {
+    var m = el('msg');
+    m.className = kind || '';
+    m.textContent = text;
+  }
+  function setBusy(b) {
+    el('save').disabled = b;
+    el('save').textContent = b ? '保存中…' : '保存';
+  }
+  function clearBad() {
+    var all = document.querySelectorAll('input.bad'), i;
+    for (i = 0; i < all.length; i++) all[i].classList.remove('bad');
+  }
+
+  function readForm() {
+    return {
+      KEEPALIVE: el('f_keepalive').checked ? '1' : '0',
+      POLL_START: el('f_poll_start').value.trim(),
+      POLL_END: el('f_poll_end').value.trim(),
+      NOTIFY: el('f_notify').checked ? '1' : '0',
+      NOTIFY_LEAD: el('f_lead').value.trim(),
+      NOTIFY_COOLDOWN: el('f_cooldown').value.trim()
+    };
+  }
+
+  /* 前端这一次校验只为「当场拦下、不发请求」——格式与区间；脚本侧那次仍是唯一闸门 */
+  function checkForm(v) {
+    var lead = row('NOTIFY_LEAD'), cool = row('NOTIFY_COOLDOWN');
+    if (!isTime(v.POLL_START)) return { id: 'f_poll_start', text: '轮询范围起：只能填 HH:MM 形式的时刻，范围 00:00–23:59（' + nowText(v.POLL_START) + '）' };
+    if (!isTime(v.POLL_END)) return { id: 'f_poll_end', text: '轮询范围止：只能填 HH:MM 形式的时刻，范围 00:00–23:59（' + nowText(v.POLL_END) + '）' };
+    if (!orderOk(v.POLL_START, v.POLL_END)) return { id: 'f_poll_start', text: '轮询范围起（' + v.POLL_START + '）必须早于止（' + v.POLL_END + '），不支持跨午夜' };
+    if (!inRange(v.NOTIFY_LEAD, lead.min, lead.max)) return { id: 'f_lead', text: '预警提前量：只能填 ' + lead.min + '–' + lead.max + ' 的整数秒（' + nowText(v.NOTIFY_LEAD) + '）' };
+    if (!inRange(v.NOTIFY_COOLDOWN, cool.min, cool.max)) return { id: 'f_cooldown', text: '通知冷却：只能填 ' + cool.min + '–' + cool.max + ' 的整数秒（' + nowText(v.NOTIFY_COOLDOWN) + '）' };
+    return null;
+  }
+
+  function showProblem(p) {
+    clearBad();
+    el(p.id).classList.add('bad');
+    note('❌ ' + p.text + '　未提交，生效值仍是 ' + effSummary(), 'bad');
+  }
+
+  /* 停完再启；两次都容忍失败——重启失败不该把「配置已生效」显示成失败 */
+  function restart() {
+    return script('stop').then(function () { return script('start'); })
+      .then(function (r) { return r.errno === 0; });
+  }
+
+  function onSave() {
+    var v = readForm(), p = checkForm(v);
+    if (p) { showProblem(p); return; }
+    clearBad();
+    setBusy(true);
+    note('正在保存…', 'busy');
+    var line = 'setconfig';
+    for (var i = 0; i < CFG.length; i++) line += ' ' + CFG[i].key + '=' + v[CFG[i].key];
+    script(line).then(function (r) {
+      if (r.errno !== 0) {
+        /* 闸门拒绝：生效值不动，页面继续显示旧值，原因照原样给出 */
+        note('❌ 保存被拒绝：' + reason(r) + '　未写入，生效值仍是 ' + effSummary(), 'bad');
+        setBusy(false);
+        return null;
+      }
+      var wasOff = st.service === 'off';
+      return restart().then(function (ok) {
+        return refreshState().then(function () {
+          note('✅ 配置已保存并生效：' + effSummary() +
+            (wasOff ? '　服务处于停用态，守护进程不会启动'
+                    : (ok ? '　守护进程已按新配置重启' : '　守护进程重启未成功，改动将在下次启动时生效')), 'ok');
+          setBusy(false);
+        });
+      });
+    }).catch(function (e) {
+      setBusy(false);
+      note('❌ 出错了：' + (e && e.message ? e.message : e), 'bad');
+    });
+  }
+
+  function onServiceToggle() {
+    var box = el('f_service'), want = box.checked;
+    box.disabled = true;
+    note('正在' + (want ? '启用' : '停用') + '服务…', 'busy');
+    script(want ? 'enable' : 'disable').then(function (r) {
+      box.disabled = false;
+      if (r.errno !== 0) {
+        box.checked = !want;   /* 失败：开关回到原位，落盘状态没被改动 */
+        note('❌ 切换失败：' + reason(r) + '　服务仍是' + (want ? '停用' : '启用') + '态', 'bad');
+        return;
+      }
+      var tail = firstLine(r.stdout);
+      refreshState().then(function () {
+        note('✅ ' + (tail || (want ? '服务已启用' : '服务已停用')), 'ok');
+      });
+    });
+  }
+
+  function bind() {
+    el('save').addEventListener('click', onSave);
+    el('f_service').addEventListener('change', onServiceToggle);
+    el('refresh').addEventListener('click', function () {
+      note('正在刷新状态…', 'busy');
+      refreshState().then(function () { note('状态已刷新。', ''); });
+    });
+    /* 失焦时就地校验：非法值让输入框变红并给出规则，保存时再拦一次 */
+    var ids = ['f_poll_start', 'f_poll_end', 'f_lead', 'f_cooldown'];
+    for (var i = 0; i < ids.length; i++) {
+      el(ids[i]).addEventListener('change', function () {
+        var p = checkForm(readForm());
+        if (p) { showProblem(p); } else { clearBad(); }
+      });
+    }
+  }
+
+  function showNoBridge() {
+    var b = el('nobridge');
+    b.hidden = false;
+    b.innerHTML = '<b>这个页面要在 KernelSU 管理器里打开</b>' +
+      '当前环境没有提供 KernelSU 的页面调用接口（window.ksu.exec），页面既读不到也改不了模块配置。<br>' +
+      '请从 KernelSU 管理器的模块卡片上打开本页面。Magisk 没有对应的页面机制，请直接编辑模块目录里的 fafu-checkin.conf。';
+  }
+
+  function boot() {
+    if (!supported()) { showNoBridge(); return; }
+    el('app').hidden = false;
+    bind();
+    setBusy(true);
+    note('正在读取生效值…', 'busy');
+    refreshState().then(function (got) {
+      setBusy(false);
+      note(got ? '已读取当前生效值；改完点「保存」即生效。'
+               : '读取失败：脚本没有返回状态（点「刷新」重试）。', got ? '' : 'bad');
+    }).catch(function (e) {
+      setBusy(false);
+      note('❌ 读取失败：' + (e && e.message ? e.message : e), 'bad');
+    });
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
