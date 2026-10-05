@@ -4,7 +4,8 @@
 # 三块都只针对「外部可观察的行为」：
 #   base 原语：函数的输出、落盘内容、轮转后的行数（含拨钟与「空内容不覆盖」）；
 #   入口：缺一层时写模块日志并以非 0 退出；层齐时能装配起来跑通子命令分发；
-#   打包：产物里确实有每个层文件、少一个就构建失败（本机没有 zip/unzip 时跳过该项）。
+#   打包：产物里确实有每个层文件与页面入口、少一个就构建失败（本机没有 zip/unzip 时跳过该项）；
+#   页面：入口文件在源树里、文本零外部 URL，另有反向样本自证这条判据真的会失败。
 #
 # 层清单不在这里重复维护：harness 从入口的 FAFU_LAYERS 读出来放进 TEST_LIB_FILES。
 # ============================================================
@@ -240,20 +241,64 @@ sk_case_entry_switch_file() {
 # 打包：清单、权限、产物校验
 # ============================================================
 
-sk_case_package() {
-  local pkg zip rc f
-  # 静态部分：权限归属与「卸载不删自己的代码」
+# 打包用例的静态那半：权限归属、页面资源里不需要 zip 的两条结构断言。
+sk_package_static() {
+  local page
+  page="$T_ROOT/webroot/index.html"
+
   t_has "安装脚本覆盖库层" "$T_ROOT/customize.sh" '"$MODPATH"/lib/*.sh'
   t_has "安装脚本给库层数据权限（0644）" "$T_ROOT/customize.sh" 'set_perm "$f" 0 0 0644'
   t_hasnt "卸载脚本不删除库层文件" "$T_ROOT/uninstall.sh" 'rm -f "$MODDIR/lib'
+  # 页面资源目录的权限与安全上下文由管理器在安装时设置：安装脚本不该提到这个目录
+  t_hasnt "安装脚本不碰页面资源目录" "$T_ROOT/customize.sh" 'webroot'
+  # 打包清单纳入页面资源目录（是否真的进包由下面的构建分支按路径核对）
+  t_has_re "打包清单纳入页面资源目录" "$T_ROOT/build.sh" '^DIRS=.*webroot'
 
-  # 动态部分：真的打一次包，逐个核对产物里的层文件。本机（Windows）没有 zip/unzip，
-  # 这一支只在 CI 上跑；跳过不计入通过，避免「本机没跑」被读成「已验证」。
-  if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
-    t_skip "打包产物校验（本机没有 zip/unzip；CI 上会跑）"
-    return 0
-  fi
+  # 结构断言一：页面入口文件在源树里（清单写的路径必须真的存在）
+  t_file "页面入口文件在源树里" "$page"
+  # 结构断言三：页面文本不含任何外部 URL（判据只有 tools/lib.sh 里一份）
+  t_eq "页面文本不含任何外部 URL" "$(ext_url_hits "$page")" ""
+}
 
+# 判据自证：ext_url_hits 必须真的会命中，否则「页面零命中」只是恒真的摆设。
+# 样本里的链接一律在运行时拼出来：这两个 .sh 自己也在「零外部资源」这条口径的覆盖范围内，
+# 连两个斜杠都单独拎出来，免得口径和它的样本互相打架（单个斜杠不构成任何形状）。
+SK_SLASH2='//'
+sk_page_scan_self_check() {
+  local d scheme upper rel clean
+  d="$SK_WORK/scan"
+  mkdir -p "$d"
+  scheme="$d/scheme.html"
+  upper="$d/upper.html"
+  rel="$d/rel.html"
+  clean="$d/clean.html"
+
+  printf '<link rel="stylesheet" href="ht%s">\n' "tps:${SK_SLASH2}cdn.example.com/a.css" > "$scheme"
+  printf '<script src="HT%s"></script>\n' "TPS:${SK_SLASH2}CDN.EXAMPLE.COM/b.js" > "$upper"
+  printf '<script src="/%s"></script>\n' '/cdn.example.com/c.js' > "$rel"
+  {
+    printf '<img src="/local/pic.png">\n'
+    printf '<style>body{background:#fff}/* 块注释 */</style>\n'
+    printf '<script>\n// 行注释\n'
+    printf '//无空格的行注释\n'
+    printf '</script>\n'
+  } > "$clean"
+
+  t_ne "自证：带协议头的链接会被扫出来" "$(ext_url_hits "$scheme")" ""
+  t_ne "自证：协议头大小写变形也会被扫出来" "$(ext_url_hits "$upper")" ""
+  t_ne "自证：省略协议头的链接会被扫出来" "$(ext_url_hits "$rel")" ""
+  t_eq "自证：干净样本零命中（判据不是恒真）" "$(ext_url_hits "$clean")" ""
+  # 构建脚本开着 set -e，零命中是正常答案：判据不能把「没找到」的状态码漏给调用方。
+  # 直接看状态码——用例跑在 if 条件里（run-tests.sh 的 T_RUN），那种上下文会抑制
+  # errexit，改用子 shell 试 set -e 就成了永远为真的摆设。
+  ext_url_hits "$clean" > /dev/null
+  t_true "自证：零命中以 0 退出（构建脚本开着 set -e）" "$?"
+}
+
+# 打包用例的动态那半：真打一次包，核对产物里逐个文件都在，再跑三条反向。
+# 本机（Windows）没有 zip/unzip，这一段只在 CI 上跑。
+sk_package_build() {
+  local pkg zip rc f
   sk_setup
   pkg="$SK_WORK/pkg"
   mkdir -p "$pkg/tools"
@@ -262,6 +307,7 @@ sk_case_package() {
   done
   cp "$T_ROOT/tools/lib.sh" "$pkg/tools/"
   cp -R "$T_ROOT/lib" "$pkg/lib"
+  cp -R "$T_ROOT/webroot" "$pkg/webroot"
 
   ( cd "$pkg" && sh build.sh dev ) > "$SK_WORK/pkg.out" 2>&1
   rc=$?
@@ -273,14 +319,44 @@ sk_case_package() {
     for f in $TEST_LIB_FILES; do
       t_has "产物含层文件 $f" "$SK_WORK/pkg.list" " $f"
     done
+    # 结构断言二：页面入口文件确实在产物里，且是清单里那个路径
+    t_has "产物含页面入口 webroot/index.html" "$SK_WORK/pkg.list" " webroot/index.html"
   fi
 
-  # 反向：少一层必须构建失败（半装是最难排查的失败模式）
+  # 反向一：少一层必须构建失败（半装是最难排查的失败模式）
   rm -f "$pkg/lib/api.sh"
   ( cd "$pkg" && sh build.sh dev ) > "$SK_WORK/pkg2.out" 2>&1
   rc=$?
   t_ne "缺一层：构建失败" "$rc" 0
   t_has "缺一层：报出缺的是哪一层" "$SK_WORK/pkg2.out" "缺少 lib/api.sh"
+
+  # 反向二：页面没进包也必须构建失败（「装完点不开」不能等使用者发现）
+  cp "$T_ROOT/lib/api.sh" "$pkg/lib/api.sh"
+  rm -f "$pkg/webroot/index.html"
+  ( cd "$pkg" && sh build.sh dev ) > "$SK_WORK/pkg3.out" 2>&1
+  rc=$?
+  t_ne "页面没进包：构建失败" "$rc" 0
+  t_has "页面没进包：报出缺的是哪个文件" "$SK_WORK/pkg3.out" "webroot/index.html"
+
+  # 反向三：页面里人为引入一条外部链接，构建同样必须失败
+  cp "$T_ROOT/webroot/index.html" "$pkg/webroot/index.html"
+  printf '<link rel="stylesheet" href="ht%s">\n' "tps:${SK_SLASH2}cdn.example.com/a.css" >> "$pkg/webroot/index.html"
+  ( cd "$pkg" && sh build.sh dev ) > "$SK_WORK/pkg4.out" 2>&1
+  rc=$?
+  t_ne "页面引入外部链接：构建失败" "$rc" 0
+  t_has "页面引入外部链接：报出原因" "$SK_WORK/pkg4.out" "外部资源"
+}
+
+sk_case_package() {
+  sk_package_static
+  sk_page_scan_self_check
+
+  if ! command -v zip >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
+    # 跳过不计入通过，避免「本机没跑」被读成「已验证」
+    t_skip "打包产物校验（本机没有 zip/unzip；CI 上会跑）"
+    return 0
+  fi
+  sk_package_build
 }
 
 # ---- 注册（顺序即执行顺序） ----
@@ -291,4 +367,4 @@ t_case "skeleton · base · 日志轮转" sk_case_base_rotate
 t_case "skeleton · 入口 · 缺层时明确失败" sk_case_entry_missing_layer
 t_case "skeleton · 入口 · 装配与命令分发" sk_case_entry_dispatch
 t_case "skeleton · 入口 · 开关文件往返（旧格式仍可读）" sk_case_entry_switch_file
-t_case "skeleton · 打包 · 产物含全部层文件" sk_case_package
+t_case "skeleton · 打包 · 产物含全部层文件与页面入口" sk_case_package

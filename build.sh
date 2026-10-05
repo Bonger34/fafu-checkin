@@ -28,7 +28,19 @@ LIBFILES=$(read_layers "$ROOT")
 
 VER=$(sed -n 's/^version=//p' module.prop | head -n1)
 FILES="module.prop customize.sh service.sh action.sh uninstall.sh fafu_checkin.sh"
-DIRS="lib"
+DIRS="lib webroot"
+PAGE="webroot/index.html"
+
+# ---- 页面资源的结构断言（源树那两条放在打包之前，免得留下一个已经坏掉的 zip） ----
+# 断言一：入口文件在源树里——清单写的路径必须真的存在
+[ -f "$PAGE" ] || { echo "打包失败：源树里没有页面入口文件 $PAGE" >&2; exit 1; }
+# 断言三：页面文本不含任何外部 URL——离线可用是硬要求，判据只有 tools/lib.sh 一份
+PAGE_URLS=$(ext_url_hits "$PAGE")
+if [ -n "$PAGE_URLS" ]; then
+  echo "打包失败：页面引用了外部资源，离线可用是硬要求：" >&2
+  printf '%s\n' "$PAGE_URLS" >&2
+  exit 1
+fi
 
 MODE="$1"
 if [ "$MODE" = "dev" ]; then
@@ -70,7 +82,8 @@ rm -f "$OUT"
 (cd "$SRC" && zip -X -r "$OUT" $FILES $DIRS > /dev/null)
 
 # ---- 校验产物（缺文件即失败，不给「半装」留机会） ----
-ALLFILES="$FILES $LIBFILES"
+# 断言二：页面入口文件确实在产物里，且是清单里那个完整路径（不只看文件名）
+ALLFILES="$FILES $LIBFILES $PAGE"
 LISTING=$(unzip -l "$OUT")
 for f in $ALLFILES; do
   if ! printf '%s\n' "$LISTING" | grep -q " $f\$"; then
@@ -78,7 +91,7 @@ for f in $ALLFILES; do
     exit 1
   fi
 done
-echo "产物校验通过：$(printf '%s' "$ALLFILES" | wc -w) 个文件（含全部层文件）"
+echo "产物校验通过：$(printf '%s' "$ALLFILES" | wc -w) 个文件（含全部层文件与页面入口）"
 
 echo "已生成: dist/$(basename "$OUT") $NOTE"
 echo ""
