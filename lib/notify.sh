@@ -100,7 +100,9 @@ _msg_seen()   { _NT_TITLE="✅ 今日已签到";        _NT_TEXT="$PL 已签到�
 _msg_leave()  { _NT_TITLE="🏖 今日查寝已请假";    _NT_TEXT="$PL 状态为请假，不会自动签到"; }
 _msg_failsign() { _NT_TITLE="⚠️ 查寝签到失败";    _NT_TEXT="$PL 提交失败，仍在重试"; }
 _msg_failtask() { _NT_TITLE="⚠️ 拿不到查寝任务";  _NT_TEXT="$PL 无法获取任务，仍在重试"; }
-_msg_nosign() { _NT_TITLE="⏰ 尚未签到，主窗口还剩 30 分钟"; }
+# 这一档的标题里有个数（还剩多少分钟），故由 signin 层在发之前把提前量放进 _NT_LEAD_MIN；
+# 取不到时回退默认值，标题里因此不再有一个会与实现漂移的写死数字。
+_msg_nosign() { _NT_TITLE="⏰ 尚未签到，主窗口还剩 ${_NT_LEAD_MIN:-30} 分钟"; }
 _msg_late()   { _NT_TITLE="⏰ 主窗口已过，进入补签时段"; }
 _msg_miss()   { _NT_TITLE="❌ 今晚未能自动签到"; }
 _msg_nopub()  { _NT_TITLE="📭 今晚还没查到查寝任务"; }

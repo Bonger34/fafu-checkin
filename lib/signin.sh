@@ -184,13 +184,18 @@ signin_remind_due() { # $1=锚点毫秒 $2=窗口毫秒 $3=当前毫秒
   [ "$n" -lt $((a + w)) ]
 }
 
-# 前 30 分钟那一档：锚点 = 主窗口截止前 30 分钟，窗口就是这 30 分钟。
+# 预警提前量（分钟）：这一档的锚点相对主窗口截止往前挪多久，只有这一处说了算。
+# 标题里那个「还剩 N 分钟」的 N 也由它推出来，避免同一个数在文案里再抄一份。
+signin_remind_lead_min() { echo 30; }
+
+# 主窗口截止前 `提前量` 那一档：锚点 = 主窗口截止往前挪提前量，窗口就是这一段。
 signin_remind_30min() { # $1=主窗口截止毫秒 $2=当前毫秒
-  local a
+  local a lead
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  a=$(( $1 - 1800000 ))
+  lead=$(signin_remind_lead_min)
+  a=$(( $1 - lead * 60000 ))
   [ "$a" -gt 0 ] || return 1
-  signin_remind_due "$a" 1800000 "$2"
+  signin_remind_due "$a" $(( lead * 60000 )) "$2"
 }
 
 # ---- 三条截止提醒：正文由本层按任务数据拼好，经 _NT_TEXT 交给 notify 层 ----
@@ -200,14 +205,17 @@ signin_remind_30min() { # $1=主窗口截止毫秒 $2=当前毫秒
 # 通知带着空正文发出去、rc 却仍是 0。
 # 发一次就够：复用 notify_once 的「当日一次」标记，事件名与标记文件都不新建。
 signin_remind_deadlines() { # $1=补签截止毫秒 $2=主窗口截止毫秒 $3=当前毫秒
-  local dline et now t_close t_due t_sup
+  local dline et now t_close t_due t_sup t_lead
   dline="$1"; et="$2"; now="$3"
   case "$dline$et$now" in ''|*[!0-9]*) return 0 ;; esac
   signin_resolved_today && return 0     # 当日已解决 → 一条都不发
-  # ① 主窗口还剩 30 分钟：锚点就是主窗口截止，文案同时给出「连几点」与「几点关」
+  # ① 主窗口还剩多少分钟：锚点就是主窗口截止，文案同时给出「连几点」与「几点关」。
+  # 标题里那个数也由这里算出来（提前量是常量，写在标题里就成了会漂移的副本）。
   if signin_remind_30min "$et" "$now"; then
-    t_due=$(signin_ms_hm $(( et - 1800000 )))
+    t_lead=$(signin_remind_lead_min)
+    t_due=$(signin_ms_hm $(( et - t_lead * 60000 )))
     t_close=$(signin_ms_hm "$et")
+    _NT_LEAD_MIN="$t_lead"
     _NT_TEXT="$PL $t_due 还没签到，主窗口 $t_close 关闭；现在可在 App 内手动签到"
     notify_once nosign
   fi
