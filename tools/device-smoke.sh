@@ -52,6 +52,34 @@ run() { # $1=命令名：把「时刻 + 退出码 + 输出」记进报告，输�
 ka_count() { grep -ac '保活' "$LOG" 2>/dev/null; }
 # 现在几点（当日第几分钟）：只看当前时刻，不读模块的任何状态
 smoke_now_minutes() { date '+%H %M' | { read -r h m; echo $((h * 60 + m)); }; }
+# 保活窗口的起止（当日第几分钟）：向模块的配置层要，避免在这里再抄一份钟点。
+# 三个细节缺一不可：
+#   ① MODDIR 要先给——base 层靠它定位模块目录，不给就会去猜 $0 的上一级；
+#   ② 配置层与它依赖的环境工具层按依赖方向加载；
+#   ③ 调一次 cfg_load——少了这一句读到的永远是默认值，使用者手改过的窗口会被静默忽略。
+# 旧版模块没有配置层，此时退回当前默认值 07:00 / 21:25——那正是旧版里写死的值。
+smoke_ka_window() { # 输出「起始分钟 结束分钟」
+  local a b
+  a=$(MODDIR="$M" . "$M/lib/base.sh" 2>/dev/null; MODDIR="$M" . "$M/lib/config.sh" 2>/dev/null; \
+      cfg_load 2>/dev/null; cfg_ka_start 2>/dev/null)
+  b=$(MODDIR="$M" . "$M/lib/base.sh" 2>/dev/null; MODDIR="$M" . "$M/lib/config.sh" 2>/dev/null; \
+      cfg_load 2>/dev/null; cfg_ka_end 2>/dev/null)
+  [ -n "$a" ] || a=07:00
+  [ -n "$b" ] || b=21:25
+  printf '%s %s' "$(hm_to_min "$a")" "$(hm_to_min "$b")"
+}
+# HH:MM → 当日第几分钟。**必须剥掉前导零**：`$((08 * 60))` 在 shell 里按八进制解析，
+# 08 / 09 会直接报 arithmetic syntax error（base 层的时间源里有同一处处理）。
+hm_to_min() {
+  local h m
+  h=${1%%:*}; m=${1#*:}
+  h=${h#0}; m=${m#0}
+  [ -n "$h" ] || h=0
+  [ -n "$m" ] || m=0
+  echo $((h * 60 + m))
+}
+# 当日第几分钟 → HH:MM（报告里给使用者看的形态）
+min_to_hm() { printf '%02d:%02d' "$(($1 / 60))" "$(($1 % 60))"; }
 desc_line() { printf '%s\n' "$1" | grep -a '^描述:' | head -n1; }
 # 开关状态只从 `status` 的输出读（运行时状态文件只有 state 层与开机脚本碰，
 # 冒烟脚本不该成为第三个读它的地方——同一个事实两个真源迟早会说法不一）
@@ -201,10 +229,13 @@ if [ "${WAIT_KA:-1000}" -gt 0 ]; then
     WAITED=$((WAITED + 30))
     if [ "$(ka_count)" -gt "$AFTER_KA" ]; then HIT=1; break; fi
   done
+  KA_WIN=$(smoke_ka_window)
+  KA_FROM=${KA_WIN%% *}
+  KA_TO=${KA_WIN##* }
   if [ "$HIT" = "1" ]; then
     ok "第 $((WAITED / 60)) 分钟内出现新的保活记录：$(grep -a '保活' "$LOG" | tail -n 1)"
-  elif [ "$(smoke_now_minutes)" -lt 420 ] || [ "$(smoke_now_minutes)" -ge 1285 ]; then
-    note "不在保活窗口（07:00~21:25）内，等不到新节拍是设计使然"
+  elif [ "$(smoke_now_minutes)" -lt "$KA_FROM" ] || [ "$(smoke_now_minutes)" -ge "$KA_TO" ]; then
+    note "不在保活窗口（起 $(min_to_hm "$KA_FROM")、止 $(min_to_hm "$KA_TO") 不含）内，等不到新节拍是设计使然"
   else
     # 窗口内等了整整一个节拍周期还没有新记录 = 保活没按节拍跑，这必须算失败
     bad "在保活窗口内等了 ${WAIT_KA}s 仍无新的保活记录"
