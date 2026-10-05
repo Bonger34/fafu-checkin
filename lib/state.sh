@@ -5,7 +5,8 @@
 # 这里的函数访问，不自己读写这些文件。
 # 对外提供：svc_is_disabled / svc_set、sign_get / sign_set、signin_resolved_today、
 #   ka_counts / ka_ok_count / ka_fail_count / ka_last_time / ka_last_result / ka_is_today /
-#   ka_note、done_marked / done_mark、notify_marked / notify_mark、nt_cooldown。
+#   ka_note、done_marked / done_mark、task_seen_marked / task_seen_mark、
+#   notify_marked / notify_mark、nt_cooldown。
 # 契约：文件名、字段名、字段顺序与内容格式对使用者可见——升级后不丢当日记录，不要改。
 # 「按日滚动」的三处判定（保活统计、完成标记、通知的「一日一次」）都只在本层发生。
 # ============================================================
@@ -14,21 +15,25 @@ STATE="$MODDIR/fafu-checkin.state"       # 服务开关（enabled / disabled）
 STATUS="$MODDIR/fafu_checkin.status"     # 最近签到记录（动态描述用）
 KASTAT="$MODDIR/fafu_keepalive.status"   # 保活统计（今日成功/失败、最近 token）
 DONE="$MODDIR/.fafu_checkin_done"        # 当日签到完成标记
-# 三个未签时点各自独立标记：共用标记会让先到的那个时点把后面的永久挡住
+# 当日「已取得任务」标记：两个事实共用一份——真的取到了今晚的任务，或已经为此提醒过。
+# 任何一个成立都表示今天不必再为「任务还没发布」打扰，故兜底提醒与它共用去重依据。
+TSEEN="$MODDIR/.fafu_task_seen"
+# 三个未签提醒各自独立标记：共用标记会让先到的那个时点把后面的永久挡住
 NFAIL="$MODDIR/.fafu_notify_fail"        # 当日「失败类通知」已发标记
-NNOSIGN="$MODDIR/.fafu_notify_nosign"    # 22:00 未签提醒已发标记
-NLATE="$MODDIR/.fafu_notify_late"        # 22:30 窗口切换提醒已发标记
-NMISS="$MODDIR/.fafu_notify_miss"        # 23:00 最终未签提醒已发标记
+NNOSIGN="$MODDIR/.fafu_notify_nosign"    # 第一档（主窗口还剩 30 分钟）已发标记
+NLATE="$MODDIR/.fafu_notify_late"        # 第二档（进入补签时段）已发标记
+NMISS="$MODDIR/.fafu_notify_miss"        # 第三档（补签截止）已发标记
 NTLAST="$MODDIR/.fafu_notify_last"       # 打扰型通知的冷却基准（unix 秒）
 
 # 事件名 → 标记文件。文件名与上面逐个对应，不要改（改了等于当天提醒重来一遍）。
-# 事件名由调用方以字面量传入（notify_once 的四种事件），写错等于该类提醒静默失效。
+# 事件名由调用方以字面量传入（notify_once 的各事件），写错等于该类提醒静默失效。
 _state_mark() { # $1=事件名 → 输出该事件的标记文件路径（未知事件输出空）
   case "$1" in
     fail) printf '%s' "$NFAIL" ;;
     nosign) printf '%s' "$NNOSIGN" ;;
     late) printf '%s' "$NLATE" ;;
     miss) printf '%s' "$NMISS" ;;
+    nopub) printf '%s' "$TSEEN" ;;
   esac
 }
 
@@ -116,6 +121,16 @@ done_marked() { # 今天已完成签到
 
 done_mark() { # 记为今天已完成（只写日期，与旧格式一致）
   today | write_atomic "$DONE"
+}
+
+# ---- 当日是否已取得任务（「任务未发布」兜底提醒的去重依据） ----
+# 与通知标记同源：notify_once nopub 成功发送时也会写到这个文件上（_state_mark 指向它）。
+task_seen_marked() { # 今天已经取得过任务（或已经为「还没发布」提醒过）
+  _state_dated "$TSEEN"
+}
+
+task_seen_mark() { # 记为今天已取得任务（真的取到任务之后调用）
+  today | write_atomic "$TSEEN"
 }
 
 # ---- 通知标记 ----

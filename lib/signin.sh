@@ -1,8 +1,10 @@
 # ============================================================
-# signin 层 —— 签到决策：取任务 / 解析任务字段 / 判定该做什么 / 提交并记录
+# signin 层 —— 签到决策：取任务 / 解析任务字段 / 判定该做什么 / 提交并记录 / 到期提醒
 #
 # 加载顺序：第 9 层（用 keepalive 的刷新流程处理失效 token）。
 # 对外提供：run_once（主循环与 once 子命令都调它）、state_text。
+# 提醒也在这里：三条截止提醒按任务数据推算（signin_remind_deadlines），
+# 「任务未发布」兜底挂本地时钟（signin_remind_notask）；判定是纯函数，取数与发送分开。
 # 三档返回码是主循环的动作依据，改这里会坏什么：
 #   0 = 已解决（签到成功 / 已签到 / 已请假）→ 主循环写当日完成标记
 #   1 = 可重试（不在时段、提交失败、任务信息不完整）→ 下一分钟再看
@@ -168,15 +170,110 @@ signin_submit() {
   return 1
 }
 
+# ---- 三条截止提醒：判定是纯函数（判定与取数分开，便于直接喂值断言） ----
+
+# 到点未办完：当前时刻落在 [锚点, 锚点+窗口) 之内 → 返回 0。
+# 窗口是「这一档还成立」的时长：过了它，时间线上已经换了下一档，再喊上一档的文案
+# 就是假话（进程重启、轮询范围偏晚时，三档的锚点会同时满足）。
+signin_remind_due() { # $1=锚点毫秒 $2=窗口毫秒 $3=当前毫秒
+  local a w n
+  a="$1"; w="$2"; n="$3"
+  case "$a$w$n" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$w" -gt 0 ] || return 1
+  [ "$n" -ge "$a" ] || return 1
+  [ "$n" -lt $((a + w)) ]
+}
+
+# 前 30 分钟那一档：锚点 = 主窗口截止前 30 分钟，窗口就是这 30 分钟。
+signin_remind_30min() { # $1=主窗口截止毫秒 $2=当前毫秒
+  local a
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  a=$(( $1 - 1800000 ))
+  [ "$a" -gt 0 ] || return 1
+  signin_remind_due "$a" 1800000 "$2"
+}
+
+# ---- 三条截止提醒：正文由本层按任务数据拼好，经 _NT_TEXT 交给 notify 层 ----
+#
+# 通知层只给标题（模板里不再有任何钟点）；正文先拼成一个普通变量再赋给 _NT_TEXT——
+# notify() 把它交给 su 派生的子 shell 展开，正文里出现引号或命令替换会让引号失配，
+# 通知带着空正文发出去、rc 却仍是 0。
+# 发一次就够：复用 notify_once 的「当日一次」标记，事件名与标记文件都不新建。
+signin_remind_deadlines() { # $1=补签截止毫秒 $2=主窗口截止毫秒 $3=当前毫秒
+  local dline et now t_close t_due t_sup
+  dline="$1"; et="$2"; now="$3"
+  case "$dline$et$now" in ''|*[!0-9]*) return 0 ;; esac
+  signin_resolved_today && return 0     # 当日已解决 → 一条都不发
+  # ① 主窗口还剩 30 分钟：锚点就是主窗口截止，文案同时给出「连几点」与「几点关」
+  if signin_remind_30min "$et" "$now"; then
+    t_due=$(signin_ms_hm $(( et - 1800000 )))
+    t_close=$(signin_ms_hm "$et")
+    _NT_TEXT="$PL $t_due 还没签到，主窗口 $t_close 关闭；现在可在 App 内手动签到"
+    notify_once nosign
+  fi
+  # ② 主窗口已过、进入补签：窗口就是补签时段本身（没有补签时段时不该喊「进入补签」）
+  if signin_remind_due "$et" $(( dline - et )) "$now"; then
+    t_close=$(signin_ms_hm "$et")
+    _NT_TEXT="$PL $t_close 仍未签到，模块会继续自动重试，也可在 App 内手动补签"
+    notify_once late
+  fi
+  # ③ 补签截止：最后一档，没有更晚的档来接管，故窗口给一天（当日去重保证只发一条）
+  if signin_remind_due "$dline" 86400000 "$now"; then
+    t_sup=$(signin_ms_hm "$dline")
+    _NT_TEXT="$PL $t_sup 重试结束仍未签到，请手动处理"
+    notify_once miss
+  fi
+  return 0
+}
+
+# 毫秒时间戳 → HH:MM：任务数据里的钟点只在文案里出现，换算只有这一处。
+# 缺值输出空，调用方据此不写钟点（而不是写一个假的 00:00）。
+signin_ms_hm() { # $1=毫秒时间戳
+  case "$1" in ''|*[!0-9]*) return 0 ;; esac
+  "$BB" date -d "@$(( $1 / 1000 ))" +%H:%M 2>/dev/null
+}
+
+# ---- 「任务未发布」兜底提醒：挂本地时钟，与轮询窗口无关 ----
+# 数据驱动的三条在「任务根本没发布」时永远不会响，而那恰恰是最需要提醒的情形；
+# 这条是唯一能覆盖它的东西。目标时刻 = min(轮询范围止, 23:00)，必然落在轮询范围内。
+signin_notask_target() { # 输出兜底提醒的目标时刻 HH:MM
+  local pe
+  pe=$(cfg_poll_end)
+  if [ "$(hm_minutes "$pe")" -gt "$(hm_minutes 23:00)" ]; then
+    printf '%s' "23:00"
+  else
+    printf '%s' "$pe"
+  fi
+}
+
+# 到点（>=）返回 0：时刻字符串零填充，字典序即时间序
+signin_notask_due() { # $1=当前时刻 HH:MM
+  case "$1" in [0-2][0-9]:[0-5][0-9]) : ;; *) return 1 ;; esac
+  [ ! "$1" \< "$(signin_notask_target)" ]
+}
+
+# 到点且当日未取得任务 → 发一条（当日一次）。发送成功才落标记，故一次瞬时失败还能再试。
+signin_remind_notask() { # $1=当前时刻 HH:MM
+  signin_notask_due "$1" || return 0
+  task_seen_marked && return 0
+  _NT_TEXT="$PL 今晚还没查到查寝任务；若学校已发布，请手动打开 App 看一眼"
+  notify_once nopub
+}
+
 # 一次完整检查（主循环与 once 子命令都调它）：取任务 → 解析字段 → 判定该做什么。
 # signin_fetch 交回「本次使用的 token + 响应体」两行：token 必须一路传到提交，
 # 否则提交会带着空 token 发出去。字段解析只做一次，结果直接交给判定。
 run_once() {
-  local out rc tok resp rid name state bt dline et
+  local out rc tok resp rid name state bt dline et now_ms
   out=$(signin_fetch "$(get_token)"); rc=$?
   [ $rc -eq 0 ] || return $rc
   tok=$(printf '%s\n' "$out" | "$BB" head -n 1)
   resp=$(printf '%s\n' "$out" | "$BB" tail -n 1)
   signin_parse "$resp" rid name state bt dline et || return $?
-  signin_decide "$resp" "$tok" "$rid" "$name" "$state" "$bt" "$dline" "$et"
+  task_seen_mark    # 真的拿到了任务：兜底提醒据此不再打扰（任务没发布是另一回事）
+  now_ms=$(( $(now_s) * 1000 ))
+  signin_decide "$resp" "$tok" "$rid" "$name" "$state" "$bt" "$dline" "$et"; rc=$?
+  # 提醒排在判定之后：这一轮要是签上了，当日状态已经变成已解决，提醒自然不再发
+  signin_remind_deadlines "$dline" "$et" "$now_ms"
+  return $rc
 }

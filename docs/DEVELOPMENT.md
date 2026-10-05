@@ -363,7 +363,9 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 **通知**（`notify_event` / `notify_once` / `notify_warn`，模板见 `_msg_*`，tag 见 `tag_of`）：
 
 - 触发：签到成功 / 补签成功 / 检测到已签到 / 检测到请假 / **当日首次**签到失败 /
-  **当日首次**获取任务失败 / 22:00 与 22:30 与 23:00 未签提醒 / 打开打卡页前的预警
+  **当日首次**获取任务失败 / 三条截止提醒（主窗口还剩 30 分钟、进入补签时段、补签截止，
+  三个时刻都由服务端任务数据推算，文案里的钟点随之生成）/ 到 `min(轮询范围止, 23:00)`
+  仍未取得任务的兜底提醒（挂本地时钟，与轮询窗口无关）/ 打开打卡页前的预警
   （屏幕已亮时必发，与静默路径或兜底唤醒无关）
 - 去重：失败类与未签提醒用标记文件做「一日一次」（失败类的两个事件名共用一个标记）；
   同 tag 的通知相互覆盖（同日同事件不会堆积）
@@ -394,7 +396,8 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 | `fafu_keepalive.status` | 保活统计（今日成功/失败、最近 token） | state 层 `ka_note` |
 | `.fafu_checkin_done` | 当日签到完成标记 | state 层 `done_mark` |
 | `.fafu_notify_fail` | 当日「失败类通知」已发标记（`notify_once` 去重） | state 层 `notify_mark fail` |
-| `.fafu_notify_nosign` / `.fafu_notify_late` / `.fafu_notify_miss` | 22:00 / 22:30 / 23:00 三个未签时点各自的已发标记 | state 层 `notify_mark nosign` / `late` / `miss` |
+| `.fafu_notify_nosign` / `.fafu_notify_late` / `.fafu_notify_miss` | 三条截止提醒各自的已发标记（时刻由任务数据推算，与具体钟点无关） | state 层 `notify_mark nosign` / `late` / `miss` |
+| `.fafu_task_seen` | 当日「已取得任务」标记。它同时是「任务未发布」兜底提醒的已发标记：真的取到任务、或已经为此提醒过，任一成立都表示今天不必再打扰 | state 层 `task_seen_mark` / `notify_mark nopub` |
 | `.fafu_notify_last` | 预警通知冷却基准（unix 秒；必须落盘，见 §2.1.1） | state 层 `nt_cooldown` |
 
 ---

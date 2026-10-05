@@ -390,6 +390,50 @@ DRIVER
   t_eq "通知标记不留临时文件" "$(st_val "$d" tmpleft)" "0"
 }
 
+# ============================================================
+# 五·五、当日「已取得任务」标记（「任务未发布」兜底提醒的去重依据）
+#
+# 两个事实共用一份：真的取到了今晚的任务，或已经为此提醒过。任何一个成立都表示今天
+# 不必再为「任务还没发布」打扰，故兜底提醒的发送标记（事件名 nopub）也落在这个文件上——
+# 它不是第二套机制，而是同一份事实的另一个入口。
+# ============================================================
+
+st_case_task_seen() {
+  local d
+  st_setup
+  st_write_env
+  # 预置一份昨天的标记（旧版本写的）：今天既不该判成「已取得」，也不该被读格式吓到
+  printf '2026-10-02\n' > "$ST_WORK/mod/.fafu_task_seen"
+  st_run taskseen <<'DRIVER'
+{
+  printf 'old=%s\n'  "$(task_seen_marked && echo yes || echo no)"
+  printf 'kept=%s\n' "$(cat "$MODDIR/.fafu_task_seen" | tr '\n' '|')"
+  task_seen_mark
+  printf 'now=%s\n'  "$(task_seen_marked && echo yes || echo no)"
+  printf 'raw=%s\n'  "$(cat "$MODDIR/.fafu_task_seen" | tr '\n' '|')"
+  # 跨日：昨天的「已取得」不该挡住今天的兜底提醒
+  printf '%s\n' '2026-10-04 07:00' > "$MOCK_DATE_CTL"
+  printf 'next=%s\n' "$(task_seen_marked && echo yes || echo no)"
+  printf 'nopub_old=%s\n' "$(notify_marked nopub && echo yes || echo no)"
+  notify_mark nopub
+  printf 'same=%s\n'  "$(ls -a "$MODDIR" | grep -c '^\.fafu_task_seen$')"
+  printf 'nopub_now=%s\n' "$(task_seen_marked && echo yes || echo no)"
+  printf 'notify_files=%s\n' "$(ls -a "$MODDIR" | grep '^\.fafu_notify_' | tr '\n' ' ')"
+} > "$T_WORK/taskseen.txt"
+DRIVER
+
+  d="$ST_WORK/taskseen.txt"
+  t_eq "旧标记（昨天）不算今天已取得任务" "$(st_val "$d" old)" "no"
+  t_eq "判定不修改标记内容" "$(st_val "$d" kept)" "2026-10-02|"
+  t_eq "标记后判为已取得任务" "$(st_val "$d" now)" "yes"
+  t_eq "标记内容为日期 + 换行（与其它当日标记同格式）" "$(st_val "$d" raw)" "2026-10-03|"
+  t_eq "跨日后当日标记不再成立" "$(st_val "$d" next)" "no"
+  t_eq "兜底提醒的标记与它同源（跨日后同样重新可发）" "$(st_val "$d" nopub_old)" "no"
+  t_eq "两份事实共用同一个文件（不另立标记）" "$(st_val "$d" same)" "1"
+  t_eq "兜底提醒落标记后，判为今日已取得任务" "$(st_val "$d" nopub_now)" "yes"
+  t_eq "兜底提醒不占用 .fafu_notify_* 那份文件名空间" "$(st_val "$d" notify_files)" ""
+}
+
 # 每日一次去重：发送失败**不得**落标记（否则一次瞬时失败=整天不再提醒）
 st_case_notify_once() {
   local d
@@ -629,7 +673,7 @@ st_case_desc_trigger() {
 #   service.sh    —— 开机脚本，不加载库层，启动前只读一次开关文件
 st_case_ownership() {
   local pat owners files
-  pat='(^|[^"[:alnum:]_/])(>|>>|cat|grep|read|printf|rm|kill|mv|cp)[[:space:]]+"?\$(STATE|STATUS|KASTAT|DONE|NFAIL|NNOSIGN|NLATE|NMISS|NTLAST)"?'
+  pat='(^|[^"[:alnum:]_/])(>|>>|cat|grep|read|printf|rm|kill|mv|cp)[[:space:]]+"?\$(STATE|STATUS|KASTAT|DONE|TSEEN|NFAIL|NNOSIGN|NLATE|NMISS|NTLAST)"?'
   owners=""
   for f in "$T_ROOT"/*.sh "$T_ROOT"/lib/*.sh; do
     if grep -qE -e "$pat" "$f" 2>/dev/null; then
@@ -647,6 +691,7 @@ st_case_ownership() {
   t_has "state 层持有签到记录文件名" "$T_ROOT/lib/state.sh" 'STATUS="$MODDIR/fafu_checkin.status"'
   t_has "state 层持有保活统计文件名" "$T_ROOT/lib/state.sh" 'KASTAT="$MODDIR/fafu_keepalive.status"'
   t_has "state 层持有完成标记文件名" "$T_ROOT/lib/state.sh" 'DONE="$MODDIR/.fafu_checkin_done"'
+  t_has "state 层持有当日已取得任务标记文件名" "$T_ROOT/lib/state.sh" 'TSEEN="$MODDIR/.fafu_task_seen"'
   t_has "state 层持有失败类通知标记文件名" "$T_ROOT/lib/state.sh" 'NFAIL="$MODDIR/.fafu_notify_fail"'
   t_has "state 层持有冷却基准文件名" "$T_ROOT/lib/state.sh" 'NTLAST="$MODDIR/.fafu_notify_last"'
   t_has "开机脚本仍读开关文件（豁免是有据的）" "$T_ROOT/service.sh" '[ -f "$STATE" ]'
@@ -659,6 +704,7 @@ t_case "state · 签到记录（含旧文件兼容）" st_case_sign
 t_case "state · 保活统计与跨日归零" st_case_keepalive_daily
 t_case "state · 保活统计文件格式" st_case_keepalive_format
 t_case "state · 当日完成标记" st_case_done_mark
+t_case "state · 当日已取得任务标记" st_case_task_seen
 t_case "state · 当日已解决判定" st_case_resolved
 t_case "state · 通知标记与跨日滚动" st_case_notify_marks
 t_case "state · 通知每日一次去重" st_case_notify_once

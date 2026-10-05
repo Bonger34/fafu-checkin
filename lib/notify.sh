@@ -3,7 +3,7 @@
 #
 # 加载顺序：第 6 层。通知是纯增量能力：任何失败都不得影响签到主流程。
 # 业务层只报**事件名**（sign / supp / seen / leave / failsign / failtask / nosign /
-# late / miss），tag 与文案都由本层的两张表查出来；新增一条通知要动三处
+# late / miss / nopub），tag 与文案都由本层的两张表查出来；新增一条通知要动三处
 # （事件表、tag 表、_msg_* 文案），但都只在这一个文件里，漏写会被断言报红。
 # 对外提供：probe_su / notify_event / notify_once / notify_warn / notify_lead / tag_of。
 # 配置：开关与阈值都经配置层的 cfg_notify / cfg_notify_lead / cfg_notify_cooldown 取值。
@@ -25,8 +25,12 @@ _NT_TEXT=""               # 通知正文；留空则复用标题
 _NT_TPL_sign=sign;         _NT_TPL_supp=supp;         _NT_TPL_seen=seen
 _NT_TPL_leave=leave;       _NT_TPL_failsign=failsign; _NT_TPL_failtask=failtask
 _NT_TPL_nosign=nosign;     _NT_TPL_late=late;         _NT_TPL_miss=miss
+_NT_TPL_nopub=nopub
 _NT_MARK_failsign=fail;    _NT_MARK_failtask=fail
 _NT_MARK_nosign=nosign;    _NT_MARK_late=late;        _NT_MARK_miss=miss
+# 兜底提醒（任务未发布）复用 state 层当日的「已取得任务」标记：真的取到任务时它是
+# 「今天不用再问」，兜底发出去时它是「今天已经提醒过」——同一份事实，故不另立标记。
+_NT_MARK_nopub=nopub
 # 落盘状态（每日标记、冷却基准）归 state 层：本层只经 notify_marked / notify_mark /
 # nt_cooldown 访问。冷却基准必须落盘——refresh_token 总在 $( ) 子 shell 里被调用，
 # 普通变量活不过那个子 shell，冷却会永远不生效。
@@ -40,7 +44,7 @@ tag_of() { # $1=事件名 → 事件对应的 tag 后缀（未知事件输出空
     seen)   echo sign ;;
     nosign) echo t2200 ;;
     late)   echo t2230 ;;
-    sign|supp|leave|failsign|failtask|miss|warn|test) echo "$1" ;;
+    sign|supp|leave|failsign|failtask|miss|nopub|warn|test) echo "$1" ;;
   esac
 }
 
@@ -86,19 +90,20 @@ probe_su() {
   return 0
 }
 
-# ---- 签到 / 通知文案模板（正文不含引号与命令替换，可安全直接展开） ----
+# ---- 签到 / 通知文案模板 ----
+# 正文不含引号与命令替换，可安全交给 su 派生的子 shell 展开。
+# 四条提醒（三条截止 + 任务未发布）**只给标题**：正文里的钟点由 signin 层按任务数据
+# 算好后经 _NT_TEXT 传入，在这里再写一遍就等于又把它写死了。
 _msg_sign()   { _NT_TITLE="✅ 查寝签到成功";      _NT_TEXT="$PL 已签到（晚查寝签到）"; }
 _msg_supp()   { _NT_TITLE="🕘 已补签";            _NT_TEXT="$PL 补签成功"; }
 _msg_seen()   { _NT_TITLE="✅ 今日已签到";        _NT_TEXT="$PL 已签到（晚查寝签到）"; }
 _msg_leave()  { _NT_TITLE="🏖 今日查寝已请假";    _NT_TEXT="$PL 状态为请假，不会自动签到"; }
-_msg_failsign() { _NT_TITLE="⚠️ 查寝签到失败";    _NT_TEXT="$PL 提交失败，仍在重试（22:59 前有效）"; }
+_msg_failsign() { _NT_TITLE="⚠️ 查寝签到失败";    _NT_TEXT="$PL 提交失败，仍在重试"; }
 _msg_failtask() { _NT_TITLE="⚠️ 拿不到查寝任务";  _NT_TEXT="$PL 无法获取任务，仍在重试"; }
-_msg_nosign() { _NT_TITLE="⏰ 尚未签到，主窗口还剩 30 分钟"
-                _NT_TEXT="$PL 22:00 还没签到，主窗口 22:30 关闭；现在可在 App 内手动签到"; }
-_msg_late()   { _NT_TITLE="⏰ 主窗口已过，进入补签时段"
-                _NT_TEXT="$PL 22:30 仍未签到，模块会继续自动重试，也可在 App 内手动补签"; }
-_msg_miss()   { _NT_TITLE="❌ 今晚未能自动签到"
-                _NT_TEXT="$PL 23:00 重试结束仍未签到，请手动处理"; }
+_msg_nosign() { _NT_TITLE="⏰ 尚未签到，主窗口还剩 30 分钟"; }
+_msg_late()   { _NT_TITLE="⏰ 主窗口已过，进入补签时段"; }
+_msg_miss()   { _NT_TITLE="❌ 今晚未能自动签到"; }
+_msg_nopub()  { _NT_TITLE="📭 今晚还没查到查寝任务"; }
 
 # ---- 发送 ----
 # cmd notification post 的能力被 AOSP 限死（改这里会坏什么）：通知 id 恒为 2020，只能靠
