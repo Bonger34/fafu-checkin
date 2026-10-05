@@ -140,7 +140,7 @@ case "$PROBE_LINE" in
   *) note "日志里还没有降权探测记录" ;;
 esac
 
-sect "2 · 四条手动命令"
+sect "2 · 六条手动命令（只读 + 会改开关的那条）"
 BEFORE_KA=$(ka_count)
 run status
 STATUS_OUT="$OUT_LAST"
@@ -149,6 +149,23 @@ has "$STATUS_OUT" "服务:" "status：有服务状态"
 has "$STATUS_OUT" "描述:" "status：有描述预览"
 expect "$STATUS_OUT" "token: 有效" "status：token 可用"
 forbid "$STATUS_OUT" "未找到（应用未安装或未登录过）" "status：没有落到「未找到 token」"
+
+# webstate 是配置页读数据的那条路（只读）：字段齐不齐、有没有吐出凭证明文都在这里先看
+run webstate
+WS_OUT="$OUT_LAST"
+for k in service sign_state sign_time ka_ok ka_fail ka_last ka_last_result token_state version keepalive poll_start poll_end notify notify_lead notify_cooldown; do
+  case "$WS_OUT" in
+    *"$k="*) : ;;
+    *) bad "webstate：缺少字段 $k" ;;
+  esac
+done
+has "$WS_OUT" "service=" "webstate：有服务开关"
+has "$WS_OUT" "poll_start=" "webstate：有轮询范围（配置生效值）"
+TOK_FULL=$(sed -n 's/^token: //p' "$STATUS_OUT" 2>/dev/null)
+case "$TOK_FULL" in
+  ""|*"未找到"*) : ;;
+  *) forbid "$WS_OUT" "$TOK_FULL" "webstate：不吐凭证明文（只有有效性）" ;;
+esac
 
 run notify
 expect "$OUT_LAST" "已发送" "notify：通知已交给系统发送"
@@ -244,7 +261,27 @@ else
   say "（WAIT_KA=0，跳过 15 分钟节拍等待）"
 fi
 
-sect "6 · 日志（最近 40 行）"
+sect "6 · setconfig 往返（写入闸门；不改变任何配置值）"
+# 「改配置」本身不适合由冒烟脚本代劳（它会真的改变模块行为），所以这里只走一次
+# **无副作用的往返**：把当前生效值原样交给写入闸门 → 断言它接受、并回显同一套值。
+# 校验先于落盘这条链因此也被真机走了一遍；失败时给出可读原因（这正是页面要显示的东西）。
+WS_KEYS=""
+for k in KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN; do
+  v=$(printf '%s\n' "$WS_OUT" | sed -n "s/^$(printf '%s' "$k" | tr 'A-Z' 'a-z')=//p")
+  [ -n "$v" ] || v=$(printf '%s\n' "$(sh "$E" webstate 2>/dev/null)" | sed -n "s/^$(printf '%s' "$k" | tr 'A-Z' 'a-z')=//p")
+  WS_KEYS="$WS_KEYS $k=$v"
+done
+if [ -n "$(printf '%s' "$WS_KEYS" | tr -d ' ')" ]; then
+  run setconfig $WS_KEYS
+  SET_OUT="$OUT_LAST"
+  has "$SET_OUT" "KEEPALIVE=" "setconfig：回显全部键的生效值"
+  has "$SET_OUT" "POLL_START=" "setconfig：回显含轮询范围"
+  forbid "$SET_OUT" "不合法|未登记的配置键|必须早于" "setconfig：当前生效值被闸门接受"
+else
+  note "读不到生效值，跳过 setconfig 往返"
+fi
+
+sect "7 · 日志（最近 40 行）"
 tail -n 40 "$LOG" 2>/dev/null | sed 's/^/    /'
 say "    （完整日志：$LOG）"
 
