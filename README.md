@@ -380,8 +380,8 @@ sh build.sh dev      # 开发构建 → dist/fafu-checkin-<版本>-dev.<commit>.
 
 | 命令 | 产物名 | 用途 |
 |---|---|---|
-| `sh build.sh` | `fafu-checkin-v1.2.0.zip` | **发布**（文件名与 `update.json` 的 `zipUrl` 对应） |
-| `sh build.sh dev` | `fafu-checkin-v1.2.0-dev.5c1a6a4.zip` | **日常测试**（带 commit 标识，可追溯） |
+| `sh build.sh` | `fafu-checkin-<版本>.zip` | **发布**（文件名与 `update.json` 的 `zipUrl` 对应） |
+| `sh build.sh dev` | `fafu-checkin-<版本>-dev.5c1a6a4.zip` | **日常测试**（带 commit 标识，可追溯） |
 
 CI 的自动构建使用 **dev 模式**：Actions 产物（artifact）名为 `fafu-checkin-dev-<短commit>`，
 里面的 zip 仍是 `fafu-checkin-<版本>-dev.<短commit>.zip`，便于在多次 push 之间区分；
