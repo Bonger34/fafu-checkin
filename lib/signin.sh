@@ -5,6 +5,8 @@
 # 对外提供：run_once（主循环与 once 子命令都调它）、state_text。
 # 提醒也在这里：三条截止提醒按任务数据推算（signin_remind_deadlines），
 # 「任务未发布」兜底挂本地时钟（signin_remind_notask）；判定是纯函数，取数与发送分开。
+# 失败原因也在这里落痕：提交失败的日志除 rc 外还带 api 层落好的 wget 报错正文
+# （HTTP 状态码 / 连接失败 / 超时，见 api 层的 API_ERRLOG / _api_err1）。
 # 三档返回码是主循环的动作依据，改这里会坏什么：
 #   0 = 已解决（签到成功 / 已签到 / 已请假）→ 主循环写当日完成标记
 #   1 = 可重试（不在时段、提交失败、任务信息不完整）→ 下一分钟再看
@@ -166,13 +168,19 @@ signin_decide() { # $1=响应体 $2=token $3=任务号 $4=名称 $5=状态 $6=�
   signin_submit "$rid" "$name" "$dline" "$et" "$lng" "$lat" "$now" "$token"
 }
 
+# ---- 失败原因留痕：借用 api 层落好的那份（本层不自己收 stderr） ----
+# 提交失败时唯一能定性的一句话（HTTP 状态码 / 连接失败 / 超时）来自 wget 的报错正文，
+# 由 api 层在失败时落进 API_ERRLOG 并转交。不把它写进日志，失败就只剩一个退出码。
+
 # 提交并记录：$1=任务号 $2=名称 $3=补签截止 $4=主窗口截止 $5=经度 $6=纬度 $7=当前时间(毫秒)
 # $8=token。提交失败当日仅首次通知（之后的重试只写日志），返回 1；
 # 成功按「主窗口截止早于当前时间」区分主窗口签到与补签，返回 0。
 signin_submit() {
-  local rid name dline et lng lat now token resp rc newt td hm ok
+  local rid name dline et lng lat now token resp rc newt td hm ok faildiag
   rid="$1"; name="$2"; dline="$3"; et="$4"
   lng="$5"; lat="$6"; now="$7"; token="$8"
+  # 失败原因由 api 层落好（API_ERRLOG）：**不要**在这里重定向 api 的 stderr 去收，
+  # 那会把 `set -x` 追踪与子命令的提示行一起收进来，首行未必是那句报错。
   resp=$(api "sign_in/$rid/student/sign" "lng=$lng&lat=$lat" "$token"); rc=$?
   if [ "$rc" != "0" ]; then
     newt=$(refresh_token "$token"); [ -n "$newt" ] && token="$newt"
@@ -202,8 +210,16 @@ signin_submit() {
     update_desc
     return 0
   fi
-  # 签到提交失败：当日仅首次通知（之后的重试只写日志，避免刷屏）
-  log "签到失败: rc=$rc $(echo "$resp" | "$BB" head -c 120)"
+  # 签到提交失败：当日仅首次通知（之后的重试只写日志，避免刷屏）。
+  # 日志里必须带上失败原因——rc 只说「失败了」，原因（HTTP 状态码 / 连接失败 / 超时）
+  # 只在 api 层落好的那句报错正文里；两者都留，事后才分得清是哪一类。
+  # 原因取不到时（假的 wget / 极老的 busybox 不吐报错）不留一个空档，日志回到旧格式。
+  faildiag=$(_api_err1 "$API_ERRLOG")
+  if [ -n "$faildiag" ]; then
+    log "签到失败: rc=$rc $faildiag $(echo "$resp" | "$BB" head -c 120)"
+  else
+    log "签到失败: rc=$rc $(echo "$resp" | "$BB" head -c 120)"
+  fi
   notify_once failsign
   return 1
 }

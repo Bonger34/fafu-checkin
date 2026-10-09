@@ -5,8 +5,9 @@
 #   1) 行为：token 按文件修改时间取最新那次登录；签名串是
 #      base64(时间戳:随机数:MD5(密钥+签名URL+时间戳+随机数):token)；失败只看退出码；
 #   2) 缝：全程序只有 http_post() 一处真正发起网络请求——断言里覆盖同名函数即可
-#      注入响应体 / 失败 / 超时；真实命令行（含超时选项探测）与被丢弃的 stderr
-#      在同一个缝上用替身 busybox 断言（tests/mock/busybox 的 MOCK_WGET_DIR）；
+#      注入响应体 / 失败 / 超时；真实命令行（含超时选项探测）与失败时报错正文的
+#      转交（成功静默 / 失败转 stderr）在同一个缝上用替身 busybox 断言
+#      （tests/mock/busybox 的 MOCK_WGET_DIR）；
 #   3) 不变：调用点的请求路径、查询参数与请求头逐字钉住（静态断言）。
 #
 # 断言直接加载真实的层文件（tests/harness.sh 的 TEST_LIB_FILES），不抽源码片段、不绑行号。
@@ -284,7 +285,8 @@ DRIVER
 # 四、真实网络层交给系统执行的命令行（含 wget 超时选项的探测）
 #
 # 替身 busybox 把 wget 拦下来记录参数并给出响应；探测结果由 wget/help 的内容决定，
-# 于是「支持 -T」与「不支持 -T」两条路径都能在这里跑出来。
+# 于是「支持 -T」与「不支持 -T」两条路径都能在这里跑出来。同一个替身顺带覆盖
+# 「失败原因转交」：成功时 stderr 静默，失败时把 wget 的报错正文交给调用方。
 # ============================================================
 
 ap_case_wget_cmd() {
@@ -293,15 +295,24 @@ ap_case_wget_cmd() {
   ap_write_env
   cat > "$AP_WORK/_wget_body.sh" <<'DRIVER'
 : > wget/calls                          # 每次运行只留本次调用（两次运行共用这一份记录）
-printf '%s' 'RESP-BODY-1' > wget/body
+printf 'RESP-BODY-1' > wget/body
+: > wget/stderr                         # 成功档：wget -q 是安静的
 printf '7' > wget/rc
-printf 'wget: 报错正文不该出现在调用方 stderr\n' > wget/stderr
 resp=$(http_post "http://host/health-api/x?q=1" "AUTH-VALUE"); rc=$?
 printf 'rc=%s\n' "$rc"
 printf 'body=%s\n' "$resp"
 printf 'wget_t=[%s]\n' "$WGET_T"
 printf 'cmd=%s\n' "$(cat wget/calls)"
 printf 'calls=%s\n' "$(grep -c . wget/calls)"
+printf 'ok_errlog=[%s]\n' "$(cat "$API_ERRLOG" 2>/dev/null)"
+# 失败档：报错正文必须落到 API_ERRLOG 上，并由 api 在确认失败后转交出来
+printf 'wget: server returned error: HTTP/1.1 503 Service Unavailable\n' > wget/stderr
+: > wget/body
+http_post "http://host/health-api/x?q=1" "AUTH-VALUE" >/dev/null
+printf 'fail_errlog=%s\n' "$(cat "$API_ERRLOG" 2>/dev/null)"
+resp=$(api "sign_in/7/student/sign" "lng=1&lat=2" "TOK" 2>ap.captured); rc=$?
+printf 'api_rc=%s\n' "$rc"
+printf 'api_stderr=%s\n' "$(cat ap.captured)"
 DRIVER
 
   # ① 探测到 -T：命令行带上超时选项（参数逐个比对，边界不清的拼接串证明不了什么）
@@ -309,11 +320,16 @@ DRIVER
   d="$AP_WORK/wget_t.out"
   t_eq "网络层退出码原样返回（7）" "$(ap_val "$d" rc)" "7"
   t_eq "响应体原样返回" "$(ap_val "$d" body)" "RESP-BODY-1"
+  t_eq "成功时没有过时内容可读（成功不写诊断文件）" "$(ap_val "$d" ok_errlog)" "[]"
+  t_eq "失败时报错正文落到诊断文件（唯一的原因线索）" \
+    "$(ap_val "$d" fail_errlog)" "wget: server returned error: HTTP/1.1 503 Service Unavailable"
+  t_eq "失败时 api 把原因转交出去（调用方读 stderr 即得）" \
+    "$(ap_val "$d" api_stderr)" "wget: server returned error: HTTP/1.1 503 Service Unavailable"
+  t_eq "转交不吞掉返回码（仍是替身给的那个非 0 值）" "$(ap_val "$d" api_rc)" "7"
   t_eq "探测到 -T：超时选项就位" "$(ap_val "$d" wget_t)" "[-T 20]"
   t_eq "命令行与既有调用点逐字一致（含超时选项、请求头、POST 语义）" "$(ap_val "$d" cmd)" \
     'wget|-q|-T|20|-O|-|--header=Authorization: AUTH-VALUE|--post-data=|http://host/health-api/x?q=1|'
   t_eq "一次调用只发一次请求" "$(ap_val "$d" calls)" "1"
-  t_hasnt "wget 的报错正文被 2>/dev/null 吞掉（不进调用方 stderr）" "$AP_WORK/wget_t.err" "报错正文"
 
   # ② 探测不到 -T：同一份代码必须自动省略，其余逐字不变
   printf 'BusyBox v1.35.0 wget（这个构建没启用超时选项）\n' > "$AP_WORK/wget/help"
@@ -356,8 +372,10 @@ ap_case_boundary() {
   # 失败判定以退出码为准：每个调用点都在调完之后立刻取退出码。
   # （响应体的形状只用于判断「取到的是不是任务列表」，不是失败判据；签到层怎么分流
   # 由它自己的断言覆盖，这里只守住「退出码没有被丢掉」。）
+  # 允许调用点把 stderr 重定向到文件或变量（失败原因留痕用的就是它），
+  # 但**必须紧跟着取退出码**——否则调用方拿到的是别人的返回码。
   n_api=$(grep -cE -e '\$\(api "' "$src" 2>/dev/null)
-  n_rc=$(grep -cE -e '\$\(api "[^"]*" "[^"]*" "[^"]*"\); rc=\$\?' "$src" 2>/dev/null)
+  n_rc=$(grep -cE -e '\$\(api "[^"]*" "[^"]*" "[^"]*"( 2>[^)]*)?\); rc=\$\?' "$src" 2>/dev/null)
   t_ne "调用点数量不为零（否则下面的等式会空转）" "$n_api" "0"
   t_eq "每个 api 调用点都立刻取退出码" "$n_rc" "$n_api"
 

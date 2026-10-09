@@ -35,15 +35,39 @@ mk_auth() { # $1=签名 URL（不含查询串） $2=token → base64(时间戳:�
   printf '%s' "${ts}:${nonce}:${hash}:$2" | "$BB" base64 | "$BB" tr -d '\n'
 }
 
+# ---- 失败原因留痕（本层最靠近 wget，故由本层收集） ----
+# 为什么不让调用方重定向 stderr 去收：**api 函数体内的任何 stderr 都会被收进去**——
+# shell 的 `set -x` 追踪、子命令的提示行都会混进来，首行因此可能是 `+ local url`
+# 而不是那一句报错。所以由 http_post 自己落文件，api 在**确认失败**后才读它并转交；
+# 成功时不读也不写，没有过时内容的问题。
+API_ERRLOG="$MODDIR/.fafu_api.err"
+
+# 取报错正文的第一行（wget 的报错是一行，可能夹着 busybox 的多余提示行）
+_api_err1() { # $1=文件
+  "$BB" head -n 1 "$1" 2>/dev/null | "$BB" tr -d '\r\n'
+}
+
 # 网络调用：全程序唯一的出口（$1=完整 URL $2=Authorization 头值）。
 # 输出响应体，返回 wget 退出码——调用方据此判定失败，不要去 grep 响应体。
+# 失败时报错正文落到 API_ERRLOG（由 api 转交，见下）：wget 失败时响应体为空，
+# **唯一的原因线索就是这句报错**（形如 `wget: server returned error: HTTP/1.1 500 ...`），
+# 丢了它，日志里就只剩一个退出码，事后分不出是哪一类失败。
 http_post() {
-  "$BB" wget -q $WGET_T -O - --header="Authorization: $2" --post-data='' "$1" 2>/dev/null
+  # 先清空：万一这次失败没吐出报错，文件里不会留着上一次的报错被当成这次的原因
+  : > "$API_ERRLOG" 2>/dev/null
+  "$BB" wget -q $WGET_T -O - --header="Authorization: $2" --post-data='' "$1" \
+    2>>"$API_ERRLOG"
 }
 
 api() { # $1=path $2=查询串（可空） $3=token → 输出响应体；返回 wget 退出码
-  local url
+  local url rc
   url="$API/$1"
   [ -n "$2" ] && url="$url?$2"
   http_post "$url" "$(mk_auth "$API/$1" "$3")"   # 签名 URL 不含查询串
+  rc=$?
+  # 失败才转交原因，且**不改变返回码语义**：调用方拿到的仍是 wget 的退出码
+  if [ "$rc" != "0" ]; then
+    "$BB" printf '%s\n' "$(_api_err1 "$API_ERRLOG")" >&2
+  fi
+  return "$rc"
 }

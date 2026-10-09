@@ -157,6 +157,13 @@ http_post() {
   esac
   printf '%s\n' "\$_m" > ctl/last
   cat "ctl/body.\$_app" 2>/dev/null
+  # 失败档：像真实 wget 那样给出一句报错，但要落在 api 层的 API_ERRLOG 上——
+  # 真机上那句报错是 wget 直接写进这个文件的（api 层读它才拿得到失败原因），
+  # 打到 stderr 不等于它会被读到（调用链上没人收 stderr）。
+  # 成功档一个字都不吐：真实 wget 成功时也是安静的。
+  if [ "\${_rc:-0}" != "0" ]; then
+    [ -n "\${API_ERRLOG:-}" ] && cat ctl/wget.err > "\$API_ERRLOG" 2>/dev/null
+  fi
   return "\${_rc:-0}"
 }
 # 观察面：谁被通知了、描述刷没刷新、token 刷没刷新。
@@ -930,6 +937,63 @@ DRIVER
     "$(sg_val "$SG_WORK/remind_resolved_ctl.out" miss)" "1"
 }
 
+# ============================================================
+# 十一、提交失败的原因必须留痕
+#
+# 失败日志不能只有「rc + 空正文」：busybox wget 失败时响应体为空，唯一的原因线索
+# （wget 的报错正文）要是也丢了，事后就分不出「服务端拒绝」「连接失败」「超时」。
+# 这一节把「原因能分清」钉成断言：同一种失败模式下，日志要能读出 HTTP 状态码。
+# ============================================================
+
+sg_case_fail_reason() {
+  local d
+  sg_setup fail-reason
+  sg_at 1290                                  # 21:30，窗口刚开——提交失败最容易发生的一刻
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"   # 服务端说：任务在窗口内、你还没签
+  : > "$SG_WORK/ctl/body.sign"                # 失败档正文为空（busybox wget 拿不到错误正文）
+
+  # ① 服务端拒绝：rc=1、正文空，原因只在 wget 的报错正文里
+  printf 'wget: server returned error: HTTP/1.1 500 Internal Server Error\n' > "$SG_WORK/ctl/wget.err"
+  printf 'sign:1\n' > "$SG_WORK/ctl/api.seq"
+  sg_run fail_500 <<'DRIVER'
+signin_submit 88123 "晚查寝签到" 1790866800000 1790865000000 119.243462 26.088417 1790861400000 TOK >/dev/null 2>&1
+printf 'rc=%s\n' "$?"
+DRIVER
+  d="$SG_WORK/fail_500.out"
+  t_eq "服务端拒绝：返回 1（下一分钟重试）" "$(sg_val "$d" rc)" "1"
+  t_has "服务端拒绝：日志留住了 HTTP 状态码（这是唯一能定性的一处）" \
+    "$SG_WORK/mod/fafu_checkin.log" "HTTP/1.1 500"
+
+  # ② 换一个状态码：同一份代码要能分出是哪一个（403 与 500 不是一回事）
+  sg_setup fail-reason-403
+  sg_at 1290
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"
+  : > "$SG_WORK/ctl/body.sign"
+  printf 'wget: server returned error: HTTP/1.1 403 Forbidden\n' > "$SG_WORK/ctl/wget.err"
+  printf 'sign:1\n' > "$SG_WORK/ctl/api.seq"
+  sg_run fail_403 <<'DRIVER'
+signin_submit 88123 "晚查寝签到" 1790866800000 1790865000000 119.243462 26.088417 1790861400000 TOK >/dev/null 2>&1
+printf 'rc=%s\n' "$?"
+DRIVER
+  t_has "另一个状态码：日志同样留痕（403 与 500 能分开）" \
+    "$SG_WORK/mod/fafu_checkin.log" "HTTP/1.1 403"
+
+  # ③ 超时：退出码与「服务端拒绝」不同（143 对 1），两者不该在日志里长得一样
+  sg_setup fail-reason-timeout
+  sg_at 1290
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"
+  : > "$SG_WORK/ctl/body.sign"
+  printf 'wget: download timed out\n' > "$SG_WORK/ctl/wget.err"
+  printf 'sign:143\n' > "$SG_WORK/ctl/api.seq"
+  sg_run fail_timeout <<'DRIVER'
+signin_submit 88123 "晚查寝签到" 1790866800000 1790865000000 119.243462 26.088417 1790861400000 TOK >/dev/null 2>&1
+printf 'rc=%s\n' "$?"
+DRIVER
+  t_has "超时：日志里的退出码与「服务端拒绝」不同（143 ≠ 1）" \
+    "$SG_WORK/mod/fafu_checkin.log" "签到失败: rc=143"
+  t_has "超时：报错正文同样留痕" "$SG_WORK/mod/fafu_checkin.log" "download timed out"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "signin · 时钟与夹具自证" sg_case_clock
@@ -951,3 +1015,4 @@ t_case "signin · token 失效后刷新重试" sg_case_token_refresh
 t_case "signin · 判定链与主循环分支（静态）" sg_case_boundary
 t_case "signin · 截止提醒的判定（纯函数）" sg_case_remind_due
 t_case "signin · 三条截止提醒按任务数据各发一次" sg_case_remind_events
+t_case "signin · 提交失败的原因留在日志里（HTTP 状态码 / 超时）" sg_case_fail_reason
