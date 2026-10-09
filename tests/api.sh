@@ -23,22 +23,44 @@ AP_LD="./ld"
 AP_WGDIR="./wget"
 
 # 每个用例自备环境：替身 busybox + leveldb 替身目录 + wget 的四个控制文件。
-# wget 控制文件：help 决定 -T 探测结果，body / rc / stderr 决定一次调用的产物。
+# curl 替身放在 ./bin（PATH 首位），两个控制文件决定它的行为：
+#   curl_code HTTP 状态码（替身把它附在响应体之后，与真实 curl 的 -w 一致）
+#   curl_body 响应体
+# 于是「curl 优先」与「wget 兜底」两条路径都能在这里跑出来（删掉 ./bin/curl 即走兜底）。
 ap_setup() {
   rm -rf "$AP_WORK"
-  mkdir -p "$AP_WORK/mod" "$AP_WORK/ld" "$AP_WORK/wget"
+  mkdir -p "$AP_WORK/mod" "$AP_WORK/ld" "$AP_WORK/wget" "$AP_WORK/bin"
   t_bb_wrap "$AP_WORK/bin/bb" >/dev/null
   printf 'BusyBox v1.35.0 wget\n\t-T SEC\tNetwork timeout\n' > "$AP_WORK/wget/help"
   : > "$AP_WORK/wget/body"
   printf '0\n' > "$AP_WORK/wget/rc"
   : > "$AP_WORK/wget/calls"
   printf '0\n' > "$AP_WORK/rand.seq"     # 随机数替身的序号：两次调用必须给出不同的值
+  printf '200\n' > "$AP_WORK/curl_code"  # 缺省成功
+  : > "$AP_WORK/curl_body"
+  : > "$AP_WORK/curl_calls"
+  # 默认走 wget 兜底：既有断言（命令行逐字比对等）钉的就是那条路。
+  # 要测 curl 路径的用例自己删掉这个标记。
+  : > "$AP_WORK/mod/.fafu_no_curl"
+  cat > "$AP_WORK/bin/curl" <<'CURLSTUB'
+#!/bin/sh
+# curl 替身：只认探测与一次 POST 调用。真实 curl 用 -w '\n%{http_code}' 把状态码
+# 附在响应体之后，替身照做（否则「状态码与正文怎么切分」这条逻辑就测不到）。
+for _a in "$@"; do
+  [ "$_a" = "--version" ] && { echo "curl 8.0.0"; exit 0; }
+done
+{ for _a in "$@"; do printf '%s|' "$_a"; done; printf '\n'; } >> curl_calls 2>/dev/null
+cat curl_body 2>/dev/null
+printf '\n%s\n' "$(cat curl_code 2>/dev/null | tr -dc '0-9')"
+exit 0
+CURLSTUB
+  chmod +x "$AP_WORK/bin/curl" 2>/dev/null
 }
 
 # 驱动脚本的公共前导：注入替身 busybox、token 目录与 wget 控制目录，再按加载顺序加载层。
 ap_write_env() {
   cat > "$AP_WORK/_env.sh" <<ENV
-PATH='/bin:/usr/bin'
+PATH='./bin:/bin:/usr/bin'
 T_ROOT='$T_ROOT'
 T_WORK='$AP_WORK'
 MODDIR='$AP_MODDIR'
@@ -68,7 +90,8 @@ ap_run() {
   fi
 }
 
-# 从驱动输出里取一行（形如 key=value）
+# 从驱动输出里取一行（形如 key=value）。键按整键匹配（^ 锚行首），
+# 避免 ok_rc= 这类前缀行被当成 ok 命中。
 ap_val() { # $1=文件 $2=键
   grep "^$2=" "$1" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d '\r\n'
 }
@@ -339,6 +362,57 @@ DRIVER
   t_eq "探测不到 -T：命令行自动省略（其余逐字不变）" "$(ap_val "$d" cmd)" \
     'wget|-q|-O|-|--header=Authorization: AUTH-VALUE|--post-data=|http://host/health-api/x?q=1|'
   t_hasnt "探测不到 -T：命令行里不再出现 -T" "$d" "|-T|"
+
+  # ③ curl 路径：正文与状态码必须能正确切分，失败时两样都进诊断文件。
+  # 每个驱动都从 _env.sh 起跑（那里已把标记建好），故驱动自己删标记再显式指定工具。
+  ap_run curl_path <<'DRIVER'
+rm -f mod/.fafu_no_curl
+CURL_BIN='./bin/curl'
+printf '503\n' > curl_code
+printf '%s' '{"timestamp":1,"status":503,"message":"Service Unavailable"}' > curl_body
+: > curl_calls
+resp=$(http_post "http://host/health-api/x?q=1" "AUTH-VALUE"); rc=$?
+printf 'rc=%s\n' "$rc"
+printf 'body=[%s]\n' "$resp"
+printf 'errlog=[%s]\n' "$(cat "$API_ERRLOG" 2>/dev/null)"
+printf 'calls=%s\n' "$(grep -c . curl_calls)"
+printf 'argv=%s\n' "$(cat curl_calls)"
+printf '200\n' > curl_code
+printf '%s' '{"records":[{"id":7}]}' > curl_body
+resp=$(http_post "http://host/health-api/x?q=1" "AUTH-VALUE"); rc=$?
+printf 'ok_rc=%s\n' "$rc"
+printf 'ok_body=[%s]\n' "$resp"
+DRIVER
+  d="$AP_WORK/curl_path.out"
+  t_eq "curl 路径：状态码 503 判成失败" "$(ap_val "$d" rc)" "1"
+  t_eq "curl 路径：失败响应体不作正常结果交出去" "$(ap_val "$d" body)" "[]"
+  t_has "curl 路径：诊断文件里同时有状态码与正文" "$d" 'errlog=[http=503 {"timestamp":1,"status":503,"message":"Service Unavailable"}]'
+  t_eq "curl 路径：成功返回 0" "$(ap_val "$d" ok_rc)" "0"
+  # 断言「状态码那一行被剥掉」这件事本身，不去比对取值的尾字符——
+  # printf 的收尾括号在不同 shell 下会落到同行的不同位置（$( ) 是否剥尾部换行），
+  # 那种差异不是产品行为，钉它只会让断言在别的平台假红。
+  t_eq "curl 路径：成功时调用方拿到的正文里不含附加的状态码行" \
+    "$(grep -c '^ok_body=.*200' "$d" 2>/dev/null)" "0"
+  t_has "curl 路径：成功时正文本身完整（响应体原样交出）" "$d" '{"records":[{"id":7}]}'
+  t_eq "curl 路径：一次调用只发一次请求" "$(ap_val "$d" calls)" "1"
+  t_has "curl 路径：带上 POST 与 Authorization 头" "$d" "|-X|POST|-H|Authorization: AUTH-VALUE|"
+
+  # ④ wget 兜底：模块目录有 .fafu_no_curl 标记时回到 busybox wget
+  # （标记在 ap_setup 里已建好，这条路径正是既有断言走的那条，这里只验证失败留痕）
+  ap_run no_curl <<'DRIVER'
+: > wget/calls
+printf '7' > wget/rc
+printf 'wget: server returned error: HTTP/1.1 401\n' > wget/stderr
+CURL_BIN=''            # 上一个驱动删掉了标记文件，这里显式声明「本机没有 curl」
+http_post "http://host/health-api/x?q=1" "AUTH-VALUE" >/dev/null; rc=$?
+printf 'rc=%s\n' "$rc"
+printf 'errlog=[%s]\n' "$(cat "$API_ERRLOG" 2>/dev/null)"
+printf 'wget_calls=%s\n' "$(grep -c . wget/calls)"
+DRIVER
+  d="$AP_WORK/no_curl.out"
+  t_eq "无 curl：回落到 wget 并原样返回退出码" "$(ap_val "$d" rc)" "7"
+  t_eq "无 curl：一次调用只发一次请求" "$(ap_val "$d" wget_calls)" "1"
+  t_has "无 curl：报错正文仍进诊断文件" "$d" "errlog=[wget: server returned error: HTTP/1.1 401]"
 }
 
 # ============================================================
@@ -351,7 +425,7 @@ DRIVER
 
 ap_case_boundary() {
   local src owners f n_api n_rc
-  net_pat='^[ ]*"?\$BB"? (wget|curl) '
+  net_pat='^[ ]*"?\$(CURL_BIN|BB)"? (wget|curl) '
   src="$AP_WORK/program.sh"
   mkdir -p "$AP_WORK"
   t_write_program "$src" || { _t_fail "无法拼出全程序文本"; return 0; }

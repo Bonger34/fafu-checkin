@@ -130,6 +130,7 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 | `tools/check-layer-order.sh` · `tools/layer-whitelist.txt` | 层序守卫与它的动态分派白名单 |
 | `tools/lib.sh` | 共用小函数：busybox 定位、层清单读取（`read_layers`） |
 | `tools/device-smoke.sh` | 设备冒烟：装一次后自动走完手动命令并核对启动行 / 描述 / 保活节拍，证据落盘（§5.4）。只经 `fafu_checkin.sh <子命令>` 与模块日志观察模块，**不自己读运行时状态文件** |
+| `tools/diag-time.sh` · `tools/diag-net.sh` | 设备取证脚本（只读，不改模块、不发签到）：前者比对设备时区 / 服务端 `signTime` / 模块记录，判定描述里的签到钟点为何偏差；后者探明本机 wget 与 curl 在 HTTP 错误时各拿到什么（选 curl 的依据即来自它） |
 
 **层结构的约定**（这几条是结构不变量，改结构时先读这里）：
 
@@ -424,17 +425,23 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
 
 **规则**：所有系统命令固定 `</dev/null >/dev/null 2>&1`；命令输出只进管道或临时变量。
 
-### 3.2 busybox wget 行为
+### 3.2 网络工具（curl 优先，busybox wget 兜底）
 
-- 401 等错误响应**不会输出正文**（拿不到服务端 message）
-- 判定失败要用**退出码**，不要 grep 响应体：`api()` 原样返回 wget 的退出码，
-  调用方只按它分流（超时与「token 失效」在 busybox wget 下根本区分不出来）
-- `-T` 超时选项是编译开关，api 层加载时探测一次（`WGET_T`），不支持则整段省略；
-  探测与调用同在 `lib/api.sh`，改网络行为不必跨层找
-- 请求由 `http_post()` 统一发出（`wget -q -O - --header=Authorization: ... --post-data=''`），
-  失败时它的报错正文落进 `API_ERRLOG`（模块目录 `.fafu_api.err`），由 `api()` 在**确认失败后**
-  读回首行并转交 stderr；成功时不读也不写。**失败原因只能这样收**：
-  正文为空时，「服务端拒绝 / 连接失败 / 超时」只剩这一句报错可分辨
+- **失败时两个工具的能力不一样**，这是选 curl 的唯一理由：
+  - `busybox wget`：4xx/5xx **不输出响应体**，stderr 只有一句
+    `wget: server returned error: HTTP/1.1 403`（没有服务端的 `message`）
+  - `curl`：`-w '\n%{http_code}'` 能同时拿到**响应体与状态码**，服务端的结构化报错
+    （`{"status":400,"error":"…","message":"…","path":"…"}`）因此可读
+- api 层加载时探测一次 curl（`CURL_BIN`；`command -v` 找不到就看 `/system/bin`、
+  `/system/xbin`），失败则回落 wget。要强制走兜底路径：在模块目录建 `.fafu_no_curl`
+  （排查用；测试也用它钉住两条路径）
+- 判定失败的语义不变：**只用返回码**（0=成功 / 非 0=失败），调用方不 grep 响应体。
+  curl 路径下 2xx 才算成功——否则服务端的报错正文会被当成正常响应体交出去
+- 请求由 `http_post()` 统一发出（全程序唯一的网络出口，`-T` 是 wget 侧的编译开关，
+  不支持则整段省略）。失败原因（`http=<码> <正文首行>`，或 wget 的报错原文）落进
+  `API_ERRLOG`（模块目录 `.fafu_api.err`），`api()` 在**确认失败后**读回首行并转交 stderr；
+  成功时不读也不写。**失败原因只能这样收**：只留状态码的话，
+  「服务端拒绝 / 连接失败 / 超时」在正文为空时仍然分不出来
 
 ### 3.3 其他坑（都已在代码中修复，改动时注意保持）
 
