@@ -223,8 +223,16 @@ sg_status() { # $1=键
 
 # 日志正文：去掉行首的 [2026-10-01 21:30:00] 时间戳，只比对文案本身。
 # 用行首锚点而不是固定列宽：换日期格式、换时区都不会让断言假红。
+# 末尾的「时间核对」行不是业务文案（它是为排查记录钟点而加的旁证），故向前找第一行非它者：
+# 这样几十处「日志文案不变」的断言不必各改一遍，也不会被那条核对行挤掉。
 sg_log() {
-  tail -n 1 "$SG_WORK/mod/fafu_checkin.log" 2>/dev/null | sed 's/^\[[^]]*\][ ]*//'
+  sed 's/^\[[^]]*\][ ]*//' "$SG_WORK/mod/fafu_checkin.log" 2>/dev/null \
+    | grep -v '^时间核对:' | tail -n 1
+}
+
+# 按前缀在日志里找一行（明文去掉时间戳后）：给那些「不保证是最后一行」的核对类日志用。
+sg_log_has() { # $1=文案前缀
+  sed 's/^\[[^]]*\][ ]*//' "$SG_WORK/mod/fafu_checkin.log" 2>/dev/null | grep -F "$1" | tail -n 1
 }
 
 # ============================================================
@@ -374,6 +382,11 @@ DRIVER
   t_eq "已签到：日志文案不变" "$(sg_log)" "[晚查寝签到] 已签到"
   t_eq "已签到：通知事件是 seen" "$(sg_val "$d" events)" "seen,"
   t_eq "已签到：记录下来的是 signTime 换算的时间" "$(sg_status sign_time)" "20:30"
+  # 核对行同时留下原始戳与换算值：落库钟点若对不上，一行就能定位是哪一段错的。
+  # 用 sg_log_has 而不是 sg_log——这行不保证是最后一行，别挤掉上面的「日志文案不变」。
+  # 期望值与夹具同源（sg_body_seen 的第二个参数即 signTime 的分钟偏移），不写死戳
+  t_eq "已签到：日志里有原始戳与换算值的核对行" \
+    "$(sg_log_has '时间核对:')" "时间核对: signTime=[$(( SG_EPOCH * 1000 + 1230 * 60000 ))] → sign_time=[20:30]"
   t_eq "已签到：记录类型是 detected" "$(sg_status sign_kind)" "detected"
   t_eq "已签到：记录日期是今天" "$(sg_status sign_date)" "$SG_DATE"
   t_eq "已签到：刷新了模块描述" "$(sg_val "$d" desc)" "1"
