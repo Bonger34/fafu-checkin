@@ -61,17 +61,34 @@ _api_resp1() { # $1=响应体
 # ---- curl 优先，busybox wget 兜底 ----
 # 两个工具的能力差在「失败时能不能读到响应体」：curl 能（还给出 %{http_code}），
 # wget 不能。探测只做一次，结果与工具路径都落在本层。
-# PATH 在守护进程里未必完整（开机自启时的环境），故显式补两个系统路径。
+#
+# 逐个候选试，**认「能跑」而不是「文件在」**：只看 [ -x ] 会把「存在但起不来」的
+# 当成可用，于是每次请求都失败、又看不出原因。候选顺序：
+#   ① PATH 上的（终端里常由管理器挂进来）
+#   ② /data/adb/curl（模块外，升级不丢，想固定用某一份时放这里）
+#   ③ 模块目录自带的 $MODDIR/curl
+#   ④ 系统两个常见位置
+#
+# 探测与调用一律**清掉 LD_LIBRARY_PATH**（`LD_LIBRARY_PATH=` 前缀）：管理器的终端
+# 会往它里面塞自己的旧 libcrypto，动态链接器优先加载后，系统 curl 会因找不到符号而
+# 起不来（同一个 /system/bin/curl，清掉变量就能跑）。这个变量只影响查找路径，
+# 清掉不会改变请求语义。
 CURL_BIN="${CURL_BIN:-}"
 _curl_probe() {
   local c
-  c=$(command -v curl 2>/dev/null)
-  [ -n "$c" ] || c=/system/bin/curl
-  [ -x "$c" ] || c=/system/xbin/curl
-  [ -x "$c" ] || return 1
-  "$c" --version >/dev/null 2>&1 || return 1
-  CURL_BIN="$c"
-  return 0
+  for c in "$(command -v curl 2>/dev/null)" \
+           /data/adb/curl \
+           "$MODDIR/curl" \
+           /system/bin/curl \
+           /system/xbin/curl; do
+    [ -n "$c" ] || continue
+    [ -x "$c" ] || continue
+    # 起不来（缺动态库等）的不算可用：--version 要真的退出 0
+    LD_LIBRARY_PATH= "$c" --version >/dev/null 2>&1 || continue
+    CURL_BIN="$c"
+    return 0
+  done
+  return 1
 }
 # 已设 CURL_BIN 时以它为准（测试注入点：能分别走 curl 与 wget 两条路径）
 if [ -n "$CURL_BIN" ]; then
@@ -93,7 +110,8 @@ http_post() {
   if [ -n "$CURL_BIN" ]; then
     # -w 把状态码附在正文之后（同走 stdout），取最后一行当状态码、其余当正文：
     # 比「正文写文件再读回」少一次落盘，也不给 shell 变量塞整个正文的机会。
-    body=$("$CURL_BIN" -sS -X POST -H "Authorization: $2" --max-time 20 \
+    # `LD_LIBRARY_PATH=` 前缀与探测同源：不清掉它，管理器的终端一进来就会让 curl 起不来。
+    body=$(LD_LIBRARY_PATH= "$CURL_BIN" -sS -X POST -H "Authorization: $2" --max-time 20 \
              -w '\n%{http_code}' "$1" 2>>"$API_ERRLOG")
     rc=$?
     code=$(printf '%s' "$body" | "$BB" tail -n 1 | "$BB" tr -dc '0-9')

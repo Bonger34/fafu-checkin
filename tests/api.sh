@@ -413,6 +413,54 @@ DRIVER
   t_eq "无 curl：回落到 wget 并原样返回退出码" "$(ap_val "$d" rc)" "7"
   t_eq "无 curl：一次调用只发一次请求" "$(ap_val "$d" wget_calls)" "1"
   t_has "无 curl：报错正文仍进诊断文件" "$d" "errlog=[wget: server returned error: HTTP/1.1 401]"
+
+  # ⑤ 坏 curl：文件在、可执行，但一跑就失败（缺动态库的设备 curl 就是这样）。
+  # 探测必须**认「能跑」而不是「文件在」**，否则每次请求都失败且看不出原因。
+  ap_run bad_curl <<'DRIVER'
+rm -f mod/.fafu_no_curl
+printf '#!/bin/sh\nexit 1\n' > bin/curl
+chmod +x bin/curl
+: > wget/calls
+printf '5' > wget/rc
+printf 'wget: server returned error: HTTP/1.1 500\n' > wget/stderr
+unset CURL_BIN
+_curl_probe          # 重新探测：坏 curl 应被跳过
+printf 'probed=[%s]\n' "$CURL_BIN"
+http_post "http://host/health-api/x?q=1" "AUTH-VALUE" >/dev/null
+printf 'rc=%s\n' "$?"
+printf 'wget_calls=%s\n' "$(grep -c . wget/calls)"
+DRIVER
+  d="$AP_WORK/bad_curl.out"
+  t_eq "坏 curl：探测结果为空（不认「文件在」）" "$(ap_val "$d" probed)" "[]"
+  t_eq "坏 curl：请求交给 wget 兜底（不是让坏 curl 硬发）" "$(ap_val "$d" wget_calls)" "1"
+  t_eq "坏 curl：返回码来自 wget" "$(ap_val "$d" rc)" "5"
+
+  # ⑥ 探测与调用都要清掉 LD_LIBRARY_PATH：管理器的终端会往它里面塞自己的旧 libcrypto，
+  # 动态链接器优先加载后，本该能跑的系统 curl 会因缺符号而起不来（清掉就能跑）。
+  # 用替身观察「起跑时的该变量」——这不是命令行参数能看出来的东西，故由替身自己记。
+  cat > "$AP_WORK/bin/curl" <<'CURLSTUB2'
+#!/bin/sh
+for _a in "$@"; do
+  [ "$_a" = "--version" ] && { printf 'ver=[%s]\n' "${LD_LIBRARY_PATH:-<unset>}" >> curl_probe_env; exit 0; }
+done
+printf 'call=[%s]\n' "${LD_LIBRARY_PATH:-<unset>}" >> curl_call_env
+printf 'ok\n'
+CURLSTUB2
+  chmod +x "$AP_WORK/bin/curl" 2>/dev/null
+  ap_run clean_env <<'DRIVER'
+rm -f mod/.fafu_no_curl curl_probe_env curl_call_env
+unset CURL_BIN
+LD_LIBRARY_PATH='/mt/old/lib'
+export LD_LIBRARY_PATH
+_curl_probe
+printf 'probed=[%s]\n' "$CURL_BIN"
+http_post "http://host/health-api/x?q=1" "AUTH" >/dev/null
+DRIVER
+  d="$AP_WORK/clean_env.out"
+  # 期望值带上 printf 的方括号：断言取的是「文件里的那一行」（同本文件其它同类断言）
+  t_eq "探测：替身真的被跑到（否则下面两条是空转）" "$(ap_val "$d" probed)" "[./bin/curl]"
+  t_eq "探测时清掉了 LD_LIBRARY_PATH" "$(cat "$AP_WORK/curl_probe_env" 2>/dev/null | tr -d '\r\n')" "ver=[<unset>]"
+  t_eq "调用时同样清掉（否则换个终端就退化）" "$(cat "$AP_WORK/curl_call_env" 2>/dev/null | tr -d '\r\n')" "call=[<unset>]"
 }
 
 # ============================================================
