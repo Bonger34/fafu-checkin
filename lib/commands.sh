@@ -159,7 +159,8 @@ cmd_once() { run_once; }
 cmd_refresh() {
   log "===== 手动刷新测试 ====="
   old=$(get_token)
-  new=$(refresh_token "$old")
+  # 第三参数是触发原因：日志里出现刷新时，读的人得知道是手动命令触发的
+  new=$(refresh_token "$old" 1 "手动命令")
   if [ -n "$new" ] && [ "$new" != "$old" ]; then
     log "✅ 刷新成功: $new"
     resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$new"); rc=$?

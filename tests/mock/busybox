@@ -13,7 +13,8 @@
 #   1) 取当前时间（MOCK_DATE_CTL）；
 #   2) /dev/urandom（MOCK_RANDOM_CTL）—— 本机（Windows）没有这个设备，
 #      签名随机数会退化成空串；
-#   3) wget（MOCK_WGET_DIR）—— 记录「最终交给系统执行的命令行」并注入响应体 / 失败 / 超时；
+#   3) wget（MOCK_WGET_DIR）—— 记录「最终交给系统执行的命令行」并注入响应体 / 响应头（-S 形状）
+#      / 失败 / 超时；
 #   4) 设备命令 am / input / wm / dumpsys（MOCK_DEVICE_DIR）—— 本机没有 Android，
 #      它们只在 /system/bin 下（不是 busybox applet）：记录命令行与 fd 见证，并注入
 #      屏幕 / 活动输出。PATH 上的同名包装器由 tests/device.sh 生成（见下面的说明）。
@@ -86,7 +87,10 @@ fi
 #   help    wget --help 的输出 → 决定 api 层是否探测到 -T 超时选项
 #   body    调用的响应体
 #   rc      调用的退出码（缺省 0）
-#   stderr  调用的报错正文（用来断言调用方确实把它丢掉了）
+#   stderr  调用的报错正文（工具自己那句，形如 `wget: server returned error: …`）
+#   hdr     服务端响应原文，**按真实 -S 形状**（首行状态行 + 若干缩进两格的头行）；
+#           设了内容就整段写到 stderr（在 stderr 那个文件之前——真实 wget 也是先读到响应、
+#           再报错）。要断言「拿不到响应头」那一档就把它清空
 #   calls   每次调用的**逐个参数**追加一行（由用例自己清空）
 if [ "$1" = "wget" ] && [ -n "${MOCK_WGET_DIR:-}" ]; then
   if [ "$2" = "--help" ]; then
@@ -95,6 +99,7 @@ if [ "$1" = "wget" ] && [ -n "${MOCK_WGET_DIR:-}" ]; then
     # 参数逐个落盘、用 | 分隔：$* 会把参数边界抹平，「一个含空格的参数」与
     # 「两个参数」在记录里长得一模一样，命令行断言就悬空了
     { for _a in "$@"; do printf '%s|' "$_a"; done; printf '\n'; } >> "$MOCK_WGET_DIR/calls" 2>/dev/null
+    cat "$MOCK_WGET_DIR/hdr" >&2 2>/dev/null
     cat "$MOCK_WGET_DIR/stderr" >&2 2>/dev/null
     cat "$MOCK_WGET_DIR/body" 2>/dev/null
     _rc=$(cat "$MOCK_WGET_DIR/rc" 2>/dev/null | tr -dc '0-9')

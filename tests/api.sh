@@ -23,7 +23,7 @@ AP_BB="./bin/bb"
 AP_LD="./ld"
 AP_WGDIR="./wget"
 
-# 每个用例自备环境：替身 busybox + leveldb 替身目录 + wget 的四个控制文件。
+# 每个用例自备环境：替身 busybox + leveldb 替身目录 + wget 的五个控制文件。
 # curl 替身由测试底座的 t_curl_stub 生成（放 ./bin，PATH 首位；控制文件就在本目录）：
 # curl_code / curl_body 决定它回什么，curl_hdr / curl_stderr / curl_rc 决定响应头、
 # 报错原文与退出码。
@@ -35,6 +35,8 @@ ap_setup() {
   printf 'BusyBox v1.35.0 wget\n\t-T SEC\tNetwork timeout\n' > "$AP_WORK/wget/help"
   : > "$AP_WORK/wget/body"
   printf '0\n' > "$AP_WORK/wget/rc"
+  : > "$AP_WORK/wget/stderr"
+  : > "$AP_WORK/wget/hdr"                 # -S 形状的服务端响应（状态行 + 头行）；缺省「没吐」
   : > "$AP_WORK/wget/calls"
   printf '0\n' > "$AP_WORK/rand.seq"     # 随机数替身的序号：两次调用必须给出不同的值
   t_curl_stub "$AP_WORK/bin/curl" "$AP_WORK" >/dev/null
@@ -306,6 +308,7 @@ ap_case_wget_cmd() {
 : > wget/calls                          # 每次运行只留本次调用（两次运行共用这一份记录）
 printf 'RESP-BODY-1' > wget/body
 : > wget/stderr                         # 成功档：wget -q 是安静的
+: > wget/hdr                            # 这一档工具没吐服务端响应（老构建 / 直接透传）
 printf '7' > wget/rc
 resp=$(http_post "http://host/health-api/x?q=1" "AUTH-VALUE"); rc=$?
 printf 'rc=%s\n' "$rc"
@@ -338,8 +341,8 @@ DRIVER
     'api_stderr=net rc=7 http=- err=wget: server returned error: HTTP/1.1 503 Service Unavailable'
   t_eq "转交不吞掉返回码（仍是替身给的那个非 0 值）" "$(ap_val "$d" api_rc)" "7"
   t_eq "探测到 -T：超时选项就位" "$(ap_val "$d" wget_t)" "[-T 20]"
-  t_eq "命令行与既有调用点逐字一致（含超时选项、请求头、POST 语义）" "$(ap_val "$d" cmd)" \
-    'wget|-q|-T|20|-O|-|--header=Authorization: AUTH-VALUE|--post-data=|http://host/health-api/x?q=1|'
+  t_eq "命令行与既有调用点逐字一致（含 -S 服务端响应、超时选项、请求头、POST 语义）" "$(ap_val "$d" cmd)" \
+    'wget|-q|-S|-T|20|-O|-|--header=Authorization: AUTH-VALUE|--post-data=|http://host/health-api/x?q=1|'
   t_eq "一次调用只发一次请求" "$(ap_val "$d" calls)" "1"
 
   # ② 探测不到 -T：同一份代码必须自动省略，其余逐字不变
@@ -348,7 +351,7 @@ DRIVER
   d="$AP_WORK/wget_not.out"
   t_eq "探测不到 -T：超时选项为空" "$(ap_val "$d" wget_t)" "[]"
   t_eq "探测不到 -T：命令行自动省略（其余逐字不变）" "$(ap_val "$d" cmd)" \
-    'wget|-q|-O|-|--header=Authorization: AUTH-VALUE|--post-data=|http://host/health-api/x?q=1|'
+    'wget|-q|-S|-O|-|--header=Authorization: AUTH-VALUE|--post-data=|http://host/health-api/x?q=1|'
   t_hasnt "探测不到 -T：命令行里不再出现 -T" "$d" "|-T|"
 
   # ③ curl 路径：正文与状态码必须能正确切分，失败时两样都进诊断文件。
@@ -548,7 +551,8 @@ DRIVER
   t_eq "curl 路径：这次调用确实向 curl 要了响应头（-D 落点）" "$(ap_val "$d" ok_dpaths)" "1"
   t_has "curl 路径：成功也留下整行（状态码 + 正文 + 响应头）" "$AP_WORK/ok.line" \
     'http=200 body={"records":[]} hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Content-Length: 42|Content-Type: application/json;charset=UTF-8|Server: nginx}'
-  t_lines "curl 路径：一次调用只留一行（值里不带换行）" "$AP_WORK/ok.line" 1  t_hasnt "curl 路径：白名单之外的头不落日志（请求号）" "$AP_WORK/ok.line" "X-Request-Id"
+  t_lines "curl 路径：一次调用只留一行（值里不带换行）" "$AP_WORK/ok.line" 1
+  t_hasnt "curl 路径：白名单之外的头不落日志（请求号）" "$AP_WORK/ok.line" "X-Request-Id"
   t_hasnt "curl 路径：白名单之外的头不落日志（Cookie）" "$AP_WORK/ok.line" "JSESSIONID"
   t_hasnt "curl 路径：状态行不混进 hdr= 段" "$AP_WORK/ok.line" "hdr={HTTP/1.1"
   t_eq "curl 路径：非 2xx 仍是失败" "$(ap_val "$d" fail_rc)" "1"
@@ -707,9 +711,11 @@ DRIVER
 # ============================================================
 # 十、wget 兜底路径：同一行事实，拿到什么写什么
 #
-# 这条路径的能力边界是硬事实：busybox wget 在 -q 下既不报状态码、也不交出 4xx 的正文。
-# 于是它一律写 `net rc=<退出码> http=-`：成功与失败只差退出码，正文非空才写 body=，
-# 报错原文进 err=——不假装拿到状态码或正文。
+# 没有可用 curl 的设备上，状态码与响应头来自 `wget -S`（busybox 把服务端响应——
+# 状态行 + 缩进两格的头行——打到 stderr）。于是：
+#   拿得到状态码 → 与 curl 同形（`http=<码>`），白名单四项照取自那段响应；
+#   拿不到（老构建没吐 / 连不上） → 维持 `net rc=<退出码> http=-`，不拿退出码冒充状态码。
+# 工具自己那句报错仍留在 `err=`：`-S` 之后它不再是 stderr 首行，故按 `wget:` 前缀取。
 # ============================================================
 
 ap_case_wget_line() {
@@ -719,39 +725,57 @@ ap_case_wget_line() {
   ap_run wget_line <<'DRIVER'
 CURL_BIN=''            # 显式声明「本机没有 curl」，走兜底路径
 : > wget/calls
-# ① 成功：正文照旧转交；状态码这一档拿不到，如实写 http=-
-printf 'RESP-BODY-1' > wget/body
+# ① 成功：-S 吐了状态行与四项头（缩进两格，与真机同形）
+printf '  HTTP/1.1 200 OK\n  Date: Mon, 13 Oct 2025 21:30:00 GMT\n  Content-Length: 13\n  Content-Type: application/json;charset=UTF-8\n  Server: nginx\n' > wget/hdr
 : > wget/stderr
+printf 'RESP-BODY-1' > wget/body
 printf '0' > wget/rc
 resp=$(http_post "http://host/x?q=1" "AUTH"); rc=$?
 printf 'ok_rc=%s\n' "$rc"
 printf 'ok_body=[%s]\n' "$resp"
 cat "$API_ERRLOG" > ok.line
-# ② 成功但正文为空：不写空占位
+# ② 工具没吐响应（这一档没有状态码、也没有响应头）：如实写 net rc=，整段 hdr= 不出现
+: > wget/hdr
 : > wget/body
+printf '0' > wget/rc
 http_post "http://host/x?q=1" "AUTH" >/dev/null
-cat "$API_ERRLOG" > empty.line
-# ③ 服务端拒绝：4xx 的正文本来就拿不到，只能如实写报错原文
+cat "$API_ERRLOG" > noresp.line
+# ③ 服务端拒绝：真机 -S 在错误档只吐状态行（头行根本没读），工具那句原话仍在 stderr
+printf '  HTTP/1.1 503 Service Unavailable\n' > wget/hdr
 printf 'wget: server returned error: HTTP/1.1 503 Service Unavailable\n' > wget/stderr
 printf '7' > wget/rc
 http_post "http://host/x?q=1" "AUTH" >/dev/null; rc=$?
 printf 'fail_rc=%s\n' "$rc"
 cat "$API_ERRLOG" > fail.line
+# ④ 连不上：没有状态行 → 维持 net rc= 那档，报错原文照写
+: > wget/hdr
+printf "wget: can't connect to remote host (127.0.0.1)\n" > wget/stderr
+printf '1' > wget/rc
+http_post "http://host/x?q=1" "AUTH" >/dev/null
+cat "$API_ERRLOG" > refused.line
 printf 'wget_calls=%s\n' "$(grep -c . wget/calls)"
 DRIVER
   d="$AP_WORK/wget_line.out"
   t_eq "wget 路径：成功返回 0" "$(ap_val "$d" ok_rc)" "0"
   t_eq "wget 路径：正文原样交给调用方" "$(ap_val "$d" ok_body)" "[RESP-BODY-1]"
-  t_has "wget 路径：成功也写一行（这一档拿不到状态码，如实写 http=-）" "$AP_WORK/ok.line" \
-    'net rc=0 http=- body=RESP-BODY-1'
-  t_hasnt "wget 路径：不写 hdr=（没向工具要响应头，拿不到就不写）" "$AP_WORK/ok.line" "hdr="
-  t_has "wget 路径：正文为空时仍写退出码与耗时" "$AP_WORK/empty.line" 'net rc=0 http=- 耗时='
-  t_hasnt "wget 路径：正文为空时不写空占位" "$AP_WORK/empty.line" "body="
-  t_eq "wget 路径：失败退出码原样返回（7）" "$(ap_val "$d" fail_rc)" "7"
-  t_has "wget 路径：失败写 net rc= 与原始报错原文" "$AP_WORK/fail.line" \
-    'net rc=7 http=- err=wget: server returned error: HTTP/1.1 503 Service Unavailable'
-  t_hasnt "wget 路径：正文拿不到就不写 body=" "$AP_WORK/fail.line" "body="
-  t_eq "wget 路径：一次调用只发一次请求" "$(ap_val "$d" wget_calls)" "3"
+  t_has "wget 路径：-S 给得出状态码时就写 http=（与 curl 同形）" "$AP_WORK/ok.line" \
+    'http=200 body=RESP-BODY-1'
+  t_has "wget 路径：白名单四项取自 -S 那段响应（顺序固定）" "$AP_WORK/ok.line" \
+    'hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Content-Length: 13|Content-Type: application/json;charset=UTF-8|Server: nginx}'
+  t_hasnt "wget 路径：状态行不混进 hdr= 段" "$AP_WORK/ok.line" "hdr={HTTP/"
+  t_hasnt "wget 路径：没有报错就不写 err=" "$AP_WORK/ok.line" "err="
+  t_has "wget 路径：工具没吐响应时没有状态码，如实写 net rc=" "$AP_WORK/noresp.line" \
+    'net rc=0 http=- 耗时='
+  t_hasnt "wget 路径：拿不到响应头就不写 hdr=（能力边界，不是服务端没给）" "$AP_WORK/noresp.line" "hdr="
+  t_hasnt "wget 路径：正文拿不到就不写 body=" "$AP_WORK/noresp.line" "body="
+  t_eq "wget 路径：拒绝档退出码原样返回（7）" "$(ap_val "$d" fail_rc)" "7"
+  t_has "wget 路径：拒绝档给状态码，工具那句原话仍进 err=" "$AP_WORK/fail.line" \
+    'http=503 body= err=wget: server returned error: HTTP/1.1 503 Service Unavailable'
+  t_hasnt "wget 路径：状态行不被当成报错原文" "$AP_WORK/fail.line" "err=  HTTP/"
+  t_has "wget 路径：连不上时维持 net rc= 那档（不伪造状态码）" "$AP_WORK/refused.line" \
+    "net rc=1 http=- err=wget: can't connect to remote host (127.0.0.1)"
+  t_hasnt "wget 路径：连不上时不写数字状态码" "$AP_WORK/refused.line" "http=1"
+  t_eq "wget 路径：一次调用只发一次请求（四次调用四行记录）" "$(ap_val "$d" wget_calls)" "4"
 }
 
 # ============================================================
@@ -859,11 +883,16 @@ ap_case_boundary() {
     if grep -qE -e "$net_pat" "$T_ROOT/$f" 2>/dev/null; then owners="$owners ${f##*/}"; fi
   done
   t_eq "网络调用只在 api 层" "$(printf '%s\n' $owners | sort | tr '\n' ' ')" "api.sh "
-  # curl 那一支（工具名不在参数里，上面那条正则看不见它）：调用点必须在 http_post 体内，
-  # 否则「只有一个出口」这句话就只是对 wget 成立。
-  sed -n '/^http_post/,/^}/p' "$T_ROOT/lib/api.sh" > "$AP_WORK/outlet.sh"
-  t_has_re "curl 的调用也在 http_post 里（不另开出口）" "$AP_WORK/outlet.sh" \
-    '\$CURL_BIN" -sS' 1
+  # curl 那一支的工具名在变量里、命令位前面还有一步清环境变量，上面那条正则看不见它：
+  # 故单列一条，判据同样是「全程序命令位的这类调用只有一处，且只出现在网络层」——
+  # 不切函数文本、也不绑引号与选项拼法（换个选项、挪个位置都不该制造假红灯）。
+  curl_pat='^[ ]*(body=\$\()?(LD_LIBRARY_PATH=[ ]+)?"?\$CURL_BIN"?[ ]+-'
+  t_has_re "命令位的 curl 调用全程序只有一处" "$src" "$curl_pat" 1
+  owners=""
+  for f in $TEST_LIB_FILES; do
+    if grep -qE -e "$curl_pat" "$T_ROOT/$f" 2>/dev/null; then owners="$owners ${f##*/}"; fi
+  done
+  t_eq "curl 的调用也只在 api 层（不另开出口）" "$(printf '%s\n' $owners | sort | tr '\n' ' ')" "api.sh "
 
   # 既有调用点：请求路径与查询参数逐字钉住（比对的是产品数据，不是写法）
   t_has "查询任务：路径与参数不变" "$src" 'sign_in/student/my/page" "rows=3&pageNum=1'
@@ -884,7 +913,7 @@ ap_case_boundary() {
   owners=""
   for f in "$T_ROOT"/service.sh "$T_ROOT"/action.sh "$T_ROOT"/customize.sh "$T_ROOT"/uninstall.sh; do
     [ -f "$f" ] || continue
-    if grep -qE -e "$net_pat" "$f" 2>/dev/null; then owners="$owners ${f##*/}"; fi
+    if grep -qE -e "$net_pat" -e "$curl_pat" "$f" 2>/dev/null; then owners="$owners ${f##*/}"; fi
   done
   t_eq "开机/按钮/安装/卸载脚本都不发请求" "[$owners]" "[]"
 }

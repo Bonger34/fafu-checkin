@@ -29,9 +29,10 @@ state_text() { # $1=signState 数值或记录里的类型（sign_kind）→ 自�
 # 常量集中在文件头：等待次数与间隔是这里的实现细节，不进配置文件。
 LD_WAIT_COUNT=10     # 最多重试几次
 LD_WAIT_SEC=3        # 每次间隔（秒）→ 上限 30 秒
-# 等待时实际调用的命令：默认是真 sleep。测试注入替身时用 sh 显式跑它——
+# 本层所有等待都经这一个替身口：默认真 sleep，测试注入 SLEEP_OVERRIDE 时用 sh 显式跑它——
 # 那不依赖替身文件有没有执行位，断言就不必去 chmod。
-_sg_wait_sleep() { # $1=秒数
+# （等 App 数据就绪与提交失败后的短重试走的是同一段实现，故只有这一个函数。）
+_sg_sleep() { # $1=秒数
   if [ -n "${SLEEP_OVERRIDE:-}" ]; then
     sh "$SLEEP_OVERRIDE" "$1"
   else
@@ -45,7 +46,7 @@ _sg_wait_ld() { # 等到 $LD 可读为止；等到返回 0，等满返回 1
   log "应用数据暂不可读（重启后就绪前的瞬时状态？），最多等 $((LD_WAIT_COUNT * LD_WAIT_SEC)) 秒"
   i=0
   while [ "$i" -lt "$LD_WAIT_COUNT" ]; do
-    _sg_wait_sleep "$LD_WAIT_SEC"
+    _sg_sleep "$LD_WAIT_SEC"
     i=$((i + 1))
     if [ -d "$LD" ]; then
       log "应用数据已就绪（等了 $((i * LD_WAIT_SEC)) 秒）"
@@ -66,7 +67,7 @@ _sg_fetch_fail() { # $1=事件名 $2=rc $3=响应体
   local line
   line="$1: rc=$2 $(_api_err1 "$API_ERRLOG") params=$SG_QUERY"
   case "$2" in
-    0) line="$line resp=$(_api_flat "$3")" ;;
+    0) line="$line $(_api_field resp "$3")" ;;
   esac
   log "$line"
 }
@@ -97,7 +98,7 @@ signin_fetch() { # $1=token → stdout=<token>\n<响应体>；返回码见文件
     # 查询失败也要留全：是「调用失败」还是「响应里没有 records」，两者的修法不同，
     # 而旧写法只记一个 rc，事后分不出（一天只有一次现场，值得多写这几个字节）。
     _sg_fetch_fail "查询异常" "$rc" "$resp"
-    newt=$(refresh_token "$tok"); [ -n "$newt" ] && tok="$newt"
+    newt=$(refresh_token "$tok" 1 "签到查询失败"); [ -n "$newt" ] && tok="$newt"
     resp=$(api "sign_in/student/my/page" "rows=3&pageNum=1" "$tok"); rc=$?
     case "$resp" in
       *'"records"'*) fail=0 ;;
@@ -112,6 +113,16 @@ signin_fetch() { # $1=token → stdout=<token>\n<响应体>；返回码见文件
   printf '%s\n%s' "$tok" "$resp"
 }
 
+# 要把「服务端认为现在几点」（响应头里的 Date）并排到本层的日志行上时，接的就是这一小段：
+# 它由 api 层的只读访问器给出（**本层不自己拼 hdr=**，格式只有一个真源）；
+# 拿不到（这一档没向工具要响应头 / 白名单四项全无）时输出空，行尾因此不留空段。
+_sg_hdrs() {
+  local h
+  h=$(_api_hdrs)
+  [ -n "$h" ] && printf ' %s' "$h"
+  return 0
+}
+
 # 任务四元组变了才记一行（第一次拿到任务也算变化，旧值为空）。
 # 正常轮询每分钟一轮而任务数据几乎不变，每轮都记会让几百行日志里没有一行提供信息；
 # 判据是**任务号 / 签到状态 / 开始 / 截止**任一与上一轮不同。快照本身归 state 层管
@@ -121,7 +132,8 @@ _sg_task_note() { # $1=任务号 $2=签到状态 $3=开始（毫秒） $4=截止
   oid=$(task_snap_get id); ost=$(task_snap_get state)
   ob=$(task_snap_get begin); od=$(task_snap_get dline)
   if [ "$oid" != "$1" ] || [ "$ost" != "$2" ] || [ "$ob" != "$3" ] || [ "$od" != "$4" ]; then
-    log "任务变化: id=$oid→$1 state=$ost→$2 begin=$ob→$3 截止=$od→$4"
+    # 末尾并排这一次查询的响应头：任务是何时出现的，与服务端认为现在几点同处一行
+    log "任务变化: id=$oid→$1 state=$ost→$2 begin=$ob→$3 截止=$od→$4$(_sg_hdrs)"
     task_snap_set "$1" "$2" "$3" "$4"
   fi
 }
@@ -155,7 +167,7 @@ signin_parse() { # $1=响应体 $2..$7=输出变量名；信息不完整返回 1
 #   ② 当前时间不在开始~截止之间 → 不在时段，返回 1
 #   ③ 其余（窗口内未签）→ signin_submit 提交并记录，返回它的返回码
 signin_decide() { # $1=响应体 $2=token $3=任务号 $4=名称 $5=状态 $6=开始 $7=截止 $8=主窗口截止
-  local resp token now rid name state bt dline et lng lat stime sst
+  local resp token now rid name state bt dline et lng lat stime sst salt
   resp="$1"; token="$2"
   rid="$3"; name="$4"; state="$5"; bt="$6"; dline="$7"; et="$8"
   now=$(( $(now_s) * 1000 ))
@@ -164,11 +176,14 @@ signin_decide() { # $1=响应体 $2=token $3=任务号 $4=名称 $5=状态 $6=�
     log "[$name] $(state_text "$state")"
     # 记录检测到的签到信息（仅当今天尚无记录时）
     if [ "$(sign_get sign_date)" != "$(today)" ]; then
-      stime=""
+      stime=""; salt=""
       sst=$(json_first "$resp" signTime)
       case "$sst" in
-        ""|*[!0-9]*) : ;;
-        *) stime=$("$BB" date -d "@$((sst / 1000))" +%H:%M 2>/dev/null) ;;
+        ""|*[!0-9]*) : ;;   # 戳不可用（如请假记录本就没有签到时刻）：两个换算位都留空
+        *)
+          stime=$("$BB" date -d "@$((sst / 1000))" +%H:%M 2>/dev/null)
+          salt=$("$BB" date -u -d "@$((sst / 1000))" +%H:%M 2>/dev/null)
+          ;;
       esac
       if [ "$state" = "2" ]; then
         sign_set "$(today)" "" "leave"
@@ -182,7 +197,9 @@ signin_decide() { # $1=响应体 $2=token $3=任务号 $4=名称 $5=状态 $6=�
       # 第二条 date 输出=另一种解释（对不上时能直接看出差在哪个偏移上）。
       # 末尾整条服务端记录（字段名以接口返回的为准，含签到时刻）：描述里的钟点若又不对，
       # 「服务端给了哪些字段、每个字段是什么」不必再靠推理。
-      log "时间核对: signTime=[$sst] → sign_time=[$stime] now=[$(now_full)] TZ=[${TZ:-未设}] LDP=[${LD_LIBRARY_PATH:-未设}] alt=[$("$BB" date -u -d "@$((sst / 1000))" +%H:%M 2>/dev/null)] 记录=$(_api_flat "$resp")"
+      # 记录超限时由 api 层的同一个实现补上「原始字节数 + 被我们截断」，不静默截断。
+      # 行尾再并排这一次查询的响应头：本地 now= 与服务端 Date 并排，「偏差归谁」不必推理。
+      log "时间核对: signTime=[$sst] → sign_time=[$stime] now=[$(now_full)] TZ=[${TZ:-未设}] LDP=[${LD_LIBRARY_PATH:-未设}] alt=[$salt] $(_api_field 记录 "$resp")$(_sg_hdrs)"
     fi
     update_desc
     # 检测到已签到 / 已请假 → 通知（每次检测到都发；同事件同 tag 覆盖，不会堆积）
@@ -220,14 +237,6 @@ signin_decide() { # $1=响应体 $2=token $3=任务号 $4=名称 $5=状态 $6=�
 SG_RETRY_TIMES=2     # 提交失败后再试的次数
 SG_RETRY_WAIT=15     # 每次之间等多久（秒）
 
-_sg_retry_sleep() { # $1=秒数
-  if [ -n "${SLEEP_OVERRIDE:-}" ]; then
-    sh "$SLEEP_OVERRIDE" "$1"
-  else
-    sleep "$1"
-  fi
-}
-
 # 提交成功的判据，首次与重试共用（复制成两份迟早分叉）：
 # 调用成功，且响应体里**没有** timestamp（服务端用它报错）。用 case 而不是
 # `[ ... ] && ! echo ... | grep -q ...`——后者在这条 busybox ash 链路上会判反。
@@ -251,7 +260,7 @@ _sg_try_log() { # $1=第几次 $2=任务号 $3=经度 $4=纬度
 # $8=token。提交失败当日仅首次通知（之后的重试只写日志），返回 1；
 # 成功按「主窗口截止早于当前时间」区分主窗口签到与补签，返回 0。
 signin_submit() {
-  local rid name dline et lng lat now token resp rc newt td hm faildiag failwhat tries try
+  local rid name dline et lng lat now token resp rc newt td hm faildiag submit_facts retries attempt
   rid="$1"; name="$2"; dline="$3"; et="$4"
   lng="$5"; lat="$6"; now="$7"; token="$8"
   # 提交成功 = 调用成功，且响应体里**没有** timestamp（服务端用它报错）。
@@ -259,30 +268,31 @@ signin_submit() {
   # ---- 首次提交（失败先刷新 token 再试一次：老 token 失效是常见档）----
   # 记痕排在**每次调用之后**：于是最后一次失败的尝试也有自己的那一行，
   # 不必靠末尾那行汇总来代表它（汇总只补参数与次数）。
-  try=1
+  attempt=1
   resp=$(api "sign_in/$rid/student/sign" "lng=$lng&lat=$lat" "$token"); rc=$?
-  _sg_try_log "$try" "$rid" "$lng" "$lat"
+  _sg_try_log "$attempt" "$rid" "$lng" "$lat"
   if [ "$rc" != "0" ]; then
-    newt=$(refresh_token "$token"); [ -n "$newt" ] && token="$newt"
-    try=2
+    # 刷新那一行要说明触发原因：日志里出现刷新时，读的人得知道是谁触发的
+    newt=$(refresh_token "$token" 1 "签到提交失败"); [ -n "$newt" ] && token="$newt"
+    attempt=2
     resp=$(api "sign_in/$rid/student/sign" "lng=$lng&lat=$lat" "$token"); rc=$?
-    _sg_try_log "$try" "$rid" "$lng" "$lat"
+    _sg_try_log "$attempt" "$rid" "$lng" "$lat"
   fi
   # ---- 短重试：窗口刚开时服务端常还没开始收，隔十几秒再试往往就过了 ----
   # 只在**确实提交失败**时重来；「不在时段」根本到不了这里，故不会把窗口外的
   # 轮询催成高频。次数与间隔都是常量，不进配置。
-  tries=0
-  while ! _sg_submit_ok "$rc" "$resp" && [ "$tries" -lt "$SG_RETRY_TIMES" ]; do
-    tries=$((tries + 1))
-    _sg_retry_sleep "$SG_RETRY_WAIT"
-    try=$((try + 1))
+  retries=0
+  while ! _sg_submit_ok "$rc" "$resp" && [ "$retries" -lt "$SG_RETRY_TIMES" ]; do
+    retries=$((retries + 1))
+    _sg_sleep "$SG_RETRY_WAIT"
+    attempt=$((attempt + 1))
     resp=$(api "sign_in/$rid/student/sign" "lng=$lng&lat=$lat" "$token"); rc=$?
-    _sg_try_log "$try" "$rid" "$lng" "$lat"
+    _sg_try_log "$attempt" "$rid" "$lng" "$lat"
   done
   if _sg_submit_ok "$rc" "$resp"; then
     td=$(today); hm=$(now_hm)
-    if [ "$tries" -gt 0 ]; then
-      log "提交重试 $tries 次后成功 [$name]"
+    if [ "$retries" -gt 0 ]; then
+      log "提交重试 $retries 次后成功 [$name]"
     fi
     if [ -n "$et" ] && [ "$now" -gt "$et" ]; then
       log "✅ 补签成功 [$name]"
@@ -298,9 +308,10 @@ signin_submit() {
   fi
   # 全部尝试都失败：末尾那行汇总仍把「发出去的参数」「试了几次」一次记全，
   # 服务端原文则原样转交 api 层那一行（它已含完整正文），这里不再另截一次。
+  # 字段名 `try=` / `tries=` 是对外契约（日志的读法），故与内部变量名不同名。
   faildiag=$(_api_err1 "$API_ERRLOG")
-  failwhat="rid=$rid lng=$lng lat=$lat try=$try tries=$tries"
-  log "签到失败: rc=$rc $failwhat $faildiag"
+  submit_facts="rid=$rid lng=$lng lat=$lat try=$attempt tries=$retries"
+  log "签到失败: rc=$rc $submit_facts $faildiag"
   notify_once failsign
   return 1
 }
