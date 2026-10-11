@@ -15,6 +15,7 @@
 SU_BIN="${SU_BIN:-/system/bin/su}"         # su 路径（可用环境变量覆盖，供 mock 测试注入）
 
 SU_MODE=""                # 生效的降权写法，由 probe_su() 探测后写入
+NT_ERR=""                 # 最近一次发送命令的输出（失败片段；命令什么都没吐时为空）
 _NT_TITLE=""              # 通知标题（文案表设置）
 _NT_TEXT=""               # 通知正文；留空则复用标题
 # 事件名 → 文案模板名（tag 拼法见 tag_of）。写错名字等于该类提醒静默失效。
@@ -111,12 +112,22 @@ _msg_nopub()  { _NT_TITLE="📭 今晚还没查到查寝任务"; }
 # cmd notification post 的能力被 AOSP 限死（改这里会坏什么）：通知 id 恒为 2020，只能靠
 # tag 区分事件；channel 恒为 shell_cmd，重要性 / 声音 / 图标 / ongoing / 按钮均不可调。
 nt_send() { # $1=完整命令串：交给降权 shell 执行；调用它的是 notify()
-            # 独立一函数是为让断言能替换掉「执行」这一步，看到真正构造出的命令串
-  $SU_MODE "$1" </dev/null >/dev/null 2>&1
+            # 独立一函数是为让断言能替换掉「执行」这一步，看到真正构造出的命令串。
+            # 输出不在这里丢弃：notify 把它收走当失败片段（失败时那是唯一的证据）。
+  $SU_MODE "$1" </dev/null
 }
 
-notify() { # $1=tag；使用文案表设好的 _NT_TITLE / _NT_TEXT；返回发送是否成功
-  local t
+# 失败片段：命令吐出来的原文（压平与上限走 api 层那一个函数，值内不留换行）；
+# 什么都没吐时写成可读的占位——空字段会被读成「没有报错」，而「命令一句话没说」
+# 本身就是要记下来的事实。
+_nt_err_text() {
+  local e
+  e=$(_api_flat "$NT_ERR")
+  if [ -n "$e" ]; then printf '%s' "$e"; else printf '%s' '(无输出)'; fi
+}
+
+notify() { # $1=tag；$2=事件名（可空，缺省用 tag——失败行要写清是哪个事件发不出去）
+  local t rc ev   # 使用文案表设好的 _NT_TITLE / _NT_TEXT；返回发送是否成功
   [ "$(cfg_notify)" = "1" ] || return 0
   [ -n "$SU_MODE" ] || return 0
   [ -n "$1" ] || return 0
@@ -126,7 +137,17 @@ notify() { # $1=tag；使用文案表设好的 _NT_TITLE / _NT_TEXT；返回发�
   # $1（tag）在此处展开；$_NT_TITLE 等保留给子 shell 展开
   t="cmd notification post -t \"\$_NT_TITLE\" \"$1\" \"\${_NT_TEXT:-\$_NT_TITLE}\" -S bigtext"
   [ -n "$NOTIFY_CMD" ] && t="$NOTIFY_CMD"
-  nt_send "$t"
+  # 这条命令的输出平时谁也不需要（通知链路不往主流程的 stdout 上吐东西），
+  # 失败时却是「为什么没发出去」的唯一证据，故收进 NT_ERR 留给失败行。
+  NT_ERR=$(nt_send "$t" 2>&1)
+  rc=$?
+  # 只有**发送失败**记一行：成功不记，被配置关掉或降权不可用那两档在上面就返回了
+  # （它们不是失败）。失败仍不落「当日已发」标记，由调用方按返回码决定（下次还能再试）。
+  if [ "$rc" != "0" ]; then
+    ev="${2:-$1}"
+    log "通知发送失败: event=$ev rc=$rc err=$(_nt_err_text)"
+  fi
+  return "$rc"
 }
 
 notify_event() { # $1=事件名：取文案表里的模板 → 按 tag 表拼 tag → 发送（每次都发）；
@@ -135,7 +156,7 @@ notify_event() { # $1=事件名：取文案表里的模板 → 按 tag 表拼 ta
   eval "nt_tpl=\${_NT_TPL_$1:-}"
   [ -n "$nt_tpl" ] || return 0
   "_msg_$nt_tpl"
-  notify "fafu-$(tag_of "$nt_tpl")-$PL"
+  notify "fafu-$(tag_of "$nt_tpl")-$PL" "$1"
   return 0
 }
 
@@ -150,7 +171,7 @@ notify_once() { # $1=事件名（failsign / failtask / nosign / late / miss）�
   notify_marked "$nt_mk" && return 0
   # 先发送、成功再落标记：否则一次瞬时失败会让这类提醒整天不再出现
   _msg_$nt_tpl
-  if notify "fafu-$(tag_of "$nt_tpl")-$PL"; then
+  if notify "fafu-$(tag_of "$nt_tpl")-$PL" "$1"; then
     notify_mark "$nt_mk"
     return 0
   fi
@@ -167,7 +188,7 @@ notify_warn() { # 开页预警：屏幕已亮且本次确实会开页时调用�
   nt_cooldown "$nt_now"
   _NT_TITLE="🔄 正在刷新登录状态"
   _NT_TEXT="$(notify_lead) 秒后自动打开打卡页（用于刷新登录），完成后自动关闭，无需操作"
-  notify "fafu-$(tag_of warn)-$PL"
+  notify "fafu-$(tag_of warn)-$PL" warn
 }
 
 notify_lead() { # 输出预警提前量秒数；屏幕本来就黑时不延时（省下无意义的等待）
