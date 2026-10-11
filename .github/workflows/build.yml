@@ -76,6 +76,9 @@ jobs:
           $B date +%s%3N || true
           printf 'x' | $B tr -d '\n' | $B base64 | $B md5sum | $B cut -d' ' -f1 || true
           $B head -c 24 /dev/urandom | $B base64 | $B tr -dc 'A-Za-z0-9' | $B head -c 16; echo
+          echo "== 8 改后的 json_first（真实实现） =="
+          J='{"records":[{"id":123,"name":"晚查寝签到","signState":0,"beginTime":1759400000000,"signTime":"2026-10-03 21:30:00"}],"total":1}'
+          BB=$B sh -c '. lib/base.sh; printf "id=%s name=%s state=%s time=%s absent=[%s]\n" "$(json_first "$J" id)" "$(json_first "$J" name)" "$(json_first "$J" signState)" "$(json_first "$J" signTime)" "$(json_first "$J" nope)"' J="$J" || true
           echo "== 版本 =="
           $B | head -n1
           exit 0
