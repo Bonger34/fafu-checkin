@@ -16,6 +16,13 @@ POLL_DATE='2026-10-01'
 poll_setup() { # $1=用例名
   local name
   name="$1"
+  # 按需注入与墙钟上限**归位**：它们只由需要真实网络的用例设置，而变量活在用例文件的作用域里
+  # ——不复位的话，后来每条用例都会带着上一条（端到端那条）留下的注入跑：值指向它自己工作
+  # 目录里并不存在的 curl / ld / su，墙钟上限也跟着变成 300 秒。默认必须是「什么都没有」。
+  POLL_LD_DIR=''
+  POLL_CURL_BIN=''
+  POLL_SU_MODE=''
+  POLL_TIMEOUT=''
   POLL_WORK="$T_WORK_ROOT/poll-$name"
   rm -rf "$POLL_WORK"
   t_stage_module "$POLL_WORK/mod" >/dev/null
@@ -389,9 +396,11 @@ INJECT
 # 八、端到端回归：六类排障日志在真实调用次序下都出现
 #
 # 这一条跑的是**真实入口的守护主循环**：run_once / signin_fetch / signin_decide /
-# signin_submit / keepalive_ping / notify 全是真实实现，只顶掉四类环境事实——
+# signin_submit / keepalive_ping / notify 全是真实实现，只顶掉五类环境事实——
 # 时间（拨钟文件 + 把 %s 对齐到同一份的 _now）、休眠（替身按计划拨钟并切换降权档）、
-# 网络（真实 api 层 + 按调用序号喂事实的 curl 替身）、降权发送（替身 su）。
+# 网络（真实 api 层 + 按调用序号喂事实的 curl 替身）、降权发送（替身 su）、
+# 刷新流程（替身 refresh_token：它的三段时序由 tests/keepalive.sh 用真实实现覆盖，
+# 而签到链路上每次查询异常都会触发它，真实采样要读几十遍 token 目录）。
 # 一天只有一次现场，故这条时间线刻意把六类日志串在一起：
 #   连接层查询失败 → 提交失败（两轮都失败，当日只通知一次）→ 提交成功 →
 #   跨日检测到已签到 → 保活失败（网络类 / 登录态各一次）。
@@ -409,6 +418,8 @@ POLL_E2E_HDR='Date: Mon, 13 Oct 2025 21:30:00 GMT
 Content-Length: 53
 Content-Type: application/json;charset=UTF-8
 Server: nginx'
+# 同一份响应头在日志行里该落成的字面（`hdr={…}` 那一段，逐字比对用）
+POLL_E2E_HDR_LINE='hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Content-Length: 53|Content-Type: application/json;charset=UTF-8|Server: nginx}'
 # 服务端拒绝这一次提交的正文（带 timestamp 即「调用成功但正文报错」那一档）
 POLL_E2E_REJECT='{"timestamp":1759500000000,"status":500,"msg":"busy"}'
 
@@ -478,7 +489,8 @@ poll_e2e_setup() {
   # token 来源：真实 get_token 读它（应用未安装在本机，故给一份最小的本地存储）
   printf 'j\000"token":"2_C0DE"\000j' > "$POLL_WORK/ld/000001.ldb"
   poll_e2e_epoch
-  # poll_start 的三处按需注入：真实 run_once 要读 token 目录，网络与通知也要真的跑起来
+  # poll_start 的三处按需注入：真实 run_once 要读 token 目录，网络与通知也要真的跑起来。
+  # 这四个变量只有本条用例设置（poll_setup 会把它们复位，别的用例因此拿到的仍是空默认）
   POLL_LD_DIR='./ld'
   POLL_CURL_BIN='./bin/curl'
   POLL_SU_MODE='./bin/su - shell -c'
@@ -620,6 +632,9 @@ poll_case_e2e_logs() {
   # ---- ③ 任务变化行：首次拿到任务记一行；下一轮同样内容不记；跨日按日滚动重新算「新任务」----
   t_has "任务变化：第一次拿到任务记一行（四元组旧值为空）" "$log" \
     "任务变化: id=→88123 state=→0 begin=→$bt1 截止=→$dl1"
+  # 这一行末尾并排服务端的响应头：任务是何时出现的，与服务端认为现在几点（Date）同处一行
+  t_has "任务变化：与服务端响应头并排（Date 供时间对齐）" "$log" \
+    "任务变化: id=→88123 state=→0 begin=→$bt1 截止=→$dl1 $POLL_E2E_HDR_LINE"
   t_has "任务变化：跨日后再拿到（按日滚动，旧值仍为空）且状态已是已签到" "$log" \
     "任务变化: id=→88123 state=→1 begin=→$bt2 截止=→$dl2"
   t_eq "任务变化只记两行（第二轮任务没变就不记，正常轮询不啰嗦）" \
@@ -637,13 +652,16 @@ poll_case_e2e_logs() {
   t_has "全部尝试都失败时另有一行汇总（试了几次 + 服务端原文）" "$log" \
     "签到失败: rc=1 rid=88123 lng=119.243462 lat=26.088417 try=4 tries=2 http=400 body=$POLL_E2E_REJECT"
 
-  # ---- ④ 已签到记录行：服务端那条记录整条落盘，并排四种时间与两处环境 ----
+  # ---- ④ 已签到记录行：服务端那条记录整条落盘，并排四种时间、两处环境与响应头 ----
   t_has "检测到已签到：整条服务端记录落进日志（含签到时刻）" "$log" \
     "记录={\"records\":[{\"id\":88123,"
   t_has "检测到已签到：签到时刻与本地此刻、时区、库路径并排" "$log" \
     "signTime=[$(( POLL_E2E_E2 + 1140 * 60000 ))]"
   t_has "检测到已签到：本地此刻就是拨钟到的那一刻（跨日的第二天）" "$log" \
     "now=[$POLL_E2E_D2 19:30:00] TZ=["
+  # 服务端认为现在几点也要在同一行：本地 now= 与响应头 Date 并排，「偏差归谁」才不必推理
+  t_has_re "检测到已签到：核对行末尾并排响应头（Date 供对齐）" "$log" \
+    '^时间核对: signTime=\[.*\] → sign_time=\[.*\] now=\[.*\] TZ=\[.*\] LDP=\[.*\] alt=\[.*\] 记录=\{.*\} hdr=\{Date: Mon, 13 Oct 2025 21:30:00 GMT.*\}$'
 
   # ---- ⑤ 保活失败行：网络类与登录态失效各一行，一眼分得开 ----
   t_has "保活失败（网络类）：rc 与连接层原话 + 屏幕状态 + 所采取的动作" "$log" \

@@ -78,13 +78,20 @@ _api_payload() { # $1=响应体（带 -w 状态码行）
 # 正文段：正常响应原样完整；超过上限时在同一行追加原始字节数与截断标记——
 # 只写一个被截断的前缀，事后会把「截断」误读成「服务端只回了这么多」。
 _api_body() { # $1=正文 → body=<正文>[ bodylen=<原始字节数> trunc=1]
-  local b n
-  b=$(_api_flat "$1")
-  n=$(printf '%s' "$1" | "$BB" wc -c | "$BB" tr -dc '0-9')
+  _api_field body "$1"
+}
+
+# 「字段名 + 压平 + 上限」的唯一实现：任何要整段落进日志的值都经它，
+# 于是「标明原始字节数 + 标明被截断」这件事在正文、服务端记录等处口径一致。
+# $1=字段名 $2=原文 → <字段名>=<压平值>[ <字段名>len=<原始字节数> <字段名>trunc=1]
+_api_field() {
+  local v n
+  v=$(_api_flat "$2")
+  n=$(printf '%s' "$2" | "$BB" wc -c | "$BB" tr -dc '0-9')
   if [ "${n:-0}" -gt "$API_BODY_MAX" ]; then
-    printf 'body=%s bodylen=%s trunc=1' "$b" "$n"
+    printf '%s=%s %slen=%s %strunc=1' "$1" "$v" "$1" "$n" "$1"
   else
-    printf 'body=%s' "$b"
+    printf '%s=%s' "$1" "$v"
   fi
 }
 
@@ -98,16 +105,24 @@ _api_code1() { # $1=同上
 # 于是同一份响应头每次落出的字面量都一样（断言与肉眼比对都不必猜顺序）。
 API_HDR_KEYS="Date Content-Length Content-Type Server"
 
-_api_hdr() { # $1=响应头文件（curl -D 的落点）
+_api_hdr() { # $1=响应头原文（curl 的 -D 落点，或 wget -S 的那段 stderr）
   local k v out
   out=""
   for k in $API_HDR_KEYS; do
-    v=$(_api_flat "$("$BB" grep -i -m1 "^$k:" "$1" 2>/dev/null | "$BB" sed 's/^[^:]*:[ ]*//')")
+    # 行首允许有空白：wget -S 把服务端响应的每一行都缩进两格，curl -D 则顶格
+    v=$(_api_flat "$("$BB" grep -i -m1 "^[[:space:]]*$k:" "$1" 2>/dev/null | "$BB" sed 's/^[^:]*:[ ]*//')")
     [ -n "$v" ] || continue
     if [ -n "$out" ]; then out="$out|$k: $v"; else out="$k: $v"; fi
   done
   [ -n "$out" ] && printf 'hdr={%s}' "$out"
   return 0
+}
+
+# 只读访问器：诊断行里的响应头那一段（`hdr={…}`，没有则输出空）。
+# 上层要把「服务端认为现在几点」（Date）并排到自己的日志行上时接这一小段——
+# **不许自己拼 hdr=**：这一段就是 api 层落下的那份字面量，格式仍只有一个真源。
+_api_hdrs() { # [$1=诊断文件，缺省 $API_ERRLOG]
+  _api_err1 "${1:-$API_ERRLOG}" | "$BB" sed -n 's/.*\(hdr={[^}]*}\).*/\1/p'
 }
 
 # 计时读数：毫秒优先（busybox 的 `date +%s%3N` 给得出 13 位数字），取不到退化为秒。
@@ -133,11 +148,13 @@ _api_cost() { # $1=起始读数 $2=结束读数
 # 一次调用的全部事实 → API_ERRLOG 里唯一的那一行（**格式的唯一拼装处**）。
 # 落笔前先清空文件：于是「每次调用恰好一行」对真实调用与驱动替身都成立。
 # 两档形态取决于「这次拿不拿得到状态码」：
-#   拿得到（curl 路径）：`http=<码> body=… [hdr={…}] 耗时=…`——成功与失败同形，只差码；
-#   拿不到（连接层失败 / wget 兜底）：`net rc=<退出码> http=- [body=…] [err=…] [hdr={…}] 耗时=…`
+#   拿得到（curl 路径，以及 wget 兜底吐了状态行时）：
+#     `http=<码> body=… [err=…] [hdr={…}] 耗时=…`——成功与被拒同形，只差码；
+#   拿不到（curl 连不上 / 超时，或 wget 没吐响应）：
+#     `net rc=<退出码> http=- [body=…] [err=…] [hdr={…}] 耗时=…`
 # 取值取不到的段**整段不出现**（不写空占位）。上层与驱动替身都调它，别自己拼这些字段。
 _api_note() { # $1=工具退出码 $2=HTTP 状态码（空=这一档拿不到） $3=正文 $4=原始报错
-              # $5=响应头文件（可空） $6=起始读数 $7=结束读数
+              # $5=响应头原文所在文件（可空） $6=起始读数 $7=结束读数
   local line hdrs
   : > "$API_ERRLOG" 2>/dev/null
   if [ -n "$2" ]; then
@@ -145,8 +162,10 @@ _api_note() { # $1=工具退出码 $2=HTTP 状态码（空=这一档拿不到）
   else
     line="net rc=$1 http=-"
     [ -n "$3" ] && line="$line $(_api_body "$3")"
-    [ -n "$4" ] && line="$line err=$(_api_flat "$4")"
   fi
+  # 报错原文独立于「有没有状态码」：wget -S 可能既给得出状态码、又吐了工具那句报错。
+  # 没吐报错就不写这一段（不写空占位）。
+  [ -n "$4" ] && line="$line err=$(_api_flat "$4")"
   hdrs=""
   [ -n "$5" ] && hdrs=$(_api_hdr "$5")
   [ -n "$hdrs" ] && line="$line $hdrs"
@@ -194,6 +213,19 @@ else
   _curl_probe || CURL_BIN=""
 fi
 
+# wget -S 那一段 stderr 里的状态码：首行形如 `  HTTP/1.1 503 Service Unavailable`（缩进两格）。
+# 取不到（连不上 / 这个构建没吐响应）就输出空 → 调用方走 `net rc=` 那档，不拿退出码冒充状态码。
+_api_wget_code() { # $1=wget 的 stderr 落点
+  "$BB" sed -n 's/^[[:space:]]*HTTP\/[0-9.]*[[:space:]]*\([0-9][0-9][0-9]\).*/\1/p' "$1" 2>/dev/null \
+    | "$BB" head -n 1
+}
+
+# wget 自己那句报错（形如 `wget: server returned error: HTTP/1.1 503 …` / `wget: can't connect …`）：
+# 取第一个以 `wget:` 开头的行；它可能不在首行（-S 的状态行排在它前面）。没有则不写 err=。
+_api_wget_err() { # $1=同上
+  "$BB" grep -m1 '^wget:' "$1" 2>/dev/null | "$BB" head -n 1 | "$BB" tr -d '\r\n'
+}
+
 # 网络调用：全程序唯一的出口（$1=完整 URL $2=Authorization 头值）。
 # 输出响应体，返回码沿用既有语义（0=成功，非 0=失败）——调用方只按它分流。
 # curl 路径下「成功」的判据是 HTTP 状态码 2xx：4xx/5xx 也算失败，
@@ -231,16 +263,18 @@ http_post() {
       *)  return 1 ;;
     esac
   fi
-  # 兜底：这台设备没有可用的 curl。busybox wget 在 -q 下既不报状态码、也不交出 4xx 的正文，
-  # 故这一档一律 `net rc=<退出码> http=-`：拿到什么写什么，拿不到的不写（不假装拿到）。
-  # 这里不加 `-S`：它会把状态行与响应头混进 stderr，err= 就不能再按「首行即原始报错」取值。
+  # 兜底：这台设备没有可用的 curl。busybox wget 拿不到 4xx 的正文，但 `-S`（显示服务端响应）
+  # 会把状态行与响应头（每行缩进两格）打到 stderr —— 状态码与白名单四项就从落盘的 stderr 里取。
+  # 取不到就照旧 `net rc=<退出码> http=-`：拿到什么写什么，拿不到的不写（不假装拿到）。
+  # 报错原文不能再按「stderr 首行」取值：加了 -S 之后首行可能是状态行，故取含 `wget:` 的那一行。
   : > "$API_RAWLOG" 2>/dev/null
   t0=$(_api_now)
-  body=$("$BB" wget -q $WGET_T -O - --header="Authorization: $2" --post-data='' "$1" \
+  body=$("$BB" wget -q -S $WGET_T -O - --header="Authorization: $2" --post-data='' "$1" \
     2>"$API_RAWLOG")
   rc=$?
   t1=$(_api_now)
-  _api_note "$rc" "" "$body" "$(_api_err1 "$API_RAWLOG")" "" "$t0" "$t1"
+  _api_note "$rc" "$(_api_wget_code "$API_RAWLOG")" "$body" "$(_api_wget_err "$API_RAWLOG")" \
+    "$API_RAWLOG" "$t0" "$t1"
   printf '%s' "$body"
   return "$rc"
 }

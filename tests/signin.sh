@@ -76,6 +76,23 @@ sg_body_seen() { # $1=任务开始偏移 $2=signTime 偏移
   sg_body "$1" 1 ",\"signTime\":$(( SG_EPOCH * 1000 + ${2:-0} * 60000 ))"
 }
 
+# 一串 x（$1=字节数）：借随附 busybox 的 awk 生成，不依赖本机有没有 seq / yes
+sg_pad() {
+  local bb
+  bb=$(t_find_busybox)
+  [ -n "$bb" ] || bb="busybox"
+  "$bb" awk -v n="${1:-2500}" 'BEGIN{for(i=0;i<n;i++) printf "x"}'
+}
+
+# 超长记录夹具：整条服务端记录超过 2KB（在既有字段之后再加一个长字段）。
+# 末尾不留换行（sg_body 带的那个换行在这里被 $( ) 去掉）：交给日志的那个串因此与
+# 文件字节数逐字节同长，断言可以拿文件大小当独立真值。
+sg_body_seen_big() { # $1=填充字节数（默认 2500）
+  local pad
+  pad=$(sg_pad "${1:-2500}")
+  printf '%s' "$(sg_body 1290 1 ",\"signTime\":$(( SG_EPOCH * 1000 + 1230 * 60000 )),\"pad\":\"$pad\"")"
+}
+
 # 三个时点各自指定的响应体：$1=任务开始分钟 $2=主窗口截止分钟 $3=补签截止分钟
 # （sg_body 的三个时点是绑在一起的固定形状；提醒的锚点由任务数据推算，故要能分别摆）
 sg_task_span() {
@@ -105,6 +122,7 @@ sg_setup() { # $1=驱动名（决定工作目录）
   # curl 替身：真实 api 层那条路线（sg_run_real）靠它注入「这一次网络调用的全部事实」
   t_curl_stub "$SG_WORK/bin/curl" "$SG_WORK/ctl" >/dev/null
   printf '200\n' > "$SG_WORK/ctl/http"   # 替身 http_post 记下的状态码（默认 2xx）
+  : > "$SG_WORK/ctl/hdr"                 # 这一次的响应头原文（-D 落点形状）；缺省「没给头」
   sg_epoch
   sg_at 1411        # 默认 23:31（窗口外）；每条用例都会显式拨钟
 }
@@ -184,10 +202,12 @@ http_post() {
   printf '%s' "\$_body"
   # 这一次调用的事实交由 api 层落笔（格式只有一处，替身不自己拼 http=/body=/耗时=）：
   # 失败档如实写工具退出码与报错原文，成功档写状态码（ctl/http，默认 2xx）。
+  # 第五个参数是「这一次的响应头原文」所在文件（与 curl 的 -D 落点同形）：缺省那份是空的
+  # → 没有 hdr=；用例要验「响应头与核对行并排」时往里写一份头。
   if [ "\${_rc:-0}" != "0" ]; then
-    _api_note "\${_rc:-0}" "" "\$_body" "\$(cat ctl/wget.err 2>/dev/null)" "" "" ""
+    _api_note "\${_rc:-0}" "" "\$_body" "\$(cat ctl/wget.err 2>/dev/null)" ctl/hdr "" ""
   else
-    _api_note 0 "\$(cat ctl/http 2>/dev/null)" "\$_body" "" "" "" ""
+    _api_note 0 "\$(cat ctl/http 2>/dev/null)" "\$_body" "" ctl/hdr "" ""
   fi
   return "\${_rc:-0}"
 }
@@ -197,7 +217,11 @@ fi
 notify_event() { printf '%s\n' "\$1" >> ctl/events; return 0; }
 notify_once()  { printf '%s\n' "\$1" >> ctl/events; return 0; }
 update_desc()  { printf 'desc\n' >> ctl/desc; return 0; }
+# 刷新替身：默认顶掉真实刷新流程（三段时序是 keepalive 套件的地盘）。SG_REFRESH_MODE=real
+# 时**不定义它**，于是真实 refresh_token 跑起来——要看它自己写的那几行日志时用那条路线。
+if [ "${SG_REFRESH_MODE:-stub}" != "real" ]; then
 refresh_token() { printf 'refresh\n' >> ctl/refresh; printf '%s' "\${SG_NEWTOKEN:-}"; }
+fi
 ENV
 }
 
@@ -418,6 +442,7 @@ sg_case_branch_seen() {
   sg_setup seen
   sg_at 1290                                            # 21:30
   sg_body_seen 1290 1230 > "$SG_WORK/ctl/body.page"      # signTime = 20:30
+  printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/hdr"       # 这一次服务端给了响应头四项
   printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
   sg_run br_seen <<'DRIVER'
 run_once
@@ -454,12 +479,39 @@ DRIVER
     "alt=[$(sg_utc_hm 1230)]"
   t_has "已签到：时区与库路径变量作为环境旁证同一行" "$SG_WORK/seen.line" "TZ=["
   t_has "已签到：库路径变量也在同一行" "$SG_WORK/seen.line" "LDP=["
+  # 服务端认为现在几点也要在同一行：本地 now= 与服务端 Date 并排，「时间偏差归谁」才不必推理
+  t_has "已签到：服务端的响应头与核对行并排（Date 可供对齐）" "$SG_WORK/seen.line" "$SG_HDR_LINE"
+  t_hasnt "已签到（记录在上限内）：不带任何截断字段" "$SG_WORK/seen.line" "记录trunc="
   t_eq "已签到：记录类型是 detected" "$(sg_status sign_kind)" "detected"
   t_eq "已签到：记录日期是今天" "$(sg_status sign_date)" "$SG_DATE"
   t_eq "已签到：刷新了模块描述" "$(sg_val "$d" desc)" "1"
   t_eq "已签到：只查一次任务（不再提交）" "$(sg_val "$d" calls)" "1"
   t_eq "已签到：没有任何提交请求" "$(sg_val "$d" signreq)" "0"
   t_file "已签到：签到记录文件确实生成" "$w"
+
+  # 记录超过 2KB：与 api 层的 `body=` 同一口径——同一行里标明**原始字节数**与被我们截断。
+  # 不标的话，事后会把「被我们截断」读成「服务端只回了这么多」（用户故事 20）。
+  sg_setup seen-big
+  sg_at 1290
+  sg_body_seen_big > "$SG_WORK/ctl/body.page"
+  printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run br_seen_big <<'DRIVER'
+run_once
+printf 'rc=%s\n' "$?"
+sed 's/^\[[^]]*\][ ]*//' mod/fafu_checkin.log | grep -F '时间核对:' | tail -n 1 > ctl/big.line
+# 三个读数都从那一行里取：记录段本身的长度 / 它声明的原始字节数 / 截断标记
+printf 'flat=%s\n'  "$(sed 's/.*记录=//; s/ 记录len=.*//' ctl/big.line | tr -d '\n' | wc -c | tr -dc '0-9')"
+printf 'len=%s\n'   "$(sed 's/.*记录len=//; s/ .*//' ctl/big.line)"
+printf 'trunc=%s\n' "$(sed 's/.*记录trunc=//' ctl/big.line)"
+# 真值取夹具文件本身的大小（不含末尾换行，与交给日志的那个串逐字节同长）
+printf 'bytes=%s\n' "$(wc -c < ctl/body.page | tr -dc '0-9')"
+DRIVER
+  d="$SG_WORK/br_seen_big.out"
+  t_eq "记录超限：仍按已签到结算（返回 0）" "$(sg_val "$d" rc)" "0"
+  t_eq "记录超限：记录段只留上限那么多字节" "$(sg_val "$d" flat)" "2048"
+  t_eq "记录超限：同一行给出原始字节数（就是夹具那份响应的大小）" \
+    "$(sg_val "$d" len)" "$(sg_val "$d" bytes)"
+  t_eq "记录超限：同一行标明这一档被截断" "$(sg_val "$d" trunc)" "1"
 }
 
 sg_case_branch_leave() {
@@ -479,6 +531,13 @@ DRIVER
   t_eq "已请假：记录类型是 leave" "$(sg_status sign_kind)" "leave"
   t_eq "已请假：记录日期是今天" "$(sg_status sign_date)" "$SG_DATE"
   t_eq "已请假：不记录签到时间" "$(sg_status sign_time)" ""
+  # 这一档的服务端记录里**没有** signTime（请假记录本来就没有签到时刻）。
+  # 缺值就两个换算位都留空：一处空、一处有值（`alt=[00:00]`）会被读成「服务端说 00:00」，
+  # 而那是 1970 年零点换算出来的假钟点——本文件的口径是缺值输出空，不造假值。
+  sg_log_has "时间核对:" > "$SG_WORK/leave.line"
+  t_has_re "已请假：没有 signTime 时两个换算位都留空" "$SG_WORK/leave.line" \
+    '^时间核对: signTime=\[\] → sign_time=\[\] now=\[.*\] TZ=\[.*\] LDP=\[.*\] alt=\[\] 记录='
+  t_hasnt "已请假：不拿「1970 年零点」冒充 UTC 换算值" "$SG_WORK/leave.line" "alt=[00:00]"
 }
 
 sg_case_branch_window() {
@@ -911,6 +970,33 @@ DRIVER
   t_eq "刷新后仍拿不到任务：返回 2（任务异常）" "$(sg_val "$d" rc)" "2"
   t_eq "拿不到任务：通知事件是 failtask" "$(sg_val "$d" events)" "failtask,"
   t_has "拿不到任务：日志带 rc" "$SG_WORK/mod/fafu_checkin.log" "获取任务失败: rc=1"
+
+  # ③ 刷新那几行要说明**触发原因**（用户故事 18）：走真实 refresh_token（SG_REFRESH_MODE=real
+  #    让前导不再顶替它），只把采样等待与 token 来源换成替身——三段时序本身归 keepalive 套件。
+  #    调用点在本层，故「签到查询失败」这几个字必须由本层的调用点传下去。
+  sg_setup refresh-reason
+  sg_at 1290
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"
+  printf 'page:1\npage:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
+  printf 'mWakefulness=Awake\n' > "$SG_WORK/ctl/power.txt"
+  SG_REFRESH_MODE=real
+  export SG_REFRESH_MODE
+  sg_run refetch_reason <<'DRIVER'
+printf '0' > ctl/tok.n
+sleep() { :; }        # 采样等待不真等（次数与时序不是这条断言要考的东西）
+get_token() {         # 第一次是 run_once 取的旧 token，之后给新的（刷新因此会成功）
+  n=$(cat ctl/tok.n); n=$((n + 1)); printf '%s' "$n" > ctl/tok.n
+  if [ "$n" -le 1 ]; then printf 'OLD'; else printf 'NEWTOKEN'; fi
+}
+run_once; printf 'rc=%s\n' "$?"
+DRIVER
+  unset SG_REFRESH_MODE
+  d="$SG_WORK/refetch_reason.out"
+  t_eq "真实刷新链路：查询失败后刷新、再查、照常提交（返回 0）" "$(sg_val "$d" rc)" "0"
+  t_has "刷新那一行说明触发原因是「签到查询失败」" "$SG_WORK/mod/fafu_checkin.log" \
+    "刷新 token（静默优先） 触发原因=签到查询失败"
+  t_has "刷新成功那一行同样带触发原因" "$SG_WORK/mod/fafu_checkin.log" \
+    "刷新成功: OLD → NEWTOKEN 触发原因=签到查询失败"
 }
 
 # ============================================================
@@ -992,6 +1078,7 @@ sg_case_task_change() {
   dline=$(( SG_EPOCH * 1000 + 1380 * 60000 ))
   sg_body 1290 0 > "$SG_WORK/ctl/body.page"        # 未签
   sg_body 1290 1 > "$SG_WORK/ctl/body.seen"        # 同一个任务的签到状态改成 1
+  printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/hdr" # 这一次服务端给了响应头四项
   printf 'page:0\npage:0\nseen:0\n' > "$SG_WORK/ctl/api.seq"
   sg_run task_change <<'DRIVER'
 tlines() { grep -F '任务变化:' mod/fafu_checkin.log 2>/dev/null; }
@@ -1016,10 +1103,11 @@ DRIVER
   t_eq "同一任务再查一轮：末行仍是「不在签到时段」" "$(sg_val "$d" last2)" \
     "[晚查寝签到] 不在签到时段"
   t_eq "签到状态变了：再记一行" "$(sg_val "$d" n3)" "2"
+  # 那一行末尾并排服务端的响应头：任务是何时出现的，与服务端认为现在几点（Date）同处一行
   t_eq "首次那一行的旧值为空（第一次拿到任务也算变化）" "$(sg_val "$d" first)" \
-    "任务变化: id=→88123 state=→0 begin=→$bt 截止=→$dline"
+    "任务变化: id=→88123 state=→0 begin=→$bt 截止=→$dline $SG_HDR_LINE"
   t_eq "状态变化那一行给出前后四元组" "$(sg_val "$d" third)" \
-    "任务变化: id=88123→88123 state=0→1 begin=$bt→$bt 截止=$dline→$dline"
+    "任务变化: id=88123→88123 state=0→1 begin=$bt→$bt 截止=$dline→$dline $SG_HDR_LINE"
   # 三档返回码由判定决定，任务快照只写它自己那一个文件，不得改变它
   t_eq "首次那一轮仍是「不在时段」（返回 1）" "$(sg_val "$d" rc1)" "1"
   t_eq "第二轮仍返回 1（记不记快照与返回码无关）" "$(sg_val "$d" rc2)" "1"
@@ -1044,6 +1132,8 @@ DRIVER
   d="$SG_WORK/task_change_next.out"
   t_eq "跨日那一轮确实拨到了第二天" "$(sg_val "$d" today)" "2026-10-02"
   t_eq "跨日后同样的任务算「新任务」（再记一行）" "$(sg_val "$d" n2)" "2"
+  # 这一档的替身没给响应头（sg_setup 把 ctl/hdr 清空了）：行尾就停在「截止」，
+  # 不留空段、也不留一个空的 hdr=。
   t_eq "跨日后那一行的旧值为空（昨天的快照不是今天的比较基准）" "$(sg_val "$d" last)" \
     "任务变化: id=→88123 state=→0 begin=→$bt 截止=→$dline"
 }
@@ -1318,12 +1408,19 @@ sg_case_attempt_lines() {
   printf '400\n' > "$SG_WORK/ctl/curl_code"
   printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/curl_body"
   printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/curl_hdr"
+  # 提交失败也会触发一次刷新（老 token 失效是常见档）：那一行同样要说明触发原因，
+  # 故这一档让真实 refresh_token 跑起来（采样等待与 token 来源换成替身）。
+  SG_REFRESH_MODE=real
+  export SG_REFRESH_MODE
   sg_run_real attempt_fail <<'DRIVER'
+sleep() { :; }
+get_token() { printf 'NEWTOKEN'; }
 signin_submit 88123 "晚查寝签到" 1790866800000 1790865000000 119.243462 26.088417 1790861400000 TOK >/dev/null 2>&1
 printf 'rc=%s\n' "$?"
 printf 'attempts=%s\n' "$(grep -c '提交尝试:' mod/fafu_checkin.log)"
 printf 'calls=%s\n'    "$(grep -c . ctl/curl_calls)"
 DRIVER
+  unset SG_REFRESH_MODE
   d="$SG_WORK/attempt_fail.out"
   f=$(sg_plain_log)
   t_eq "服务端拒绝：返回 1（下一分钟重试）" "$(sg_val "$d" rc)" "1"
@@ -1336,6 +1433,9 @@ DRIVER
     "^提交尝试: try=1 rid=88123 lng=119\.243462 lat=26\.088417 http=400 body=.* hdr=\{.*\} 耗时=[0-9]+(ms|s)$"
   t_has "全部失败：汇总行仍带 rc 与发出去的参数" "$f" \
     "签到失败: rc=1 rid=88123 lng=119.243462 lat=26.088417 "
+  # 刷新那一行的触发原因要分清是哪条路来的：提交失败 ≠ 查询失败（用户故事 18）
+  t_has "提交失败触发的刷新说明原因（签到提交失败）" "$SG_WORK/mod/fafu_checkin.log" \
+    "刷新 token（静默优先） 触发原因=签到提交失败"
 
   # ② 提交成功：与失败行同一字段集（成功那次也带完整正文与响应头）
   sg_setup attempt-ok

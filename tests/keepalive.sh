@@ -471,6 +471,10 @@ DRIVER
   t_eq "② 亮屏失败：仍记一次失败" "$(ka_val "$d" on_fail)" "1"
   t_eq "③ 熄屏失败：失败计数累加" "$(ka_val "$d" off_fail)" "2"
   t_eq "③ 静默刷新成功后的 token 经状态层落盘" "$(ka_val "$d" off_token)" "1"
+  # 刷新那几行要说明**触发原因**（用户故事 18）：保活路径与「签到查询失败」「手动命令」
+  # 必须分得开——那一行由调用点把原因传下去，本套件跑的是真实 refresh_token。
+  t_has "保活触发的刷新说明原因是「保活」" "$KA_WORK/mod/fafu_checkin.log" \
+    "刷新 token（静默优先） 触发原因=保活"
   t_eq "④ 冷却中：不再刷新（这轮没有去开页）" "$(ka_val "$d" cold_refresh)" "0"
   # 采样目录没被动过，读到的最新 token 仍是夹具里最后写下的那个
   t_eq "④ 冷却中：采样点没被消费（读到的仍是夹具最新值）" "$(ka_val "$d" cold_seen)" "2_BEEF"
