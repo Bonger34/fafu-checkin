@@ -5,7 +5,7 @@
 #   1) **只断言外部行为**：返回码、状态文件的最终内容、发给 notify 层的**事件名**、
 #      日志正文，以及「某个时刻会发生什么」；
 #   2) **缝只有两个**（都在运行时既有注入点上）：时间走 `_now` 的替身（拨 EPOCH），
-#      网络走 `http_post`（注入响应体 / 退出码）；设备命令不需要缝；
+#      网络走 `http_post`（注入响应体 / 退出码），提交尝试行那条走真实 api 层 + curl 替身；
 #   3) **边界逐分钟**：窗口判定的基准是「当前时刻（毫秒）」，断言把 EPOCH 拨到
 #      21:29 / 21:30 / 22:30 / 22:59 / 23:00 各跑一次 signin_decide，每个时点只比一侧。
 #
@@ -45,6 +45,15 @@ sg_at() {
   export SG_NOW_S
 }
 
+# 同一毫秒戳按 UTC 的解释（HH:MM）：期望值用真实 busybox 现算——写死就成了把
+# 「跑断言的这台机器的时区」烧进期望里，CI（UTC）与本机（UTC+8）会得出不同的值。
+sg_utc_hm() { # $1=当日第几分钟（与夹具同源的偏移）
+  local bb
+  bb=$(t_find_busybox)
+  [ -n "$bb" ] || bb="busybox"
+  "$bb" date -u -d "@$(( SG_EPOCH + ${1:-0} * 60 ))" +%H:%M 2>/dev/null
+}
+
 # ---- 夹具：接口响应体 ----
 # 字段形态照抄接口的真实响应（毫秒时间戳、signInStudent.signState），只留决策要读的字段，
 # 顺序也与真实响应一致（顶层 id/name/时间/lng/lat，signState 在嵌套对象里）。
@@ -67,6 +76,23 @@ sg_body_seen() { # $1=任务开始偏移 $2=signTime 偏移
   sg_body "$1" 1 ",\"signTime\":$(( SG_EPOCH * 1000 + ${2:-0} * 60000 ))"
 }
 
+# 一串 x（$1=字节数）：借随附 busybox 的 awk 生成，不依赖本机有没有 seq / yes
+sg_pad() {
+  local bb
+  bb=$(t_find_busybox)
+  [ -n "$bb" ] || bb="busybox"
+  "$bb" awk -v n="${1:-2500}" 'BEGIN{for(i=0;i<n;i++) printf "x"}'
+}
+
+# 超长记录夹具：整条服务端记录超过 2KB（在既有字段之后再加一个长字段）。
+# 末尾不留换行（sg_body 带的那个换行在这里被 $( ) 去掉）：交给日志的那个串因此与
+# 文件字节数逐字节同长，断言可以拿文件大小当独立真值。
+sg_body_seen_big() { # $1=填充字节数（默认 2500）
+  local pad
+  pad=$(sg_pad "${1:-2500}")
+  printf '%s' "$(sg_body 1290 1 ",\"signTime\":$(( SG_EPOCH * 1000 + 1230 * 60000 )),\"pad\":\"$pad\"")"
+}
+
 # 三个时点各自指定的响应体：$1=任务开始分钟 $2=主窗口截止分钟 $3=补签截止分钟
 # （sg_body 的三个时点是绑在一起的固定形状；提醒的锚点由任务数据推算，故要能分别摆）
 sg_task_span() {
@@ -74,6 +100,13 @@ sg_task_span() {
     "$(( SG_EPOCH * 1000 + $1 * 60000 ))" \
     "$(( SG_EPOCH * 1000 + $3 * 60000 ))" \
     "$(( SG_EPOCH * 1000 + $2 * 60000 ))"
+}
+
+# 查询失败的夹具：长正文（>200 字节，尾部那句在旧写法的 head -c 200 之外）。
+# 断言尾部那一句出现，就等于断言「正文完整落盘」而不是「前 200 字节落盘」。
+sg_body_long() {
+  printf '{"timestamp":1759500000000,"status":400,"error":"Bad Request","message":"窗口未开：服务端拒绝了这一次查询，正文里的这一句正是要看的那一句","path":"/health-api/sign_in/student/my/page","detail":"%s"}\n' \
+    "正文的尾部也必须整段落进日志"
 }
 
 # ---- 工作目录与环境 ----
@@ -86,6 +119,10 @@ sg_setup() { # $1=驱动名（决定工作目录）
   printf '0\n' > "$SG_WORK/ctl/rc"
   printf '0\n' > "$SG_WORK/ctl/rand"   # 签名随机数的替身序号（本机没有 /dev/urandom）
   t_bb_wrap "$SG_WORK/bin/bb" >/dev/null
+  # curl 替身：真实 api 层那条路线（sg_run_real）靠它注入「这一次网络调用的全部事实」
+  t_curl_stub "$SG_WORK/bin/curl" "$SG_WORK/ctl" >/dev/null
+  printf '200\n' > "$SG_WORK/ctl/http"   # 替身 http_post 记下的状态码（默认 2xx）
+  : > "$SG_WORK/ctl/hdr"                 # 这一次的响应头原文（-D 落点形状）；缺省「没给头」
   sg_epoch
   sg_at 1411        # 默认 23:31（窗口外）；每条用例都会显式拨钟
 }
@@ -101,6 +138,9 @@ sg_env() {
   cat > "$SG_WORK/_env.sh" <<ENV
 PATH='./bin:/bin:/usr/bin'
 BB_OVERRIDE='./bin/bb'
+# 网络工具指向测试底座生成的 curl 替身：api 层在**加载时**读这个变量，
+# 于是本机不去 PATH 上探测（路线 B 的驱动因此一定跑在真实 api 层上）
+CURL_BIN='./bin/curl'
 MOCK_DATE_CTL='./ctl/date'
 # 网络替身的控制目录在 ctl/；设备命令替身目录同样给上（判到窗口内的用例会真去读屏幕状态）
 MOCK_WGET_DIR='./ctl'
@@ -110,15 +150,17 @@ MODDIR='./mod'
 # token 目录：LD 只在 api 层加载时取一次，这里指向驱动的工作目录（一定存在），
 # 于是「取不到 token」不会把判定链挡在门外；「没有应用数据」那一档由用例自己改 LD
 LD_DIR='.'
-# 等 App 数据就绪时用的 sleep 替身（等待本身要断言的用例自己换掉它：真等 30 秒没有意义）
-SLEEP_OVERRIDE="${SLEEP_OVERRIDE:-}"
+# 等 App 数据就绪 / 提交失败后短重试 用的 sleep 替身。
+# 默认给 `:`（不耗时）：等待的长度不是断言重点，次数与结果才是——否则每个提交失败的
+# 用例都要真等 15 秒×2。要观察等待行为的用例自己覆盖它。
+SLEEP_OVERRIDE="${SLEEP_OVERRIDE:-:}"
 PL=20261001
 NOTIFY=1
 SU_MODE=""
 SG_DATE='$SG_DATE'
 SG_EPOCH=$SG_EPOCH
 SG_NOW_S=$SG_NOW_S
-export BB_OVERRIDE MOCK_DATE_CTL MOCK_WGET_DIR MOCK_DEVICE_DIR MOCK_RANDOM_CTL
+export BB_OVERRIDE CURL_BIN MOCK_DATE_CTL MOCK_WGET_DIR MOCK_DEVICE_DIR MOCK_RANDOM_CTL
 export MODDIR LD_DIR PL NOTIFY SU_MODE SLEEP_OVERRIDE
 export SG_EPOCH SG_NOW_S
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
@@ -135,18 +177,18 @@ _now() {
   [ "\$1" = "+%s" ] && { printf '%s' "\$SG_NOW_S"; return 0; }
   "\$BB" date "\$@"
 }
-# 网络替身：按 ctl/api.seq 的第 N 行分派（形如「page:rc」「sign:0」），
-# 行数不够时回落到 ctl/api.default；响应体从 ctl/body.<app> 读，由驱动自己写。
+# 网络替身（路线 A）：按 ctl/api.seq 的第 N 行分派（形如「page:rc」「sign:0」），
+# 行数不够时回落到上一个用过的档、再退到 ctl/api.default；响应体从 ctl/body.<app> 读。
 # 计数必须落在**文件**上：api() 在 $( ) 里调 http_post，变量活在子 shell 里，
 # 每次调用都会从第 1 行重新开始（整条序列因此只认第一行的分支，极难发现）。
+# SG_API_MODE=real 时不定义它：那条路线让**真实 api 层**跑，事实由 curl 替身给。
+if [ "\${SG_API_MODE:-stub}" != "real" ]; then
 http_post() {
   _n=\$(cat ctl/seq.n 2>/dev/null); _n=\$(expr "\${_n:-0}" + 1)
   printf '%s' "\$_n" > ctl/seq.n
   # 记录 URL 与 Authorization 两样：token 有没有一路传到提交，就看这行里有没有它
   printf '%s | %s\n' "\$1" "\$2" >> ctl/api.calls
   _m=\$(sed -n "\${_n}p" ctl/api.seq 2>/dev/null)
-  # 序列用完 → 先按「上一个用过的档」继续应答（同一类请求的响应体是一样的），
-  # 再退到 ctl/api.default（那是「整条链路都不通」的用例用的）
   if [ -z "\$_m" ]; then
     _m=\$(cat ctl/last 2>/dev/null)
     [ -n "\$_m" ] || _m=\$(cat ctl/api.default 2>/dev/null)
@@ -156,22 +198,30 @@ http_post() {
     *)   _app=page; _rc=0 ;;
   esac
   printf '%s\n' "\$_m" > ctl/last
-  cat "ctl/body.\$_app" 2>/dev/null
-  # 失败档：像真实 wget 那样给出一句报错，但要落在 api 层的 API_ERRLOG 上——
-  # 真机上那句报错是 wget 直接写进这个文件的（api 层读它才拿得到失败原因），
-  # 打到 stderr 不等于它会被读到（调用链上没人收 stderr）。
-  # 成功档一个字都不吐：真实 wget 成功时也是安静的。
+  _body=\$(cat "ctl/body.\$_app" 2>/dev/null)
+  printf '%s' "\$_body"
+  # 这一次调用的事实交由 api 层落笔（格式只有一处，替身不自己拼 http=/body=/耗时=）：
+  # 失败档如实写工具退出码与报错原文，成功档写状态码（ctl/http，默认 2xx）。
+  # 第五个参数是「这一次的响应头原文」所在文件（与 curl 的 -D 落点同形）：缺省那份是空的
+  # → 没有 hdr=；用例要验「响应头与核对行并排」时往里写一份头。
   if [ "\${_rc:-0}" != "0" ]; then
-    [ -n "\${API_ERRLOG:-}" ] && cat ctl/wget.err > "\$API_ERRLOG" 2>/dev/null
+    _api_note "\${_rc:-0}" "" "\$_body" "\$(cat ctl/wget.err 2>/dev/null)" ctl/hdr "" ""
+  else
+    _api_note 0 "\$(cat ctl/http 2>/dev/null)" "\$_body" "" ctl/hdr "" ""
   fi
   return "\${_rc:-0}"
 }
+fi
 # 观察面：谁被通知了、描述刷没刷新、token 刷没刷新。
 # 通知正文与降权链路由 tests/notify.sh 断言，这里只关心「业务层报了哪个事件名」。
 notify_event() { printf '%s\n' "\$1" >> ctl/events; return 0; }
 notify_once()  { printf '%s\n' "\$1" >> ctl/events; return 0; }
 update_desc()  { printf 'desc\n' >> ctl/desc; return 0; }
+# 刷新替身：默认顶掉真实刷新流程（三段时序是 keepalive 套件的地盘）。SG_REFRESH_MODE=real
+# 时**不定义它**，于是真实 refresh_token 跑起来——要看它自己写的那几行日志时用那条路线。
+if [ "${SG_REFRESH_MODE:-stub}" != "real" ]; then
 refresh_token() { printf 'refresh\n' >> ctl/refresh; printf '%s' "\${SG_NEWTOKEN:-}"; }
+fi
 ENV
 }
 
@@ -189,6 +239,14 @@ SG_SEQ_LAST='sign:0'
 SG_SIGN_OK='{"code":0,"msg":"success"}'
 # 提交失败的响应体：带 timestamp
 SG_SIGN_FAIL='{"timestamp":1759500000000,"status":500,"msg":"busy"}'
+
+# 响应头夹具与它该落成的字面：白名单四项齐全，顺序就是 api 层固定的那一个。
+# 用来钉「hdr={…} 真的写进了提交行」，而不是靠实现自己声明写了。
+SG_HDR_RAW='Date: Mon, 13 Oct 2025 21:30:00 GMT
+Content-Length: 53
+Content-Type: application/json;charset=UTF-8
+Server: nginx'
+SG_HDR_LINE='hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Content-Length: 53|Content-Type: application/json;charset=UTF-8|Server: nginx}'
 
 sg_run() { # $1=名字；主体从 stdin 读入
   local name
@@ -209,6 +267,16 @@ sg_run() { # $1=名字；主体从 stdin 读入
     echo "  （驱动 $name 的 stderr）"
     sed 's/^/    /' "$SG_WORK/$name.err"
   fi
+}
+
+# 同 sg_run，但走**路线 B**：不覆盖 http_post，让 api 层真实的那个跑起来。
+# 这一次网络调用的事实由 curl 替身的控制文件决定（响应头解析、压平、耗时都是真实代码在写），
+# 代价是替身对每次调用给同样的应答，做不出「第 N 次返回什么」那种序列。
+sg_run_real() { # $1=名字；主体从 stdin 读入
+  SG_API_MODE=real
+  export SG_API_MODE
+  sg_run "$1"
+  unset SG_API_MODE
 }
 
 # 从驱动输出里取一行（形如 key=value）
@@ -233,6 +301,13 @@ sg_log() {
 # 按前缀在日志里找一行（明文去掉时间戳后）：给那些「不保证是最后一行」的核对类日志用。
 sg_log_has() { # $1=文案前缀
   sed 's/^\[[^]]*\][ ]*//' "$SG_WORK/mod/fafu_checkin.log" 2>/dev/null | grep -F "$1" | tail -n 1
+}
+
+# 日志正文（去掉行首时间戳）整份落到 $SG_WORK/log.txt，并输出该路径。
+# sg_log / sg_log_has 只看一行；要断言「日志里有哪几行、各几行」时用这一份。
+sg_plain_log() {
+  sed 's/^\[[^]]*\][ ]*//' "$SG_WORK/mod/fafu_checkin.log" 2>/dev/null > "$SG_WORK/log.txt"
+  printf '%s' "$SG_WORK/log.txt"
 }
 
 # ============================================================
@@ -367,6 +442,7 @@ sg_case_branch_seen() {
   sg_setup seen
   sg_at 1290                                            # 21:30
   sg_body_seen 1290 1230 > "$SG_WORK/ctl/body.page"      # signTime = 20:30
+  printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/hdr"       # 这一次服务端给了响应头四项
   printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
   sg_run br_seen <<'DRIVER'
 run_once
@@ -383,16 +459,59 @@ DRIVER
   t_eq "已签到：通知事件是 seen" "$(sg_val "$d" events)" "seen,"
   t_eq "已签到：记录下来的是 signTime 换算的时间" "$(sg_status sign_time)" "20:30"
   # 核对行同时留下原始戳与换算值：落库钟点若对不上，一行就能定位是哪一段错的。
-  # 用 sg_log_has 而不是 sg_log——这行不保证是最后一行，别挤掉上面的「日志文案不变」。
-  # 期望值与夹具同源（sg_body_seen 的第二个参数即 signTime 的分钟偏移），不写死戳
-  t_eq "已签到：日志里有原始戳与换算值的核对行" \
-    "$(sg_log_has '时间核对:')" "时间核对: signTime=[$(( SG_EPOCH * 1000 + 1230 * 60000 ))] → sign_time=[20:30]"
+  # 用 sg_log_has 而不是 sg_log——这行不保证是最后一行，别挤掉上面的「日志文案不变」；
+  # 用 t_has 而不是 t_eq——加旁证字段不该让这条断言跟着改。
+  t_has "已签到：日志里有原始戳与换算值的核对行" \
+    "$SG_WORK/mod/fafu_checkin.log" "时间核对: signTime=[$(( SG_EPOCH * 1000 + 1230 * 60000 ))] → sign_time=[20:30]"
+  # 那一行要能一次定性「记录里的钟点为什么不对」：服务端那条记录整条落盘（字段名以
+  # 接口返回的为准），四种时间并排（本地此刻 / 原始毫秒戳 / 换算结果 / 同一戳按 UTC）。
+  sg_log_has "时间核对:" > "$SG_WORK/seen.line"
+  t_has "已签到：服务端记录整条落盘（任务号 / 名称）" "$SG_WORK/seen.line" \
+    '"id":88123,"name":"晚查寝签到"'
+  t_has "已签到：记录里的三个时点都在（开始 / 主窗口截止 / 补签截止）" "$SG_WORK/seen.line" \
+    '"beginTime":'"$(( SG_EPOCH * 1000 + 1290 * 60000 ))"',"supplementEndTime":'"$(( SG_EPOCH * 1000 + 1380 * 60000 ))"',"endTime":'"$(( SG_EPOCH * 1000 + 1350 * 60000 ))"
+  t_has "已签到：签到状态与坐标也在（整条记录，不是挑几个字段）" "$SG_WORK/seen.line" \
+    '"signInStudent":{"signState":1},"lng":119.243462,"lat":26.088417'
+  t_has "已签到：签到时刻（signTime）原样在记录里" "$SG_WORK/seen.line" \
+    '"signTime":'"$(( SG_EPOCH * 1000 + 1230 * 60000 ))"
+  t_has "已签到：本地此刻与记录同一行" "$SG_WORK/seen.line" "now=[$SG_DATE 21:30:00]"
+  t_has "已签到：同一戳按 UTC 的解释同一行（换算分歧一眼可见）" "$SG_WORK/seen.line" \
+    "alt=[$(sg_utc_hm 1230)]"
+  t_has "已签到：时区与库路径变量作为环境旁证同一行" "$SG_WORK/seen.line" "TZ=["
+  t_has "已签到：库路径变量也在同一行" "$SG_WORK/seen.line" "LDP=["
+  # 服务端认为现在几点也要在同一行：本地 now= 与服务端 Date 并排，「时间偏差归谁」才不必推理
+  t_has "已签到：服务端的响应头与核对行并排（Date 可供对齐）" "$SG_WORK/seen.line" "$SG_HDR_LINE"
+  t_hasnt "已签到（记录在上限内）：不带任何截断字段" "$SG_WORK/seen.line" "记录trunc="
   t_eq "已签到：记录类型是 detected" "$(sg_status sign_kind)" "detected"
   t_eq "已签到：记录日期是今天" "$(sg_status sign_date)" "$SG_DATE"
   t_eq "已签到：刷新了模块描述" "$(sg_val "$d" desc)" "1"
   t_eq "已签到：只查一次任务（不再提交）" "$(sg_val "$d" calls)" "1"
   t_eq "已签到：没有任何提交请求" "$(sg_val "$d" signreq)" "0"
   t_file "已签到：签到记录文件确实生成" "$w"
+
+  # 记录超过 2KB：与 api 层的 `body=` 同一口径——同一行里标明**原始字节数**与被我们截断。
+  # 不标的话，事后会把「被我们截断」读成「服务端只回了这么多」（用户故事 20）。
+  sg_setup seen-big
+  sg_at 1290
+  sg_body_seen_big > "$SG_WORK/ctl/body.page"
+  printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run br_seen_big <<'DRIVER'
+run_once
+printf 'rc=%s\n' "$?"
+sed 's/^\[[^]]*\][ ]*//' mod/fafu_checkin.log | grep -F '时间核对:' | tail -n 1 > ctl/big.line
+# 三个读数都从那一行里取：记录段本身的长度 / 它声明的原始字节数 / 截断标记
+printf 'flat=%s\n'  "$(sed 's/.*记录=//; s/ 记录len=.*//' ctl/big.line | tr -d '\n' | wc -c | tr -dc '0-9')"
+printf 'len=%s\n'   "$(sed 's/.*记录len=//; s/ .*//' ctl/big.line)"
+printf 'trunc=%s\n' "$(sed 's/.*记录trunc=//' ctl/big.line)"
+# 真值取夹具文件本身的大小（不含末尾换行，与交给日志的那个串逐字节同长）
+printf 'bytes=%s\n' "$(wc -c < ctl/body.page | tr -dc '0-9')"
+DRIVER
+  d="$SG_WORK/br_seen_big.out"
+  t_eq "记录超限：仍按已签到结算（返回 0）" "$(sg_val "$d" rc)" "0"
+  t_eq "记录超限：记录段只留上限那么多字节" "$(sg_val "$d" flat)" "2048"
+  t_eq "记录超限：同一行给出原始字节数（就是夹具那份响应的大小）" \
+    "$(sg_val "$d" len)" "$(sg_val "$d" bytes)"
+  t_eq "记录超限：同一行标明这一档被截断" "$(sg_val "$d" trunc)" "1"
 }
 
 sg_case_branch_leave() {
@@ -412,6 +531,13 @@ DRIVER
   t_eq "已请假：记录类型是 leave" "$(sg_status sign_kind)" "leave"
   t_eq "已请假：记录日期是今天" "$(sg_status sign_date)" "$SG_DATE"
   t_eq "已请假：不记录签到时间" "$(sg_status sign_time)" ""
+  # 这一档的服务端记录里**没有** signTime（请假记录本来就没有签到时刻）。
+  # 缺值就两个换算位都留空：一处空、一处有值（`alt=[00:00]`）会被读成「服务端说 00:00」，
+  # 而那是 1970 年零点换算出来的假钟点——本文件的口径是缺值输出空，不造假值。
+  sg_log_has "时间核对:" > "$SG_WORK/leave.line"
+  t_has_re "已请假：没有 signTime 时两个换算位都留空" "$SG_WORK/leave.line" \
+    '^时间核对: signTime=\[\] → sign_time=\[\] now=\[.*\] TZ=\[.*\] LDP=\[.*\] alt=\[\] 记录='
+  t_hasnt "已请假：不拿「1970 年零点」冒充 UTC 换算值" "$SG_WORK/leave.line" "alt=[00:00]"
 }
 
 sg_case_branch_window() {
@@ -625,48 +751,140 @@ DRIVER
 }
 
 sg_case_submit_failed() {
-  local d
+  local d f
   sg_setup failed
   sg_at 1290
   sg_body 1290 0 > "$SG_WORK/ctl/body.page"
   # 服务端拒绝：请求发出去了、响应体里带 timestamp（那是服务端报错的标志）。
-  # 网络失败那条路径在第六节（调用本身非 0）。
+  # 调用本身非 0 那条路径在第十一节。
   printf '%s\n' "$SG_SEQ_OK" > "$SG_WORK/ctl/api.seq"
   printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/body.sign"
   sg_run failed <<'DRIVER'
 run_once; printf 'rc=%s\n' "$?"
-printf 'events=%s\n' "$(tr '\n' ',' < ctl/events 2>/dev/null)"
-printf 'desc=%s\n'   "$(grep -c . ctl/desc 2>/dev/null || echo 0)"
+printf 'events=%s\n'   "$(tr '\n' ',' < ctl/events 2>/dev/null)"
+printf 'desc=%s\n'     "$(grep -c . ctl/desc 2>/dev/null || echo 0)"
+printf 'attempts=%s\n' "$(grep -c '提交尝试:' mod/fafu_checkin.log)"
+printf 'signs=%s\n'    "$(grep -c 'student/sign' ctl/api.calls 2>/dev/null)"
 DRIVER
   d="$SG_WORK/failed.out"
+  f=$(sg_plain_log)
   t_eq "提交失败：返回 1（下一分钟重试）" "$(sg_val "$d" rc)" "1"
-  t_has "提交失败：日志带 rc 与响应体片段" "$SG_WORK/mod/fafu_checkin.log" "签到失败: rc=0 $SG_SIGN_FAIL"
+  # 每一次尝试各一行：最后一次失败的那次也有自己的行，不靠汇总行代表它
+  t_eq "提交失败：每次尝试各留一行（行数 = 真实提交调用数）" \
+    "$(sg_val "$d" attempts)" "$(sg_val "$d" signs)"
+  # 参数也要留痕：400 一类的「请求不合法」只能靠发出去的 rid/坐标来判
+  t_has "提交失败：尝试行带第几次、任务号、坐标、状态码与完整正文" "$f" \
+    "提交尝试: try=1 rid=88123 lng=119.243462 lat=26.088417 http=200 body=$SG_SIGN_FAIL"
+  t_has_re "提交失败：尝试行以耗时收尾" "$f" "^提交尝试: .* 耗时=[0-9]+(ms|s)$"
+  # 全部失败：末尾那行汇总仍给出参数、尝试次数与服务端原文
+  t_has "提交失败：汇总行仍带 rc 与发出去的参数" "$f" \
+    "签到失败: rc=0 rid=88123 lng=119.243462 lat=26.088417 "
+  t_has_re "提交失败：汇总行给出尝试次数" "$f" "^签到失败: .* try=[0-9]+ tries=[0-9]+ "
+  t_has_re "提交失败：汇总行带上服务端原文" "$f" '^签到失败: .*body=\{"timestamp"'
   t_eq "提交失败：通知事件是 failsign" "$(sg_val "$d" events)" "failsign,"
   t_eq "提交失败：不写签到记录" "$(sg_status sign_kind)" ""
   t_eq "提交失败：不刷新描述（没有成功可言）" "$(sg_val "$d" desc)" "0"
+}
 
-  # 「当日仅首次通知」：signin 层每次都只报事件名，去重交给 notify 层的当日标记。
-  # 这里把 notify_once 换成真实的去重逻辑，连着跑两轮，验第二轮确实被判成「今天已发过」。
-  # 单开一份工作目录：同一目录里的产物会被下一轮覆盖，断言就静默空转了。
-  sg_setup failed2
+# 「提交失败当日仅首次通知」：这是跨层不变式——signin 层每轮只报事件名，去重靠 notify 层的
+# 当日标记。两轮都提交失败时，第二轮必须仍被判成「今天已发过」。
+# 一轮里的短重试会打好几次提交，故断言按**轮**计数（事件名两行、真正发出一次）。
+sg_case_submit_failed_once() {
+  local d
+  sg_setup failed-once
   sg_at 1291
   sg_body 1290 0 > "$SG_WORK/ctl/body.page"
-  # 两轮各自的「查任务 + 提交」：顺序是 page, sign, page, sign
-  printf 'page:0\nsign:0\npage:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
   printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/body.sign"
-  sg_run failed2 <<'DRIVER'
+  sg_run failed_once <<'DRIVER'
+# notify_once 换成真实的当日去重：先记下 signin 层报的事件名，再按标记决定发不发
 notify_once() {
-  if notify_marked fail; then printf 'skipped\n' >> ctl/dup
-  else printf 'sent\n' >> ctl/dup; notify_mark fail; fi
+  printf '%s\n' "$1" >> ctl/events
+  case "$1" in
+    failsign) f=./mod/.fafu_notify_fail ;;
+    *)        f=./mod/.fafu_notify_other ;;
+  esac
+  if [ -f "$f" ]; then printf '%s skipped\n' "$1" >> ctl/dup
+  else printf '%s sent\n' "$1" >> ctl/dup; date +%Y-%m-%d > "$f"; fi
   return 0
 }
+# 两轮都提交失败：每轮开始都把替身序列复位（序列是「这一个驱动内的第 N 次调用」）
+printf 'page:0\nsign:0\n' > ctl/api.seq
+printf '0' > ctl/seq.n
 run_once; printf 'rc1=%s\n' "$?"
+printf 'page:0\nsign:0\n' > ctl/api.seq
+printf '0' > ctl/seq.n
 run_once; printf 'rc2=%s\n' "$?"
+printf 'failsign=%s\n' "$(grep -c '^failsign$' ctl/events 2>/dev/null)"
+printf 'sent=%s\n'     "$(grep -c ' sent$' ctl/dup 2>/dev/null)"
+printf 'skipped=%s\n'  "$(grep -c ' skipped$' ctl/dup 2>/dev/null)"
 DRIVER
-  t_eq "首次失败：签到层报的事件确实被发出去（标记随之落地）" \
-    "$(sed -n 1p "$SG_WORK/ctl/dup")" "sent"
-  t_eq "第二次重试：签到层仍报同一事件名，但当日不再发" \
-    "$(sed -n 2p "$SG_WORK/ctl/dup")" "skipped"
+  d="$SG_WORK/failed_once.out"
+  t_eq "两轮都失败：两轮都返回 1" "$(sg_val "$d" rc1),$(sg_val "$d" rc2)" "1,1"
+  t_eq "两轮都失败：signin 层两轮都报同一事件名" "$(sg_val "$d" failsign)" "2"
+  t_eq "当日仅首次通知：当日真的只发出一条" "$(sg_val "$d" sent)" "1"
+  t_eq "当日仅首次通知：第二轮因落过标记被判成已发过" "$(sg_val "$d" skipped)" "1"
+}
+
+# 提交失败后的短重试：真机连续四天在 21:30~21:33 被拒、而同分钟内手动提交就成功，
+# 说明窗口刚开的那一小段服务端还没开始收——等满一分钟太亏，故失败后短等重来。
+# 顺带证明「首次失败 → 刷新 token → 再试」这条老路径仍然保留（第 2 次调用就是它）。
+sg_case_submit_retry() {
+  local d f
+  sg_setup retry
+  sg_at 1290
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"
+  printf 'page:0\nsign:0\nsign:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
+  printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/body.sign"
+  # 成功体由用例写进文件，驱动只读文件——驱动是独立进程，测试变量不会自动进去
+  # （写成 $SG_SIGN_OK 会展开成空串，于是「成功」被当成空响应体，重试根本不会被触发）
+  printf '%s' "$SG_SIGN_OK" > "$SG_WORK/ctl/body.ok"
+  sg_run retry <<'DRIVER'
+# 自己接管网络：第 1 次提交（总第 2 次调用，前一次是查询）失败，下一次提交成功。
+# 计次落在文件上——api() 在 $( ) 子 shell 里调用，变量加法跨不过去。
+# 这一次调用的事实仍交给 api 层落笔，本驱动只决定「这次返回什么」。
+printf '0' > ctl/b.n
+: > ctl/refresh
+http_post() {
+  _n=$(cat ctl/b.n); _n=$((_n + 1)); printf '%s' "$_n" > ctl/b.n
+  printf '%s | %s\n' "$1" "$2" >> ctl/api.calls
+  case "$1" in
+    # 尾星不能省：URL 里 sign 之后还有 "?lng=..."，`*student/sign)` 这种写法
+    # 在这条 busybox ash 链路上匹配不上（判据是「整串匹配」，不是「子串包含」）
+    *student/sign*)
+      if [ "$_n" -le 2 ]; then
+        _api_note 0 400 "$(cat ctl/body.sign)" "" "" "" ""
+        printf '%s' "$(cat ctl/body.sign)"
+      else
+        _api_note 0 200 "$(cat ctl/body.ok)" "" "" "" ""
+        printf '%s' "$(cat ctl/body.ok)"
+      fi
+      return 0 ;;
+  esac
+  _api_note 0 200 "$(cat ctl/body.page)" "" "" "" ""
+  printf '%s' "$(cat ctl/body.page)"
+  return 0
+}
+run_once; printf 'rc=%s\n' "$?"
+printf 'kind=%s\n'      "$(sed -n 's/^sign_kind=//p' mod/fafu_checkin.status)"
+printf 'attempts=%s\n'  "$(grep -c '提交尝试:' mod/fafu_checkin.log)"
+printf 'signs=%s\n'     "$(grep -c 'student/sign' ctl/api.calls 2>/dev/null)"
+printf 'refreshed=%s\n' "$(grep -c . ctl/refresh 2>/dev/null || echo 0)"
+DRIVER
+  d="$SG_WORK/retry.out"
+  f=$(sg_plain_log)
+  t_eq "重试：最终成功（返回 0）" "$(sg_val "$d" rc)" "0"
+  t_eq "重试：记录类型为 normal" "$(sg_val "$d" kind)" "normal"
+  # 断言「每次都各留一行」这件事，不钉精确尝试次数：次数受刷新路径与调用环境影响，
+  # 钉死它只会让断言在别的环境下假红。
+  t_eq "重试：每次尝试各留一行（行数 = 提交调用数）" \
+    "$(sg_val "$d" attempts)" "$(sg_val "$d" signs)"
+  t_has "重试：失败的那次留下状态码与完整正文" "$f" \
+    "提交尝试: try=1 rid=88123 lng=119.243462 lat=26.088417 http=400 body=$SG_SIGN_FAIL"
+  t_has "重试：成功的那次同样留一行（同一字段集）" "$f" \
+    "提交尝试: try=2 rid=88123 lng=119.243462 lat=26.088417 http=200 body=$SG_SIGN_OK"
+  t_has "重试：日志里留下了重试成功那一笔" "$f" "提交重试"
+  t_has "重试：日志里也记了签到成功" "$f" "✅ 签到成功"
+  t_before "重试：先有成功那次的事实，再有业务结论" "$f" "提交尝试: try=2" "✅ 签到成功"
 }
 
 # ============================================================
@@ -752,6 +970,172 @@ DRIVER
   t_eq "刷新后仍拿不到任务：返回 2（任务异常）" "$(sg_val "$d" rc)" "2"
   t_eq "拿不到任务：通知事件是 failtask" "$(sg_val "$d" events)" "failtask,"
   t_has "拿不到任务：日志带 rc" "$SG_WORK/mod/fafu_checkin.log" "获取任务失败: rc=1"
+
+  # ③ 刷新那几行要说明**触发原因**（用户故事 18）：走真实 refresh_token（SG_REFRESH_MODE=real
+  #    让前导不再顶替它），只把采样等待与 token 来源换成替身——三段时序本身归 keepalive 套件。
+  #    调用点在本层，故「签到查询失败」这几个字必须由本层的调用点传下去。
+  sg_setup refresh-reason
+  sg_at 1290
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"
+  printf 'page:1\npage:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
+  printf 'mWakefulness=Awake\n' > "$SG_WORK/ctl/power.txt"
+  SG_REFRESH_MODE=real
+  export SG_REFRESH_MODE
+  sg_run refetch_reason <<'DRIVER'
+printf '0' > ctl/tok.n
+sleep() { :; }        # 采样等待不真等（次数与时序不是这条断言要考的东西）
+get_token() {         # 第一次是 run_once 取的旧 token，之后给新的（刷新因此会成功）
+  n=$(cat ctl/tok.n); n=$((n + 1)); printf '%s' "$n" > ctl/tok.n
+  if [ "$n" -le 1 ]; then printf 'OLD'; else printf 'NEWTOKEN'; fi
+}
+run_once; printf 'rc=%s\n' "$?"
+DRIVER
+  unset SG_REFRESH_MODE
+  d="$SG_WORK/refetch_reason.out"
+  t_eq "真实刷新链路：查询失败后刷新、再查、照常提交（返回 0）" "$(sg_val "$d" rc)" "0"
+  t_has "刷新那一行说明触发原因是「签到查询失败」" "$SG_WORK/mod/fafu_checkin.log" \
+    "刷新 token（静默优先） 触发原因=签到查询失败"
+  t_has "刷新成功那一行同样带触发原因" "$SG_WORK/mod/fafu_checkin.log" \
+    "刷新成功: OLD → NEWTOKEN 触发原因=签到查询失败"
+}
+
+# ============================================================
+# 六·五、查询失败：参数与完整正文（两种失败要能分开）
+#
+# 一天只有一次现场，失败行要一次说清三件事：我们发了什么（查询参数 rows / pageNum）、
+# 这次调用的事实（rc + api 层落下的那一行：状态码，或连接层的退出码与报错原文）、
+# 服务端回了什么（**完整**正文——正文里那句 message 常常正好落在截断处）。
+# 两种失败各走一次：① 调用失败（rc≠0，正文由 api 层落盘）；
+# ② 应答了但正文不是任务列表（rc=0，这一档的正文由本层自己带上）。
+# 驱动只挑「这一次调用的事实」，行仍由 api 层的 _api_note 拼（上层不自己拼 http= / body= / 耗时=）。
+# ============================================================
+
+sg_case_fetch_fail() {
+  local d
+  sg_setup fetch-fail
+  sg_at 1200                                       # 20:00：查询失败与窗口判定无关，拨一个窗口外即可
+  sg_body_long > "$SG_WORK/ctl/long.body"          # 长正文：尾部那一段在 200 字节之外
+  printf '%s\n' '{"code":500,"message":"查询不到任务列表"}' > "$SG_WORK/ctl/norec.body"
+  sg_run fetch_fail <<'DRIVER'
+printf '0' > ctl/n.n
+http_post() {
+  _n=$(cat ctl/n.n); _n=$((_n + 1)); printf '%s' "$_n" > ctl/n.n
+  printf '%s\n' "$1" >> ctl/api.calls
+  if [ "$_n" -le 1 ]; then
+    # ① 连接层失败：拿不到状态码，工具吐了报错原文，正文拿到了
+    _api_note 7 "" "$(cat ctl/long.body)" "curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80" "" "$(_api_now)" "$(_api_now)"
+    return 7
+  fi
+  # ② 应答了（200），但正文里没有 records
+  _api_note 0 200 "$(cat ctl/norec.body)" "" "" "$(_api_now)" "$(_api_now)"
+  cat ctl/norec.body
+  return 0
+}
+run_once; printf 'rc=%s\n' "$?"
+printf 'url=%s\n'  "$(head -n 1 ctl/api.calls)"
+printf 'n=%s\n'    "$(grep -c -e '查询异常:' -e '获取任务失败:' mod/fafu_checkin.log)"
+printf 'first=%s\n'  "$(sed 's/^\[[^]]*\][ ]*//' mod/fafu_checkin.log | grep -F '查询异常:' | tail -n 1)"
+printf 'second=%s\n' "$(sed 's/^\[[^]]*\][ ]*//' mod/fafu_checkin.log | grep -F '获取任务失败:' | tail -n 1)"
+DRIVER
+  d="$SG_WORK/fetch_fail.out"
+  sg_val "$d" first  > "$SG_WORK/fetch_fail.first"
+  sg_val "$d" second > "$SG_WORK/fetch_fail.second"
+  t_eq "两轮查询都不成：返回 2（任务异常）" "$(sg_val "$d" rc)" "2"
+  t_eq "查询失败：两条失败各记一行（首次 + 刷新 token 后重试）" "$(sg_val "$d" n)" "2"
+  t_eq "查询参数与实际发出的请求同源（日志里的 params 不是另抄一份）" \
+    "$(sg_val "$d" url)" \
+    "http://stuhtapi.fafu.edu.cn/health-api/sign_in/student/my/page?rows=3&pageNum=1"
+  # ① 调用失败：rc + api 层那一行（原样转交）+ 参数 + 完整正文
+  t_has "调用失败：带 rc 与 api 层那一行（连接层退出码 / 不伪造状态码）" \
+    "$SG_WORK/fetch_fail.first" "查询异常: rc=7 net rc=7 http=- body={"
+  t_has "调用失败：工具报错原文也在" "$SG_WORK/fetch_fail.first" \
+    "err=curl: (7) Failed to connect"
+  t_has "调用失败：带查询参数" "$SG_WORK/fetch_fail.first" "params=rows=3&pageNum=1"
+  t_has "调用失败：正文完整（尾部那一段没有被截掉）" "$SG_WORK/fetch_fail.first" \
+    "正文的尾部也必须整段落进日志"
+  # ② 应答了但没有任务列表：rc=0，正文由本层自己带上（这一档 api 层的正文可能没落盘）
+  t_has "没有任务列表：rc 与状态码是这一档该有的样子" "$SG_WORK/fetch_fail.second" \
+    "获取任务失败: rc=0 http=200 body={\"code\":500,\"message\":\"查询不到任务列表\"}"
+  t_has "没有任务列表：带查询参数" "$SG_WORK/fetch_fail.second" "params=rows=3&pageNum=1"
+  t_has "没有任务列表：正文由本层带上（resp=）" "$SG_WORK/fetch_fail.second" \
+    "resp={\"code\":500,\"message\":\"查询不到任务列表\"}"
+}
+
+# ============================================================
+# 六·六、任务变化：四元组真的变了才记一行
+#
+# 正常轮询每分钟一轮，任务数据几乎不变——若每轮都记，几百行里没有一行提供信息。
+# 判据是任务号 / 签到状态 / 开始 / 截止四者任一与上一轮不同；**首次拿到任务也算变化**
+# （旧的为空），跨日后快照失效、同样的任务因此又算「新任务」。
+# 快照归 state 层管：这里只断言「日志里有没有那一行、前后值是什么」。
+# ============================================================
+
+sg_case_task_change() {
+  local d bt dline
+  sg_setup task-change
+  sg_at 1200                                       # 20:00：任务还没开始，每轮都停在「不在签到时段」
+  bt=$(( SG_EPOCH * 1000 + 1290 * 60000 ))
+  dline=$(( SG_EPOCH * 1000 + 1380 * 60000 ))
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"        # 未签
+  sg_body 1290 1 > "$SG_WORK/ctl/body.seen"        # 同一个任务的签到状态改成 1
+  printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/hdr" # 这一次服务端给了响应头四项
+  printf 'page:0\npage:0\nseen:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run task_change <<'DRIVER'
+tlines() { grep -F '任务变化:' mod/fafu_checkin.log 2>/dev/null; }
+plain()  { sed 's/^\[[^]]*\][ ]*//' mod/fafu_checkin.log; }
+run_once >/dev/null 2>&1; printf 'rc1=%s\n' "$?"
+printf 'n1=%s\n' "$(tlines | grep -c .)"
+printf 'l1=%s\n' "$(grep -c . mod/fafu_checkin.log)"
+run_once >/dev/null 2>&1; printf 'rc2=%s\n' "$?"
+printf 'n2=%s\n' "$(tlines | grep -c .)"
+printf 'l2=%s\n' "$(grep -c . mod/fafu_checkin.log)"
+printf 'last2=%s\n' "$(plain | tail -n 1)"
+run_once >/dev/null 2>&1; printf 'rc3=%s\n' "$?"
+printf 'n3=%s\n' "$(tlines | grep -c .)"
+printf 'first=%s\n' "$(tlines | head -n 1 | sed 's/^\[[^]]*\][ ]*//')"
+printf 'third=%s\n' "$(tlines | tail -n 1 | sed 's/^\[[^]]*\][ ]*//')"
+DRIVER
+  d="$SG_WORK/task_change.out"
+  t_eq "首次拿到任务记一行" "$(sg_val "$d" n1)" "1"
+  t_eq "同一任务再查一轮：不记新的任务行" "$(sg_val "$d" n2)" "1"
+  t_eq "同一任务再查一轮：只多出「不在签到时段」那一行（轮询不变啰嗦）" \
+    "$(( $(sg_val "$d" l2) - $(sg_val "$d" l1) ))" "1"
+  t_eq "同一任务再查一轮：末行仍是「不在签到时段」" "$(sg_val "$d" last2)" \
+    "[晚查寝签到] 不在签到时段"
+  t_eq "签到状态变了：再记一行" "$(sg_val "$d" n3)" "2"
+  # 那一行末尾并排服务端的响应头：任务是何时出现的，与服务端认为现在几点（Date）同处一行
+  t_eq "首次那一行的旧值为空（第一次拿到任务也算变化）" "$(sg_val "$d" first)" \
+    "任务变化: id=→88123 state=→0 begin=→$bt 截止=→$dline $SG_HDR_LINE"
+  t_eq "状态变化那一行给出前后四元组" "$(sg_val "$d" third)" \
+    "任务变化: id=88123→88123 state=0→1 begin=$bt→$bt 截止=$dline→$dline $SG_HDR_LINE"
+  # 三档返回码由判定决定，任务快照只写它自己那一个文件，不得改变它
+  t_eq "首次那一轮仍是「不在时段」（返回 1）" "$(sg_val "$d" rc1)" "1"
+  t_eq "第二轮仍返回 1（记不记快照与返回码无关）" "$(sg_val "$d" rc2)" "1"
+  t_eq "第三轮状态改成已签到：按既有判定返回 0" "$(sg_val "$d" rc3)" "0"
+
+  # 跨日：快照按日滚动 → 同样的任务在第二天算「新任务」，而不是「无变化」
+  sg_setup task-change-next-day
+  sg_at 1200
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"
+  printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_run task_change_next <<'DRIVER'
+run_once >/dev/null 2>&1
+printf 'n1=%s\n' "$(grep -c -F '任务变化:' mod/fafu_checkin.log)"
+# 拨到第二天（墙钟与 %s 一起拨）：任务数据一个字没改
+printf '%s\n' '2026-10-02 20:00' > ctl/date
+SG_NOW_S=$((SG_EPOCH + 86400 + 1200 * 60)); export SG_NOW_S
+run_once >/dev/null 2>&1
+printf 'n2=%s\n' "$(grep -c -F '任务变化:' mod/fafu_checkin.log)"
+printf 'last=%s\n' "$(grep -F '任务变化:' mod/fafu_checkin.log | tail -n 1 | sed 's/^\[[^]]*\][ ]*//')"
+printf 'today=%s\n' "$(today)"
+DRIVER
+  d="$SG_WORK/task_change_next.out"
+  t_eq "跨日那一轮确实拨到了第二天" "$(sg_val "$d" today)" "2026-10-02"
+  t_eq "跨日后同样的任务算「新任务」（再记一行）" "$(sg_val "$d" n2)" "2"
+  # 这一档的替身没给响应头（sg_setup 把 ctl/hdr 清空了）：行尾就停在「截止」，
+  # 不留空段、也不留一个空的 hdr=。
+  t_eq "跨日后那一行的旧值为空（昨天的快照不是今天的比较基准）" "$(sg_val "$d" last)" \
+    "任务变化: id=→88123 state=→0 begin=→$bt 截止=→$dline"
 }
 
 # ============================================================
@@ -1007,6 +1391,102 @@ DRIVER
   t_has "超时：报错正文同样留痕" "$SG_WORK/mod/fafu_checkin.log" "download timed out"
 }
 
+# ============================================================
+# 十二、提交尝试行的字段集：服务端拒绝 / 成功 / 连接层失败三档
+#
+# 这一节**不覆盖 http_post**（路线 B）：CURL_BIN 指向测试底座的 curl 替身，真实 api 层照跑，
+# 于是状态码、完整正文、响应头白名单与耗时都是真实代码写下的。
+# 直接驱动 signin_submit：一个驱动里只有提交调用，替身对每次调用给同样的应答就够。
+# ============================================================
+
+sg_case_attempt_lines() {
+  local d f
+
+  # ① 服务端拒绝（HTTP 400）：状态码与完整正文都在这一行
+  sg_setup attempt-fail
+  sg_at 1290
+  printf '400\n' > "$SG_WORK/ctl/curl_code"
+  printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/curl_body"
+  printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/curl_hdr"
+  # 提交失败也会触发一次刷新（老 token 失效是常见档）：那一行同样要说明触发原因，
+  # 故这一档让真实 refresh_token 跑起来（采样等待与 token 来源换成替身）。
+  SG_REFRESH_MODE=real
+  export SG_REFRESH_MODE
+  sg_run_real attempt_fail <<'DRIVER'
+sleep() { :; }
+get_token() { printf 'NEWTOKEN'; }
+signin_submit 88123 "晚查寝签到" 1790866800000 1790865000000 119.243462 26.088417 1790861400000 TOK >/dev/null 2>&1
+printf 'rc=%s\n' "$?"
+printf 'attempts=%s\n' "$(grep -c '提交尝试:' mod/fafu_checkin.log)"
+printf 'calls=%s\n'    "$(grep -c . ctl/curl_calls)"
+DRIVER
+  unset SG_REFRESH_MODE
+  d="$SG_WORK/attempt_fail.out"
+  f=$(sg_plain_log)
+  t_eq "服务端拒绝：返回 1（下一分钟重试）" "$(sg_val "$d" rc)" "1"
+  t_eq "服务端拒绝：每次尝试各留一行（行数 = 真实提交调用数）" \
+    "$(sg_val "$d" attempts)" "$(sg_val "$d" calls)"
+  t_has "失败行：第几次 + 发出去的任务号与坐标 + 服务端状态码 + 完整响应体" "$f" \
+    "提交尝试: try=1 rid=88123 lng=119.243462 lat=26.088417 http=400 body=$SG_SIGN_FAIL"
+  t_has "失败行：响应头就是白名单那四项、顺序固定" "$f" "$SG_HDR_LINE"
+  t_has_re "失败行：响应头排在耗时之前，耗时收尾" "$f" \
+    "^提交尝试: try=1 rid=88123 lng=119\.243462 lat=26\.088417 http=400 body=.* hdr=\{.*\} 耗时=[0-9]+(ms|s)$"
+  t_has "全部失败：汇总行仍带 rc 与发出去的参数" "$f" \
+    "签到失败: rc=1 rid=88123 lng=119.243462 lat=26.088417 "
+  # 刷新那一行的触发原因要分清是哪条路来的：提交失败 ≠ 查询失败（用户故事 18）
+  t_has "提交失败触发的刷新说明原因（签到提交失败）" "$SG_WORK/mod/fafu_checkin.log" \
+    "刷新 token（静默优先） 触发原因=签到提交失败"
+
+  # ② 提交成功：与失败行同一字段集（成功那次也带完整正文与响应头）
+  sg_setup attempt-ok
+  sg_at 1290
+  printf '200\n' > "$SG_WORK/ctl/curl_code"
+  printf '%s\n' "$SG_SIGN_OK" > "$SG_WORK/ctl/curl_body"
+  printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/curl_hdr"
+  sg_run_real attempt_ok <<'DRIVER'
+signin_submit 88123 "晚查寝签到" 1790866800000 1790865000000 119.243462 26.088417 1790861400000 TOK >/dev/null 2>&1
+printf 'rc=%s\n' "$?"
+printf 'attempts=%s\n' "$(grep -c '提交尝试:' mod/fafu_checkin.log)"
+printf 'calls=%s\n'    "$(grep -c . ctl/curl_calls)"
+printf 'kind=%s\n'     "$(sed -n 's/^sign_kind=//p' mod/fafu_checkin.status)"
+DRIVER
+  d="$SG_WORK/attempt_ok.out"
+  f=$(sg_plain_log)
+  t_eq "提交成功：返回 0" "$(sg_val "$d" rc)" "0"
+  t_eq "提交成功：记下的类型是 normal" "$(sg_val "$d" kind)" "normal"
+  t_eq "提交成功：成功那次也恰好一行（行数 = 真实提交调用数）" \
+    "$(sg_val "$d" attempts)" "$(sg_val "$d" calls)"
+  t_has "成功行：与失败行同一段参数，只有状态码与正文不同" "$f" \
+    "提交尝试: try=1 rid=88123 lng=119.243462 lat=26.088417 http=200 body=$SG_SIGN_OK"
+  t_has "成功行：响应头就是白名单那四项、顺序固定" "$f" "$SG_HDR_LINE"
+  t_has_re "成功行：与失败行同形（响应头 + 耗时收尾）" "$f" \
+    "^提交尝试: try=1 rid=88123 lng=119\.243462 lat=26\.088417 http=200 body=.* hdr=\{.*\} 耗时=[0-9]+(ms|s)$"
+  t_before "成功行排在业务结论之前（先有事实，再有结论）" "$f" "提交尝试: try=1" "✅ 签到成功"
+
+  # ③ 连接层失败：如实写工具退出码与报错原文，不拿状态码占位
+  sg_setup attempt-net
+  sg_at 1290
+  printf '000\n' > "$SG_WORK/ctl/curl_code"     # 真实 curl 连不上时 -w 也照吐 000
+  printf 'curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused\n' \
+    > "$SG_WORK/ctl/curl_stderr"
+  printf '7\n' > "$SG_WORK/ctl/curl_rc"
+  sg_run_real attempt_net <<'DRIVER'
+signin_submit 88123 "晚查寝签到" 1790866800000 1790865000000 119.243462 26.088417 1790861400000 TOK >/dev/null 2>&1
+printf 'rc=%s\n' "$?"
+printf 'attempts=%s\n' "$(grep -c '提交尝试:' mod/fafu_checkin.log)"
+printf 'calls=%s\n'    "$(grep -c . ctl/curl_calls)"
+DRIVER
+  d="$SG_WORK/attempt_net.out"
+  f=$(sg_plain_log)
+  t_eq "连不上：返回 1（这一档仍可重试）" "$(sg_val "$d" rc)" "1"
+  t_eq "连不上：每次尝试各留一行（行数 = 真实提交调用数）" \
+    "$(sg_val "$d" attempts)" "$(sg_val "$d" calls)"
+  t_has "连不上：如实写出退出码、这一档没有状态码、报错原文" "$f" \
+    "提交尝试: try=1 rid=88123 lng=119.243462 lat=26.088417 net rc=7 http=- err=curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused"
+  t_eq "连不上：日志里没有任何数字状态码（不拿 000 冒充）" \
+    "$(grep -c 'http=[0-9]' "$f" 2>/dev/null)" "0"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "signin · 时钟与夹具自证" sg_case_clock
@@ -1022,10 +1502,15 @@ t_case "signin · 截止字段回退 endTime" sg_case_parse_fallback
 t_case "signin · 坐标缺失回退内置坐标" sg_case_coords_fallback
 t_case "signin · token 一路传到提交（端到端）" sg_case_token_chain
 t_case "signin · 提交：补签（supplement）" sg_case_submit_supplement
-t_case "signin · 提交失败当日仅首次通知" sg_case_submit_failed
+t_case "signin · 提交失败：尝试行与汇总行" sg_case_submit_failed
+t_case "signin · 提交失败当日仅首次通知（跨轮）" sg_case_submit_failed_once
+t_case "signin · 提交失败后的短重试" sg_case_submit_retry
 t_case "signin · 窗口边界（21:29 / 21:30 / 22:30 / 22:59 / 23:00）" sg_case_boundaries
 t_case "signin · token 失效后刷新重试" sg_case_token_refresh
+t_case "signin · 查询失败：参数与完整正文" sg_case_fetch_fail
+t_case "signin · 任务变化：四元组变了才记一行（含跨日）" sg_case_task_change
 t_case "signin · 判定链与主循环分支（静态）" sg_case_boundary
 t_case "signin · 截止提醒的判定（纯函数）" sg_case_remind_due
 t_case "signin · 三条截止提醒按任务数据各发一次" sg_case_remind_events
 t_case "signin · 提交失败的原因留在日志里（HTTP 状态码 / 超时）" sg_case_fail_reason
+t_case "signin · 提交尝试行的字段集（拒绝 / 成功 / 连接层失败）" sg_case_attempt_lines

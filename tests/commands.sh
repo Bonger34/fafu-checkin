@@ -1006,6 +1006,39 @@ cd_case_setconfig_injection() {
   t_eq "setconfig 注入：没有生成被注入命令碰过的文件" "$(ls "$d" | grep -c '^hacked$')" "0"
 }
 
+# ============================================================
+# 十、手动刷新那一行说明触发原因
+#
+# 刷新流程本身（三段、采样、提前关页）归 keepalive 套件；这里只看**命令层的调用点**
+# 有没有把「手动命令」这个原因交下去：那一行由真实 refresh_token 写出，故本用例不顶替它，
+# 只把采样等待、token 来源、设备动作与刷新后的接口验证换成替身。
+# ============================================================
+
+cd_case_refresh_reason() {
+  local d
+  cd_setup
+  cd_write_env real        # 不顶替处理函数：本用例要看真实 cmd_refresh 写下的那几行
+  cd_run_real refresh_reason <<'DRIVER'
+printf '0' > ./tok.n
+sleep() { :; }                     # 采样等待不真等（次数与时序不是这条断言要考的）
+screen_is_on() { return 0; }       # 亮屏：不唤醒也不改屏幕状态（设备动作归 device 套件）
+open_page() { :; }
+close_page() { :; }
+get_token() {                      # 第一次给旧 token，之后给新的（刷新因此成功）
+  n=$(cat ./tok.n 2>/dev/null); n=$(( ${n:-0} + 1 )); printf '%s' "$n" > ./tok.n
+  if [ "$n" -le 1 ]; then printf 'OLD'; else printf 'NEWTOKEN'; fi
+}
+http_post() { printf '{"records":[]}'; return 0; }   # 刷新后的接口验证不真发请求
+cmd_refresh
+printf 'rc=%s\n' "$?"
+DRIVER
+  d="$CD_WORK/mod/fafu_checkin.log"
+  t_has "手动刷新：那一行说明触发原因是「手动命令」" "$d" \
+    "刷新 token（静默优先） 触发原因=手动命令"
+  t_has "手动刷新：刷新成功那一行同样带触发原因（不是空文案）" "$d" \
+    "刷新成功: OLD → NEWTOKEN 触发原因=手动命令"
+}
+
 t_case "commands · 表驱动分发与退出码" cd_case_dispatch
 t_case "commands · 分派不吞命令自己的输出" cd_case_dispatch_stdout
 t_case "commands · once 的三档返回码" cd_case_once_rc
@@ -1032,3 +1065,4 @@ t_case "commands · setconfig 部分给也能用" cd_case_setconfig_partial
 t_case "commands · setconfig 拒非法值且旧值不变" cd_case_setconfig_reject
 t_case "commands · setconfig 重写后只留登记键" cd_case_setconfig_rewrite
 t_case "commands · setconfig 不落未校验的内容" cd_case_setconfig_injection
+t_case "commands · 手动刷新那一行说明触发原因" cd_case_refresh_reason
