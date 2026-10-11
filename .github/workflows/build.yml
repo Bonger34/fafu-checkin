@@ -56,6 +56,30 @@ jobs:
           printf 'date +%%s%%3N => %s\n' "$(/usr/local/bin/busybox date +%s%3N)"
           printf 'TEST_BUSYBOX=/usr/local/bin/busybox\n' >> "$GITHUB_ENV"
 
+      - name: 诊断 · 设备 busybox 上跑模块真正用的那几条命令
+        run: |
+          B=/usr/local/bin/busybox
+          probe() { printf '%s' "$2" | $B $3 > /tmp/o 2>/tmp/e; printf 'rc=%s out=[%s] err=[%s]\n' "$?" "$(cat /tmp/o)" "$(cat /tmp/e)"; }
+          echo "== 1 json_first 的形态（字符串字段） =="
+          probe x '{"records":[{"id":7,"name":"晚查寝签到"}]}' "grep -oE \"name\":(\"[^\"]*\"|[^,}]*)" || true
+          echo "== 2 同一模式取数字字段 =="
+          probe x '{"records":[{"id":7,"name":"x"}]}' "grep -oE \"id\":(\"[^\"]*\"|[^,}]*)" || true
+          echo "== 3 只用第一个分支（带引号） =="
+          probe x '{"id":"7"}' "grep -oE \"id\":\"[^\"]*\"" || true
+          echo "== 4 只用第二个分支（不带引号） =="
+          probe x '{"id":7}' "grep -oE \"id\":[^,}]*" || true
+          echo "== 5 普通 -oE =="
+          probe x 'a1b2' "grep -oE [0-9]" || true
+          echo "== 6 grep -m1 + cut =="
+          probe x 'sign_date=2026-10-12' "grep -m1 ^sign_date=" || true
+          echo "== 7 date / tr / base64 / md5sum =="
+          $B date +%s%3N || true
+          printf 'x' | $B tr -d '\n' | $B base64 | $B md5sum | $B cut -d' ' -f1 || true
+          $B head -c 24 /dev/urandom | $B base64 | $B tr -dc 'A-Za-z0-9' | $B head -c 16; echo
+          echo "== 版本 =="
+          $B | head -n1
+          exit 0
+
       - name: 层序检查（一层只能引用更早加载的层）
         run: sh tools/check-layer-order.sh
 
