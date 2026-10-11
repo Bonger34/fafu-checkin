@@ -6,7 +6,7 @@
 # 用法：
 #   find_busybox              输出可用的真实 busybox 路径（找不到则空串）
 #   read_layers <仓库根>      输出入口声明的层文件清单（带 lib/ 前缀，按加载顺序）
-#   pick_awk                  输出可用的 awk 命令（有随附 busybox 就用它）
+#   pick_awk                  输出可用的 awk 命令（优先系统 awk，没有才用 busybox 的）
 #   ext_url_hits <文件>       输出文本里命中的外部资源形状（零命中则空串）
 # 配置：TEST_BUSYBOX=<路径> 显式指定真实 busybox。
 # ============================================================
@@ -78,9 +78,17 @@ ext_url_hits() {
   return 0
 }
 
-# 输出可用的 awk 命令；有随附 busybox 就用它，否则用系统 awk（CI）
+# 输出可用的 awk 命令：**优先系统 awk**，本机（Windows）没有系统 awk 时才回落到 busybox 的 applet。
+# 为什么不是反过来：busybox 的 awk 是精简实现，容错差——Magisk / KernelSU 随附的
+# busybox 1.36.1.1（= 设备上那一份）在层序守卫的那段程序上直接段错误（exit 139）。
+# awk 只出现在开发者这一侧的守卫里：模块运行时一个 applet 都不用它，故这里没有
+# 「与设备保持一致」的价值，稳定性优先。
 pick_awk() {
   local bb
+  if command -v awk >/dev/null 2>&1; then
+    printf 'awk'
+    return 0
+  fi
   bb=$(find_busybox)
   if [ -n "$bb" ]; then
     printf '%s awk' "$bb"
