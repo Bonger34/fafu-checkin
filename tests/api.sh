@@ -386,7 +386,8 @@ DRIVER
   d="$AP_WORK/curl_path.out"
   t_eq "curl 路径：状态码 503 判成失败" "$(ap_val "$d" rc)" "1"
   t_eq "curl 路径：失败响应体不作正常结果交出去" "$(ap_val "$d" body)" "[]"
-  t_has "curl 路径：诊断文件里同时有状态码与正文" "$d" 'errlog=[http=503 {"timestamp":1,"status":503,"message":"Service Unavailable"}]'
+  t_has "curl 路径：诊断文件里同时有状态码与正文" "$d" \
+    'errlog=[http=503 body={"timestamp":1,"status":503,"message":"Service Unavailable"}]'
   t_eq "curl 路径：成功返回 0" "$(ap_val "$d" ok_rc)" "0"
   # 断言「状态码那一行被剥掉」这件事本身，不去比对取值的尾字符——
   # printf 的收尾括号在不同 shell 下会落到同行的不同位置（$( ) 是否剥尾部换行），

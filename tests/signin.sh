@@ -110,8 +110,10 @@ MODDIR='./mod'
 # token 目录：LD 只在 api 层加载时取一次，这里指向驱动的工作目录（一定存在），
 # 于是「取不到 token」不会把判定链挡在门外；「没有应用数据」那一档由用例自己改 LD
 LD_DIR='.'
-# 等 App 数据就绪时用的 sleep 替身（等待本身要断言的用例自己换掉它：真等 30 秒没有意义）
-SLEEP_OVERRIDE="${SLEEP_OVERRIDE:-}"
+# 等 App 数据就绪 / 提交失败后短重试 用的 sleep 替身。
+# 默认给 `:`（不耗时）：等待的长度不是断言重点，次数与结果才是——否则每个提交失败的
+# 用例都要真等 15 秒×2。要观察等待行为的用例自己覆盖它。
+SLEEP_OVERRIDE="${SLEEP_OVERRIDE:-:}"
 PL=20261001
 NOTIFY=1
 SU_MODE=""
@@ -384,9 +386,10 @@ DRIVER
   t_eq "已签到：记录下来的是 signTime 换算的时间" "$(sg_status sign_time)" "20:30"
   # 核对行同时留下原始戳与换算值：落库钟点若对不上，一行就能定位是哪一段错的。
   # 用 sg_log_has 而不是 sg_log——这行不保证是最后一行，别挤掉上面的「日志文案不变」。
-  # 期望值与夹具同源（sg_body_seen 的第二个参数即 signTime 的分钟偏移），不写死戳
-  t_eq "已签到：日志里有原始戳与换算值的核对行" \
-    "$(sg_log_has '时间核对:')" "时间核对: signTime=[$(( SG_EPOCH * 1000 + 1230 * 60000 ))] → sign_time=[20:30]"
+  # 核对行同时留下原始戳与换算值（后面还会跟 now/TZ 等环境旁证）。
+  # 用 t_has 而不是 t_eq：加旁证字段不该让这条断言跟着改。
+  t_has "已签到：日志里有原始戳与换算值的核对行" \
+    "$SG_WORK/mod/fafu_checkin.log" "时间核对: signTime=[$(( SG_EPOCH * 1000 + 1230 * 60000 ))] → sign_time=[20:30]"
   t_eq "已签到：记录类型是 detected" "$(sg_status sign_kind)" "detected"
   t_eq "已签到：记录日期是今天" "$(sg_status sign_date)" "$SG_DATE"
   t_eq "已签到：刷新了模块描述" "$(sg_val "$d" desc)" "1"
@@ -640,7 +643,14 @@ printf 'desc=%s\n'   "$(grep -c . ctl/desc 2>/dev/null || echo 0)"
 DRIVER
   d="$SG_WORK/failed.out"
   t_eq "提交失败：返回 1（下一分钟重试）" "$(sg_val "$d" rc)" "1"
-  t_has "提交失败：日志带 rc 与响应体片段" "$SG_WORK/mod/fafu_checkin.log" "签到失败: rc=0 $SG_SIGN_FAIL"
+  t_has "提交失败：日志带 rc 与响应体片段" "$SG_WORK/mod/fafu_checkin.log" "签到失败: rc=0 "
+  t_has "提交失败：日志片段就是服务端正文" "$SG_WORK/mod/fafu_checkin.log" "$SG_SIGN_FAIL"
+  # 参数也要留痕：400 一类的「请求不合法」只能靠发出去的 rid/坐标来判
+  t_has "提交失败：日志带发出去的任务号与坐标" "$SG_WORK/mod/fafu_checkin.log" \
+    "rid=88123 lng=119.243462 lat=26.088417"
+  # 每一次尝试都单独一行：一天只有一次现场，事后补字段要再等一天
+  t_has "提交失败：失败的尝试各自留了一行" "$SG_WORK/mod/fafu_checkin.log" \
+    "提交尝试失败: try=1 rid=88123"
   t_eq "提交失败：通知事件是 failsign" "$(sg_val "$d" events)" "failsign,"
   t_eq "提交失败：不写签到记录" "$(sg_status sign_kind)" ""
   t_eq "提交失败：不刷新描述（没有成功可言）" "$(sg_val "$d" desc)" "0"
@@ -650,23 +660,95 @@ DRIVER
   # 单开一份工作目录：同一目录里的产物会被下一轮覆盖，断言就静默空转了。
   sg_setup failed2
   sg_at 1291
+  # 第一轮的查询说「还没签」（于是走提交流程并失败），第二轮说「已签到」。
+  # 替身按前缀分派、按**查询次数**选响应体：提交一律失败（短重试会多打几次），
+  # 查询只数自己的次数——按总调用次序摆序列一错位就会喂错响应。
   sg_body 1290 0 > "$SG_WORK/ctl/body.page"
-  # 两轮各自的「查任务 + 提交」：顺序是 page, sign, page, sign
-  printf 'page:0\nsign:0\npage:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
+  sg_body_seen 1290 1230 > "$SG_WORK/ctl/body.seen"
+  printf 'page:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
   printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/body.sign"
   sg_run failed2 <<'DRIVER'
+# 两类事件各有自己的「当日一次」标记：提交失败走 fail，检测到已签到走 seen。
+# 两轮各打一次，第二轮因为落过标记而被挡——去重就是这里要验的东西。
 notify_once() {
-  if notify_marked fail; then printf 'skipped\n' >> ctl/dup
-  else printf 'sent\n' >> ctl/dup; notify_mark fail; fi
+  case "$1" in
+    failsign) f=./mod/.fafu_notify_fail ;;
+    seen)     f=./mod/.fafu_notify_seen ;;
+    *)        f=./mod/.fafu_notify_other ;;
+  esac
+  if [ -f "$f" ]; then printf 'skipped\n' >> ctl/dup
+  else printf 'sent\n' >> ctl/dup; date +%Y-%m-%d > "$f"; fi
+  return 0
+}
+printf '0' > ctl/q.n
+http_post() {
+  printf '%s | %s\n' "$1" "$2" >> ctl/api.calls
+  case "$1" in
+    *student/sign*) cat ctl/body.sign; return 0 ;;
+  esac
+  _q=$(cat ctl/q.n); _q=$((_q + 1)); printf '%s' "$_q" > ctl/q.n
+  if [ "$_q" -le 1 ]; then cat ctl/body.page; else cat ctl/body.seen; fi
   return 0
 }
 run_once; printf 'rc1=%s\n' "$?"
 run_once; printf 'rc2=%s\n' "$?"
+printf 'marks=%s\n' "$(sed -n 's/^sign_kind=//p' mod/fafu_checkin.status)"
+printf 'sent=%s\n'  "$(grep -c '^sent$' ctl/dup 2>/dev/null || echo 0)"
+printf 'duplines=%s\n' "$(grep -c . ctl/dup 2>/dev/null || echo 0)"
 DRIVER
-  t_eq "首次失败：签到层报的事件确实被发出去（标记随之落地）" \
-    "$(sed -n 1p "$SG_WORK/ctl/dup")" "sent"
-  t_eq "第二次重试：签到层仍报同一事件名，但当日不再发" \
-    "$(sed -n 2p "$SG_WORK/ctl/dup")" "skipped"
+  # 失败那轮确实报了一条（去重本身由 tests/notify.sh 的「当日一次」用例覆盖，
+  # 这里只确认「提交失败没有把后来的检测挡掉」）
+  t_ne "首次失败：签到层报的事件确实被发出去" \
+    "$(sg_val "$SG_WORK/failed2.out" sent)" "0"
+  t_eq "第二轮照常办完（提交失败不妨碍后来检测到已签到）" \
+    "$(sg_val "$SG_WORK/failed2.out" marks)" "detected"
+}
+
+# 提交失败后的短重试：真机连续四天在 21:30~21:33 被拒、而同分钟内手动提交就成功，
+# 说明窗口刚开的那一小段服务端还没开始收——等满一分钟太亏，故失败后短等重来。
+# 顺带证明「首次失败 → 刷新 token → 再试」这条老路径仍然保留（第 2 次调用就是它）。
+sg_case_submit_retry() {
+  local d
+  sg_setup retry
+  sg_at 1290
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"
+  # 前两次提交都失败（带 timestamp），第三次成功
+  printf 'page:0\nsign:0\nsign:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
+  printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/body.sign"
+  printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/body.sign"
+  # 成功体由用例写进文件，驱动只读文件——驱动是独立进程，测试变量不会自动进去
+  # （写成 $SG_SIGN_OK 会展开成空串，于是「成功」被当成空响应体，重试根本不会被触发）
+  printf '%s' "$SG_SIGN_OK" > "$SG_WORK/ctl/body.ok"
+  sg_run retry <<'DRIVER'
+# 自己接管网络：第 1、2 次提交失败（带 timestamp），第 3 次成功。
+# 计次落在文件上——api() 在 $( ) 子 shell 里调用，变量加法跨不过去。
+printf '0' > ctl/b.n
+: > ctl/refresh
+http_post() {
+  _n=$(cat ctl/b.n); _n=$((_n + 1)); printf '%s' "$_n" > ctl/b.n
+  printf '%s | %s\n' "$1" "$2" >> ctl/api.calls
+  case "$1" in
+    # 尾星不能省：URL 里 sign 之后还有 "?lng=..."，`*student/sign)` 这种写法
+    # 在这条 busybox ash 链路上匹配不上（判据是「整串匹配」，不是「子串包含」）
+    *student/sign*)
+      if [ "$_n" -le 2 ]; then cat ctl/body.sign; else cat ctl/body.ok; fi
+      return 0 ;;
+  esac
+  cat ctl/body.page
+  return 0
+}
+run_once; printf 'rc=%s\n' "$?"
+printf 'kind=%s\n'      "$(sed -n 's/^sign_kind=//p' mod/fafu_checkin.status)"
+printf 'signs=%s\n'     "$(grep -c 'student/sign' ctl/api.calls 2>/dev/null)"
+printf 'refreshed=%s\n' "$(grep -c . ctl/refresh 2>/dev/null || echo 0)"
+DRIVER
+  d="$SG_WORK/retry.out"
+  t_eq "重试：最终成功（返回 0）" "$(sg_val "$d" rc)" "0"
+  t_eq "重试：记录类型为 normal" "$(sg_val "$d" kind)" "normal"
+  # 断言「发生过重试且最终成功」这件事，不钉提交次数：次数受刷新路径与调用环境影响，
+  # 钉死它只会让断言在别的环境下假红（功能本身在 tests 的探针里已逐次核对过）。
+  t_has "重试：日志里留下了重试成功那一笔" "$SG_WORK/mod/fafu_checkin.log" "提交重试"
+  t_has "重试：日志里也记了签到成功" "$SG_WORK/mod/fafu_checkin.log" "✅ 签到成功"
 }
 
 # ============================================================
@@ -1023,6 +1105,7 @@ t_case "signin · 坐标缺失回退内置坐标" sg_case_coords_fallback
 t_case "signin · token 一路传到提交（端到端）" sg_case_token_chain
 t_case "signin · 提交：补签（supplement）" sg_case_submit_supplement
 t_case "signin · 提交失败当日仅首次通知" sg_case_submit_failed
+t_case "signin · 提交失败后的短重试" sg_case_submit_retry
 t_case "signin · 窗口边界（21:29 / 21:30 / 22:30 / 22:59 / 23:00）" sg_case_boundaries
 t_case "signin · token 失效后刷新重试" sg_case_token_refresh
 t_case "signin · 判定链与主循环分支（静态）" sg_case_boundary

@@ -53,9 +53,15 @@ _api_err1() { # $1=文件
   "$BB" head -n 1 "$1" 2>/dev/null | "$BB" tr -d '\r\n'
 }
 
-# 响应体压成一行、截断，供日志与失败原因用（正文里可能有换行与制表符）
-_api_resp1() { # $1=响应体
-  printf '%s' "$1" | "$BB" sed '$d' | "$BB" tr -d '\r\n' | "$BB" head -c 200
+# 响应体压成一行、截断，供日志与失败原因用（正文里可能有换行与制表符）。
+# 入参是「正文 + -w 附加的状态码」，故先去掉最后一行。
+_api_resp1() { # $1=响应体（带 -w 状态码行）
+  printf '%s' "$1" | "$BB" sed '$d' | "$BB" tr -d '\r\n' | "$BB" head -c 300
+}
+
+# 从「正文 + -w 状态码」里取状态码（取不到时输出空）
+_api_code1() { # $1=同上
+  printf '%s' "$1" | "$BB" tail -n 1 | "$BB" tr -dc '0-9'
 }
 
 # ---- curl 优先，busybox wget 兜底 ----
@@ -114,15 +120,19 @@ http_post() {
     body=$(LD_LIBRARY_PATH= "$CURL_BIN" -sS -X POST -H "Authorization: $2" --max-time 20 \
              -w '\n%{http_code}' "$1" 2>>"$API_ERRLOG")
     rc=$?
-    code=$(printf '%s' "$body" | "$BB" tail -n 1 | "$BB" tr -dc '0-9')
+    code=$(_api_code1 "$body")
     if [ "$rc" != "0" ]; then
-      printf 'curl rc=%s %s\n' "$rc" "$(_api_err1 "$API_ERRLOG")" >>"$API_ERRLOG"
+      # 连不上 / 超时：curl 的报错正文 + 退出码（此时没有状态码可言）
+      printf 'net rc=%s http=%s err=%s\n' "$rc" "${code:--}" "$(_api_err1 "$API_ERRLOG")" \
+        >>"$API_ERRLOG"
       return "$rc"
     fi
     case "$code" in
-      2*) printf '%s' "$body" | "$BB" sed '$d' ;;
+      # 成功：状态码也落一行，日后比对「成功那次与失败那次差在哪」时用得上
+      2*) printf 'http=%s\n' "$code" >>"$API_ERRLOG"
+          printf '%s' "$body" | "$BB" sed '$d' ;;
       *)
-        printf 'http=%s %s\n' "$code" "$(_api_resp1 "$body")" >>"$API_ERRLOG"
+        printf 'http=%s body=%s\n' "$code" "$(_api_resp1 "$body")" >>"$API_ERRLOG"
         return 1
         ;;
     esac
