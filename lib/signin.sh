@@ -5,7 +5,7 @@
 # 对外提供：run_once（主循环与 once 子命令都调它）、state_text。
 # 提醒也在这里：三条截止提醒按任务数据推算（signin_remind_deadlines），
 # 「任务未发布」兜底挂本地时钟（signin_remind_notask）；判定是纯函数，取数与发送分开。
-# 提交失败：带参数与原因落痕（原因由 api 层落到 API_ERRLOG 后转交），并短重试
+# 提交失败：每次尝试各留一行（第几次 + 发出去的参数 + api 层那一行事实），并短重试
 # SG_RETRY_TIMES 次、每次隔 SG_RETRY_WAIT 秒（窗口刚开时服务端常还没开始收）。
 # 三档返回码是主循环的动作依据，改这里会坏什么：
 #   0 = 已解决（签到成功 / 已签到 / 已请假）→ 主循环写当日完成标记
@@ -80,7 +80,7 @@ signin_fetch() { # $1=token → stdout=<token>\n<响应体>；返回码见文件
   if [ "$fail" = "1" ] || [ "$rc" != "0" ]; then
     # 查询失败也要留全：是「调用失败」还是「响应里没有 records」，两者的修法不同，
     # 而旧写法只记一个 rc，事后分不出（一天只有一次现场，值得多写这几个字节）。
-    log "查询异常: rc=$rc $(_api_err1 "$API_ERRLOG") resp=$(echo "$resp" | "$BB" head -c 200)"
+    log "查询异常: rc=$rc $(_api_err1 "$API_ERRLOG") resp=$(_api_flat "$resp")"
     newt=$(refresh_token "$tok"); [ -n "$newt" ] && tok="$newt"
     resp=$(api "sign_in/student/my/page" "rows=3&pageNum=1" "$tok"); rc=$?
     case "$resp" in
@@ -88,7 +88,7 @@ signin_fetch() { # $1=token → stdout=<token>\n<响应体>；返回码见文件
       *) fail=1 ;;
     esac
     if [ "$fail" = "1" ] || [ "$rc" != "0" ]; then
-      log "获取任务失败: rc=$rc $(_api_err1 "$API_ERRLOG") resp=$(echo "$resp" | "$BB" head -c 200)"
+      log "获取任务失败: rc=$rc $(_api_err1 "$API_ERRLOG") resp=$(_api_flat "$resp")"
       notify_once failtask
       return 2
     fi
@@ -207,6 +207,14 @@ _sg_submit_ok() { # $1=rc $2=响应体；成功返回 0
   return 0
 }
 
+# 一次提交尝试的痕迹：第几次、发出去的参数，后面接上 api 层那一行事实
+# （状态码或连接层报错、完整正文、响应头白名单、耗时）。
+# **成功与失败同一形状**——两行逐字摆在一起就能看出差在哪；判定与返回码不看这几行。
+# api 层那一行原样转交，本层不自己拼 http=/body=/hdr=/耗时=（格式只有一个真源）。
+_sg_try_log() { # $1=第几次 $2=任务号 $3=经度 $4=纬度
+  log "提交尝试: try=$1 rid=$2 lng=$3 lat=$4 $(_api_err1 "$API_ERRLOG")"
+}
+
 # 提交并记录：$1=任务号 $2=名称 $3=补签截止 $4=主窗口截止 $5=经度 $6=纬度 $7=当前时间(毫秒)
 # $8=token。提交失败当日仅首次通知（之后的重试只写日志），返回 1；
 # 成功按「主窗口截止早于当前时间」区分主窗口签到与补签，返回 0。
@@ -217,13 +225,16 @@ signin_submit() {
   # 提交成功 = 调用成功，且响应体里**没有** timestamp（服务端用它报错）。
   # 判定在 _sg_submit_ok 里（首次与重试共用一处，避免两处分叉）。
   # ---- 首次提交（失败先刷新 token 再试一次：老 token 失效是常见档）----
+  # 记痕排在**每次调用之后**：于是最后一次失败的尝试也有自己的那一行，
+  # 不必靠末尾那行汇总来代表它（汇总只补参数与次数）。
   try=1
   resp=$(api "sign_in/$rid/student/sign" "lng=$lng&lat=$lat" "$token"); rc=$?
+  _sg_try_log "$try" "$rid" "$lng" "$lat"
   if [ "$rc" != "0" ]; then
-    log "提交尝试失败: try=$try rid=$rid lng=$lng lat=$lat $(_api_err1 "$API_ERRLOG")"
     newt=$(refresh_token "$token"); [ -n "$newt" ] && token="$newt"
     try=2
     resp=$(api "sign_in/$rid/student/sign" "lng=$lng&lat=$lat" "$token"); rc=$?
+    _sg_try_log "$try" "$rid" "$lng" "$lat"
   fi
   # ---- 短重试：窗口刚开时服务端常还没开始收，隔十几秒再试往往就过了 ----
   # 只在**确实提交失败**时重来；「不在时段」根本到不了这里，故不会把窗口外的
@@ -231,20 +242,16 @@ signin_submit() {
   tries=0
   while ! _sg_submit_ok "$rc" "$resp" && [ "$tries" -lt "$SG_RETRY_TIMES" ]; do
     tries=$((tries + 1))
-    # 每次失败的尝试都记一行：一天只有一次现场，失败与重试成功之间的差别
-    # 只能靠把两边逐字摆在一起看（参数 + 服务端原文 + 第几次）。
-    log "提交尝试失败: try=$try rid=$rid lng=$lng lat=$lat $(_api_err1 "$API_ERRLOG")"
     _sg_retry_sleep "$SG_RETRY_WAIT"
     try=$((try + 1))
     resp=$(api "sign_in/$rid/student/sign" "lng=$lng&lat=$lat" "$token"); rc=$?
+    _sg_try_log "$try" "$rid" "$lng" "$lat"
   done
   if _sg_submit_ok "$rc" "$resp"; then
     td=$(today); hm=$(now_hm)
     if [ "$tries" -gt 0 ]; then
       log "提交重试 $tries 次后成功 [$name]"
     fi
-    # 成功那次也留痕：日后比对「成功与失败差在哪」时，两边得是同一种记录
-    log "提交成功: try=$try rid=$rid lng=$lng lat=$lat $(_api_err1 "$API_ERRLOG")"
     if [ -n "$et" ] && [ "$now" -gt "$et" ]; then
       log "✅ 补签成功 [$name]"
       sign_set "$td" "$hm" "supplement"
@@ -257,16 +264,11 @@ signin_submit() {
     update_desc
     return 0
   fi
-  # 全部尝试都失败：把「发出去的参数」「服务端回的原文」「试了几次」一次记全。
-  # 一天只有一次现场，宁可多写一行，也不要事后为了补一个字段再等一天。
-  # 原因（HTTP 状态码 / 服务端正文 / 连接失败 / 超时）由 api 层落进 API_ERRLOG 后转交。
+  # 全部尝试都失败：末尾那行汇总仍把「发出去的参数」「试了几次」一次记全，
+  # 服务端原文则原样转交 api 层那一行（它已含完整正文），这里不再另截一次。
   faildiag=$(_api_err1 "$API_ERRLOG")
-  failwhat="rid=$rid lng=$lng lat=$lat tries=$tries"
-  if [ -n "$faildiag" ]; then
-    log "签到失败: rc=$rc $faildiag $failwhat $(echo "$resp" | "$BB" head -c 200)"
-  else
-    log "签到失败: rc=$rc $failwhat $(echo "$resp" | "$BB" head -c 200)"
-  fi
+  failwhat="rid=$rid lng=$lng lat=$lat try=$try tries=$tries"
+  log "签到失败: rc=$rc $failwhat $faildiag"
   notify_once failsign
   return 1
 }
