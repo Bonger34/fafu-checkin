@@ -644,11 +644,26 @@ _api_note 0 200 '{"ok":1}' "" "" 1791704215000 1791704215250
 cat "$API_ERRLOG" > ms.line
 _api_note 0 200 '{"ok":1}' "" "" 1791704215 1791704225
 cat "$API_ERRLOG" > s.line
+# %N 不可用那一档（Ubuntu 的 busybox-static 就没编 FEATURE_DATE_NANO）：
+# 退到 /proc/uptime——两位小数＝10 毫秒精度，读数补零到 13 位，故单位仍是毫秒。
+# 造两个读数（1000.00 → 1000.50）看差值是不是 500ms：补零的读数一旦被当成八进制，
+# 这里要么报语法错、要么静默算错，都会立刻现形。
+export MOCK_DATE_NO_NANO=1
+API_UPTIME='./uptime'; export API_UPTIME
+printf '1000.00 9.00\n' > uptime
+a=$(_api_now)
+printf '1000.50 9.00\n' > uptime
+b=$(_api_now)
+printf 'digits=%s\n' "${#a}"
+printf 'cost=%s\n' "$(_api_cost "$a" "$b")"
 DRIVER
   t_has_re "成功档带耗时（值 + 单位）" "$AP_WORK/ok.line" 'http=200 .* 耗时=[0-9]+(ms|s)'
   t_has_re "失败档同样带耗时（值 + 单位）" "$AP_WORK/fail.line" 'http=503 .* 耗时=[0-9]+(ms|s)'
   t_has "13 位读数：按毫秒算（两个读数差 250）" "$AP_WORK/ms.line" "耗时=250ms"
   t_has "取不到毫秒：退化为秒（两个读数差 10）" "$AP_WORK/s.line" "耗时=10s"
+  d="$AP_WORK/cost.out"
+  t_eq "没编 %N 时改用 uptime：读数仍是 13 位（毫秒档）" "$(ap_val "$d" digits)" "13"
+  t_eq "没编 %N 时：差值按毫秒算（0.5 秒 = 500ms）" "$(ap_val "$d" cost)" "耗时=500ms"
 }
 
 # ============================================================

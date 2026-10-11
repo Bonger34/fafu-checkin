@@ -563,6 +563,9 @@ sh $M/fafu_checkin.sh once         # 手动签到检查（幂等）
   ```
 - **`耗时=`**：这一次调用花了多久，值自带单位（`ms` / `s`）——判断「是窗口刚开那几秒服务端
   还没开始收，还是它一直不理我」。同一行里，它与 `http=` 一起决定「值不值得再试」。
+  读数有两级来源：`date +%s%3N`（毫秒；`%N` 是 busybox 的**可选特性**，没编进去时会退化成
+  秒），以及 `/proc/uptime`（Android/Linux 一定有，10 毫秒精度）。看到 `耗时=0s` 这种整秒
+  读数，说明这台设备的 busybox 没编 `%N` **且** `/proc/uptime` 也读不到——不是「调用瞬间返回」。
   ```
   保活: ❌ 2_C0DE 调用失败 rc=7 screen=on net rc=7 http=- err=curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused 耗时=1175ms (今日 0 成功 / 1 失败) — 屏幕亮着，延后（熄屏或签到时段自动刷新）
   ```
@@ -747,10 +750,17 @@ sh build.sh                                 # 构建（含产物文件核对）
   `calls`。fd 见证只在某个 fd 真的接到普通文件时报警（`file`），是「加固是否还在」的负向守卫
   ——`</dev/null` 这类写法本身由静态命令位判据钉住；
 - mock 替身需要一个**真实 busybox** 承接其余 applet：本机把它放到 `tools/busybox/`
-  （该目录不入库）或用 `TEST_BUSYBOX=<路径>` 指定，CI 先装 `busybox-static`
-  （见 `.github/workflows/`）；三者统一由 `tools/lib.sh` 的 `find_busybox` 定位。
+  （该目录不入库）或用 `TEST_BUSYBOX=<路径>` 指定；CI 用 **KernelSU 随附的那一份**
+  （`userspace/ksud/bin/x86_64/busybox`，静态 ELF；设备上的 `/data/adb/ksu/bin/busybox`
+  就是它，按 commit 钉住），于是 **CI 与设备同一份构建**——busybox 的能力差异（可选特性、
+  applet 支持）在 CI 就暴露，而不是刷机之后才发现；CI 那一步还会把 `date +%s%3N` 的
+  实际输出打进日志，能力差异看得见、不靠猜。三者统一由 `tools/lib.sh` 的 `find_busybox` 定位。
+  **本机（Windows）与 CI 用的不是同一份二进制**（设备那份是 aarch64 ELF，本机跑不了），
+  所以代码里**不得依赖 busybox 的可选特性**：`%N` 未编译时 `date +%s%3N` 会把 `%3N`
+  原样吐出，耗时因此以 `/proc/uptime` 兜底（见 §3.5「耗时」）。
   替身只在对应控制变量被设置时接管那处环境事实（完全不设就等价于透传）：时间源
-  `MOCK_DATE_CTL`、`/dev/urandom`（`MOCK_RANDOM_CTL`；Windows 上没有这个设备，
+  `MOCK_DATE_CTL`、缺少 `%N` 的构建（`MOCK_DATE_NO_NANO`，用来造出「耗时退化」那个环境）、
+  `/dev/urandom`（`MOCK_RANDOM_CTL`；Windows 上没有这个设备，
   签名随机数会退化成空串）、wget（`MOCK_WGET_DIR`）、设备命令（`MOCK_DEVICE_DIR`）、
   降权命令（`MOCK_SU_EMPTY` / `MOCK_SU_ID`，配合包装脚本，见下面的说明）；
   其余 applet 一律透传；

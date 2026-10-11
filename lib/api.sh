@@ -125,24 +125,49 @@ _api_hdrs() { # [$1=诊断文件，缺省 $API_ERRLOG]
   _api_err1 "${1:-$API_ERRLOG}" | "$BB" sed -n 's/.*\(hdr={[^}]*}\).*/\1/p'
 }
 
-# 计时读数：毫秒优先（busybox 的 `date +%s%3N` 给得出 13 位数字），取不到退化为秒。
-# **位数就是单位**：13 位=毫秒、其余=秒——`date` 不认 %3N 时会把 %3N 原样吐出来，
-# 故这里只认数字并截到 13 / 10 位，_api_cost 才不会把杂字符算进差值。
+# 计时读数：**毫秒优先，取不到才退化为秒**。两级来源都只为「窗口刚开那几秒」这类判断：
+#   ① `date +%s%3N`——`%N` 是 busybox 的**可选特性**（FEATURE_DATE_NANO）：没编进去时
+#      `date` 把 `%3N` 原样吐出来，数字串里因此多一个 3，故只认「≥13 位」并截前 13 位；
+#   ② `$API_UPTIME`（默认 /proc/uptime）——Android/Linux 一定有，两位小数＝10 毫秒精度。
+#      它是开机以来的秒数而非墙上时间，但两个读数只用来相减，故与 ① 等价；
+#      为共用「13 位＝毫秒」这条判定而左补零到 13 位（补零不影响差值，_api_cost 会先去零）。
+#   ③ 两者都拿不到（非 Linux 上又恰好没编 %N）→ `date +%s`，10 位读数，单位按秒。
+# **位数就是单位**：13 位=毫秒、其余=秒——_api_cost 只按位数判，不认来源。
+API_UPTIME="${API_UPTIME:-/proc/uptime}"   # 注入点（生产环境不设置）：换一个 uptime 来源
 _api_now() { # 无参 → 当前读数
-  local t
+  local t s c
   t=$("$BB" date +%s%3N 2>/dev/null | "$BB" tr -dc '0-9')
   case "$t" in
-    ?????????????*) t=$(printf '%s' "$t" | "$BB" head -c 13) ;;
-    *)              t=$(printf '%s' "$t" | "$BB" head -c 10) ;;
+    ?????????????*) printf '%s' "$(printf '%s' "$t" | "$BB" head -c 13)"; return 0 ;;
   esac
-  printf '%s' "$t"
+  if [ -r "$API_UPTIME" ]; then
+    # 首行形如 `1234567.89 9876543.21`：取前一个数，切成秒与百分位两段
+    s=$("$BB" head -n 1 "$API_UPTIME" 2>/dev/null | "$BB" cut -d' ' -f1)
+    case "$s" in
+      *.*)
+        c=${s#*.}; s=${s%%.*}
+        c=$(printf '%s' "$c" | "$BB" head -c 2)                 # 只取百分位
+        case "$c" in ?) c="${c}0" ;; esac                       # 一位小数 → 右补成百分位
+        # 去前导零再进算术：POSIX 把 `0123` 当八进制，`8`/`9` 更是直接报语法错
+        s=$(printf '%s' "$s" | "$BB" sed 's/^0*//')
+        c=$(printf '%s' "$c" | "$BB" sed 's/^0*//')
+        printf '%013d' $(( ${s:-0} * 1000 + ${c:-0} * 10 ))
+        return 0
+        ;;
+    esac
+  fi
+  printf '%s' "$(printf '%s' "$t" | "$BB" head -c 10)"
 }
 
 # 耗时字段：值自带单位后缀（ms / s）——只给数字的话，事后分不出单位。
 _api_cost() { # $1=起始读数 $2=结束读数
-  local unit
+  local unit a b
   if [ "${#1}" = "13" ] && [ "${#2}" = "13" ]; then unit=ms; else unit=s; fi
-  printf '耗时=%s%s' "$(( ${2:-0} - ${1:-0} ))" "$unit"
+  # 相减前先去前导零：补零的读数（uptime 那一档）会被 POSIX 算术当八进制——
+  # `$((0001234567890))` 在 busybox ash 上是**语法错误**，静默算错更是灾难。
+  a=$(printf '%s' "${1:-0}" | "$BB" sed 's/^0*//')
+  b=$(printf '%s' "${2:-0}" | "$BB" sed 's/^0*//')
+  printf '耗时=%s%s' "$(( ${b:-0} - ${a:-0} ))" "$unit"
 }
 
 # 一次调用的全部事实 → API_ERRLOG 里唯一的那一行（**格式的唯一拼装处**）。

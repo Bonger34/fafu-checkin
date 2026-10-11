@@ -25,6 +25,8 @@
 #                  +%H:%M / +%H / +%M / '+%Y-%m-%d %H:%M:%S'，其余格式（含 +%s）走真实时间。
 #                  秒位没有可控来源，固定成 :00 —— 需要比对秒数的断言请只验格式（两位数字）。
 #   MOCK_DATE_FMT  仅输出一个格式串时的回退格式（默认 +%s）
+#   MOCK_DATE_NO_NANO 置位即模拟「这份 busybox 没编 FEATURE_DATE_NANO」：带 %N 的格式
+#                  按「%N 不被支持」原样吐出（真机上出现过），其余格式一律不变
 #   MOCK_RANDOM_CTL 随机数替身的序号文件（设了才接管，且每次调用都不同）
 #   MOCK_WGET_DIR  wget 替身的控制目录（设了才接管；见下面的说明）
 #   MOCK_DEVICE_DIR 设备命令替身的控制目录（设了才接管；见下面的说明）
@@ -48,6 +50,18 @@ if [ "$BB_REAL" = "busybox" ]; then
     echo "mock: 请设置 TEST_BUSYBOX=<路径>，或把 busybox 放到 tools/busybox/。" >&2
     exit 127
   fi
+fi
+
+# ---- date 的**可选特性**：不是每份 busybox 都编了 FEATURE_DATE_NANO ----
+# 没编进去时 `date +%s%3N` 会把 `%3N` 原样吐出来（Ubuntu 的 busybox-static 就是这样），
+# 于是「耗时」只能退化成秒——而「窗口刚开那几秒」正是要靠它分辨的。
+# 要断言「退化之后仍拿到毫秒」，就得能造出这个环境事实，故这里只接管带 %N 的格式。
+if [ "$1" = "date" ] && [ -n "${MOCK_DATE_NO_NANO:-}" ]; then
+  # 模块要的是 `+%s%3N`，纳秒段写作 `%3N`（不是 `%N`）——两种形状都认，
+  # 免得日后换成 `+%N` 时这条替身静默失效（那正是「断言看着在跑、其实空转」）
+  case "$2" in
+    *%3N*|*%N*) printf '%s%%3N\n' "$("$BB_REAL" date +%s)"; exit 0 ;;
+  esac
 fi
 
 if [ "$1" = "date" ] && [ -n "${MOCK_DATE_CTL:-}" ] && [ -f "$MOCK_DATE_CTL" ]; then

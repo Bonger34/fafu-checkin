@@ -105,6 +105,18 @@
   （`.fafu_task_snap`、`.fafu_api.err`、`.fafu_api.hdr`、`.fafu_api.raw`），
   卸载后模块目录里不留这些文件。
 
+- **耗时不再依赖 busybox 的可选特性**：`date +%s%3N` 里的 `%N` 要编译期打开
+  （`FEATURE_DATE_NANO`），没打开的构建会把 `%3N` 原样吐出来——于是「窗口刚开那几秒」
+  这类判断只剩秒级可用。现在读数改走两级来源：`date +%s%3N` 拿不到就用 `/proc/uptime`
+  （Android/Linux 一定有，10 毫秒精度），两者都没有才退化为整秒。日志里因此仍是 `耗时=<N>ms`，
+  除非连 `/proc/uptime` 也读不到。
+
+- **CI 改用与设备同一份 busybox**：断言用的真实 busybox 从「`apt install busybox-static`」
+  换成 **KernelSU 随附的那一份**（`userspace/ksud/bin/x86_64/busybox`，静态 ELF，按 commit 钉住）
+  ——设备上的 `/data/adb/ksu/bin/busybox` 就是它，开发与生产同一份构建，能力差异（可选特性、
+  applet 支持）在 CI 就暴露；CI 日志里还会打印这份 busybox 的 `date +%s%3N` 输出，
+  免得再靠猜。本机（Windows）跑不了 aarch64 ELF，故代码本身不依赖 busybox 的可选特性。
+
 ## v1.2.0
 
 - **新增通知提醒**（可用 `NOTIFY=0` 完全关闭）：
