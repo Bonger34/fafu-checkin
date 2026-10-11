@@ -39,12 +39,21 @@ jobs:
       - name: 元数据校验（module.prop / update.json）
         run: python3 scripts/check_metadata.py
 
-      # 断言里的 mock 时间源需要一个真实 busybox 承接其余 applet
-      - name: 准备 busybox（断言的 mock 时间源要用）
+      # 断言里的 mock 时间源需要一个真实 busybox 承接其余 applet。
+      # 用 **KernelSU 随附的那一份**（设备上的 /data/adb/ksu/bin/busybox 就是它）：
+      # 开发与生产同一份构建，busybox 的能力差异（可选特性、applet 支持）才会在 CI
+      # 暴露，而不是刷机之后才发现。x86_64 那份是静态 ELF，ubuntu 上可直接跑；
+      # 按 commit 钉住，上游一改不会让基线悄悄漂移。
+      - name: 准备 busybox（与设备同一份构建：KernelSU 随附）
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq busybox-static
-          busybox | head -n1
+          curl -fsSL --retry 3 -o /usr/local/bin/ksu-busybox \
+            https://raw.githubusercontent.com/tiann/KernelSU/40e8fb7616bfd875babb45364f5262657538327a/userspace/ksud/bin/x86_64/busybox
+          chmod +x /usr/local/bin/ksu-busybox
+          /usr/local/bin/ksu-busybox | head -n1
+          # 把这份 busybox 的**可选能力**打进日志：曾经因为 `%N` 没编进去，
+          # 本地全绿、CI 全红（耗时单位退化成秒）。能力差异要看得见，不靠猜。
+          printf 'date +%%s%%3N => %s\n' "$(/usr/local/bin/ksu-busybox date +%s%3N)"
+          printf 'TEST_BUSYBOX=/usr/local/bin/ksu-busybox\n' >> "$GITHUB_ENV"
 
       - name: 层序检查（一层只能引用更早加载的层）
         run: sh tools/check-layer-order.sh
