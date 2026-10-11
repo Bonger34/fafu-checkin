@@ -56,36 +56,6 @@ jobs:
           printf 'date +%%s%%3N => %s\n' "$(/usr/local/bin/busybox date +%s%3N)"
           printf 'TEST_BUSYBOX=/usr/local/bin/busybox\n' >> "$GITHUB_ENV"
 
-      - name: 诊断 · 设备 busybox 上跑模块真正用的那几条命令
-        run: |
-          B=/usr/local/bin/busybox
-          J='{"records":[{"id":123,"name":"晚查寝签到","signState":0,"beginTime":1759400000000,"signTime":"2026-10-03 21:30:00"}],"total":1}'
-          export J
-          echo "== A 两趟各自的原始输出（逐字段） =="
-          for fld in id name signState signTime nope; do
-            p1=$(printf '%s' "$J" | $B grep -oE "\"$fld\":\"[^\"]*\"" 2>/tmp/e1; echo "rc=$?")
-            e1=$(cat /tmp/e1)
-            p2=$(printf '%s' "$J" | $B grep -oE "\"$fld\":[^,}]*" 2>/tmp/e2; echo "rc=$?")
-            e2=$(cat /tmp/e2)
-            printf '  %-9s pass1=[%s] err1=[%s]  pass2=[%s] err2=[%s]\n' "$fld" "$p1" "$e1" "$p2" "$e2"
-          done
-          echo "== B 真实 json_first（逐字段，走 lib/base.sh） =="
-          for fld in id name signState signTime nope; do
-            printf '  %-9s => [%s]\n' "$fld" "$(F="$fld" $B sh -c '. lib/base.sh; json_first "$J" "$F"')"
-          done
-          echo "== C 与 json_first 同形的交替组（旧写法） =="
-          probe() { printf '%s' "$2" | $B $3 > /tmp/o 2>/tmp/e; printf '  rc=%s out=[%s] err=[%s]\n' "$?" "$(cat /tmp/o)" "$(cat /tmp/e)"; }
-          probe x "$J" "grep -oE \"signState\":(\"[^\"]*\"|[^,}]*)" || true
-          echo "== E 诊断行的 hdr 段：sed 取 vs 参数展开取 =="
-          LINE='http=200 body=x hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Server: nginx} 耗时=12ms'
-          export LINE
-          printf '  sed rc=%s out=[%s]\n' "$(printf '%s' "$LINE" | $B sed -n 's/.*\(hdr={[^}]*}\).*/\1/p' >/tmp/so 2>/tmp/se; echo $?)" "$(cat /tmp/so)"
-          printf '  sed stderr=[%s]\n' "$(cat /tmp/se)"
-          printf '  真实 _api_hdrs=[%s]\n' "$($B sh -c 'printf "%s" "$LINE" > /tmp/diag; . lib/api.sh; _api_hdrs /tmp/diag')"
-          echo "== D 版本 =="
-          $B | head -n1
-          exit 0
-
       - name: 层序检查（一层只能引用更早加载的层）
         run: sh tools/check-layer-order.sh
 
