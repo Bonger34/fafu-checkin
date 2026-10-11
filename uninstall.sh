@@ -48,4 +48,5 @@ rm -f "$MODDIR/fafu_checkin.log" "$MODDIR/fafu_checkin.log.rot" "$MODDIR/.fafu_c
       "$MODDIR/fafu_checkin.status" "$MODDIR/fafu_keepalive.status" \
       "$MODDIR/.fafu_notify_fail" "$MODDIR/.fafu_notify_nosign" \
       "$MODDIR/.fafu_notify_late" "$MODDIR/.fafu_notify_miss" "$MODDIR/.fafu_notify_last" \
-      "$MODDIR/.fafu_task_seen"
+      "$MODDIR/.fafu_task_seen" "$MODDIR/.fafu_task_snap" \
+      "$MODDIR/.fafu_api.err" "$MODDIR/.fafu_api.hdr" "$MODDIR/.fafu_api.raw"

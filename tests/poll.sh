@@ -106,8 +106,12 @@ poll_start() {
     export PATH="$POLL_WORK/bin:$PATH" BB_OVERRIDE='./bin/bb' \
       MOCK_DATE_CTL='./ctl/date' MOCK_WGET_DIR='./ctl' MOCK_DEVICE_DIR='./ctl' \
       MOCK_RANDOM_CTL='./ctl/rand' FAFU_DAEMON=1 SU_MODE=''
+    # 三处按需注入（默认空 = 与前面几条用例完全一致）：token 目录、网络工具、降权写法。
+    # 端到端那条用例要真实 run_once / keepalive_ping / notify，故只有它会给出这三样。
+    LD_DIR="${POLL_LD_DIR:-}" CURL_BIN="${POLL_CURL_BIN:-}" FAFU_SU_MODE="${POLL_SU_MODE:-}"
+    export LD_DIR CURL_BIN FAFU_SU_MODE
     if [ -n "$bb" ]; then
-      "$bb" timeout 120 sh './mod/fafu_checkin.sh'
+      "$bb" timeout "${POLL_TIMEOUT:-120}" sh './mod/fafu_checkin.sh'
     else
       sh './mod/fafu_checkin.sh'
     fi
@@ -381,8 +385,304 @@ INJECT
   t_eq "当日已解决：主循环仍在按一分钟一轮走" "$(poll_slept)" "60|60|60|60|"
 }
 
+# ============================================================
+# 八、端到端回归：六类排障日志在真实调用次序下都出现
+#
+# 这一条跑的是**真实入口的守护主循环**：run_once / signin_fetch / signin_decide /
+# signin_submit / keepalive_ping / notify 全是真实实现，只顶掉四类环境事实——
+# 时间（拨钟文件 + 把 %s 对齐到同一份的 _now）、休眠（替身按计划拨钟并切换降权档）、
+# 网络（真实 api 层 + 按调用序号喂事实的 curl 替身）、降权发送（替身 su）。
+# 一天只有一次现场，故这条时间线刻意把六类日志串在一起：
+#   连接层查询失败 → 提交失败（两轮都失败，当日只通知一次）→ 提交成功 →
+#   跨日检测到已签到 → 保活失败（网络类 / 登录态各一次）。
+# 断言只读日志正文与状态文件产物，不断言行号，也不复制源码片段。
+# ============================================================
+
+POLL_E2E_D1='2026-10-01'
+POLL_E2E_D2='2026-10-02'
+POLL_E2E_E1=0        # 日 1 零点毫秒（夹具时间戳都相对它）
+POLL_E2E_E2=0        # 日 2 零点毫秒（跨日那一轮用）
+# 连接层失败的原始报错：curl 在真机上的原话，err= 段逐字取自它
+POLL_E2E_CONN='curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused'
+# 响应头夹具：白名单四项齐全，落成的字面顺序就是 api 层固定的那一个
+POLL_E2E_HDR='Date: Mon, 13 Oct 2025 21:30:00 GMT
+Content-Length: 53
+Content-Type: application/json;charset=UTF-8
+Server: nginx'
+# 服务端拒绝这一次提交的正文（带 timestamp 即「调用成功但正文报错」那一档）
+POLL_E2E_REJECT='{"timestamp":1759500000000,"status":500,"msg":"busy"}'
+
+poll_e2e_epoch() { # 两天的零点毫秒（真实 busybox 取，期望值因此不依赖跑断言的机器时区）
+  local bb d
+  bb=$(t_find_busybox)
+  [ -n "$bb" ] || bb="busybox"
+  d=$("$bb" date -d "$POLL_E2E_D1 00:00:00" +%s 2>/dev/null | tr -dc '0-9')
+  POLL_E2E_E1=$(( ${d:-0} * 1000 ))
+  d=$("$bb" date -d "$POLL_E2E_D2 00:00:00" +%s 2>/dev/null | tr -dc '0-9')
+  POLL_E2E_E2=$(( ${d:-0} * 1000 ))
+}
+
+# 任务响应体：$1=signState $2=开始（当日第几分钟）$3=补签截止（同）$4=零点毫秒 $5=signTime（分钟，可空）
+poll_e2e_task() {
+  local st b d base extra
+  st="$1"; b="$2"; d="$3"; base="${4:-$POLL_E2E_E1}"
+  extra=""
+  [ -n "${5:-}" ] && extra=",\"signTime\":$(( base + $5 * 60000 ))"
+  printf '{"records":[{"id":88123,"name":"晚查寝签到","beginTime":%s,"supplementEndTime":%s,"endTime":%s,"signInStudent":{"signState":%s},"lng":119.243462,"lat":26.088417%s}]}\n' \
+    "$(( base + b * 60000 ))" "$(( base + d * 60000 ))" "$(( base + (b + 60) * 60000 ))" "$st" "$extra"
+}
+
+# 第 $1 次网络调用的事实：$2=工具退出码 $3=状态码（空=这一档拿不到）$4=正文 $5=报错 $6=响应头
+poll_e2e_fact() {
+  local d
+  d="$POLL_WORK/ctl/facts/$1"
+  mkdir -p "$d"
+  printf '%s\n' "$2" > "$d/rc"
+  printf '%s\n' "$3" > "$d/code"
+  printf '%s' "$4" > "$d/body"
+  printf '%s' "$5" > "$d/stderr"
+  printf '%s' "$6" > "$d/hdr"
+}
+
+# 每天一行（`日期 时刻 降权档`）：第 1 行是启动时刻，第 N+1 行是第 N 轮末尾拨到的时刻。
+# 降权档按轮切换，是为了让「当日一次」那条通知先成功一次（成功才落标记）。
+poll_e2e_rounds() {
+  printf '%s\n' \
+    "$POLL_E2E_D1 19:30 fail" \
+    "$POLL_E2E_D1 19:34 ok" \
+    "$POLL_E2E_D1 19:35 fail" \
+    "$POLL_E2E_D1 19:36 fail" \
+    "$POLL_E2E_D1 19:37 fail" \
+    "$POLL_E2E_D1 19:51 fail" \
+    "$POLL_E2E_D2 19:30 fail" \
+    "$POLL_E2E_D2 19:31 fail" > "$POLL_WORK/ctl/rounds"
+  printf '%s 19:30\n' "$POLL_E2E_D1" > "$POLL_WORK/ctl/date"
+  printf 'fail\n' > "$POLL_WORK/ctl/su.mode"
+}
+
+poll_e2e_setup() {
+  local task0 task1
+  POLL_WORK="$T_WORK_ROOT/poll-e2e-logs"
+  rm -rf "$POLL_WORK"
+  t_stage_module "$POLL_WORK/mod" >/dev/null
+  mkdir -p "$POLL_WORK/ctl" "$POLL_WORK/bin" "$POLL_WORK/ld"
+  t_bb_wrap "$POLL_WORK/bin/bb" >/dev/null
+  : > "$POLL_WORK/ctl/sleeps"
+  : > "$POLL_WORK/ctl/su.calls"
+  : > "$POLL_WORK/ctl/refresh"
+  : > "$POLL_WORK/ctl/calls"
+  : > "$POLL_WORK/ctl/activity.txt"
+  printf 'mWakefulness=Awake\n' > "$POLL_WORK/ctl/power.txt"   # 屏幕亮着：保活失败档走「延后」
+  printf '0\n' > "$POLL_WORK/ctl/rc"                            # 设备命令的退出码
+  printf '1\n' > "$POLL_WORK/ctl/rand"                          # 签名随机数的替身序号
+  # token 来源：真实 get_token 读它（应用未安装在本机，故给一份最小的本地存储）
+  printf 'j\000"token":"2_C0DE"\000j' > "$POLL_WORK/ld/000001.ldb"
+  poll_e2e_epoch
+  # poll_start 的三处按需注入：真实 run_once 要读 token 目录，网络与通知也要真的跑起来
+  POLL_LD_DIR='./ld'
+  POLL_CURL_BIN='./bin/curl'
+  POLL_SU_MODE='./bin/su - shell -c'
+  POLL_TIMEOUT=300     # 这条用例要走八轮、十几次网络调用，120 秒的墙钟上限不够
+  # 保活时段覆盖全天（拨钟跨度大），轮询范围覆盖两天的拨钟时点
+  poll_config 'KEEPALIVE=1
+KA_START=00:00
+KA_END=23:59
+POLL_START=19:00
+POLL_END=22:15'
+  # 网络事实按调用序号给：真替身负责「curl 怎么回」，分发器只决定这一次拿哪一份
+  task0=$(poll_e2e_task 0 1160 1260 "$POLL_E2E_E1")
+  task1=$(poll_e2e_task 1 1160 1260 "$POLL_E2E_E2" 1140)
+  poll_e2e_fact 1 7 "" "" "$POLL_E2E_CONN" ""        # 查询失败（连接层）
+  poll_e2e_fact 2 7 "" "" "$POLL_E2E_CONN" ""        # 刷新后重试仍失败
+  poll_e2e_fact 3 7 "" "" "$POLL_E2E_CONN" ""        # 保活：网络类失败
+  poll_e2e_fact 4 0 200 "$task0" "" "$POLL_E2E_HDR"  # 查询成功（窗口内未签）
+  poll_e2e_fact 5 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"   # 提交被拒
+  poll_e2e_fact 6 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"
+  poll_e2e_fact 7 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"
+  poll_e2e_fact 8 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"
+  poll_e2e_fact 9 0 200 "$task0" "" "$POLL_E2E_HDR"  # 第二轮查询：任务没变，不该再记变化行
+  poll_e2e_fact 10 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"
+  poll_e2e_fact 11 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"
+  poll_e2e_fact 12 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"
+  poll_e2e_fact 13 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"
+  poll_e2e_fact 14 0 200 "$task0" "" "$POLL_E2E_HDR"                      # 第三轮查询
+  poll_e2e_fact 15 0 200 '{"code":0,"msg":"success"}' "" "$POLL_E2E_HDR"  # 提交成功
+  poll_e2e_fact 16 0 200 '{"code":1,"message":"not login"}' "" "$POLL_E2E_HDR"  # 保活：登录态失效
+  poll_e2e_fact 17 0 200 "$task1" "" "$POLL_E2E_HDR"                      # 跨日：服务端说已签到
+  poll_e2e_fact 18 0 200 '{"records":[]}' "" "$POLL_E2E_HDR"              # 跨日保活：成功
+  printf '0' > "$POLL_WORK/ctl/curl.n"
+  poll_e2e_rounds
+  poll_e2e_tools
+  poll_e2e_inject
+}
+
+# 两个替身文件（都用带引号的 heredoc：内容不在写入时展开，全部留给运行时）：
+#   bin/curl —— 分发器：按调用序号把 ctl/facts/<N>/ 的事实搬进真替身的控制文件再转交
+#   bin/su   —— 降权替身：按 ctl/su.mode 决定这一次发得出去还是失败，并把命令串记下来
+# 诊断行本身不在这两个替身里拼：格式仍是 api 层 _api_note 那一处写的。
+poll_e2e_tools() {
+  t_curl_stub "$POLL_WORK/bin/curl.real" "$POLL_WORK/ctl" >/dev/null
+  cat > "$POLL_WORK/bin/curl" <<'E2E_CURL'
+#!/bin/sh
+# 由 tests/poll.sh 的 poll_e2e_tools 生成：按调用序号喂事实的 curl 分发器
+for _a in "$@"; do
+  [ "$_a" = "--version" ] && { echo "curl 8.0.0"; exit 0; }
+done
+_n=$(cat ctl/curl.n 2>/dev/null | tr -dc '0-9'); _n=$(( ${_n:-0} + 1 ))
+printf '%s' "$_n" > ctl/curl.n
+_d="ctl/facts/$_n"
+[ -d "$_d" ] || _d=$(cat ctl/facts.last 2>/dev/null)
+[ -n "$_d" ] && printf '%s' "$_d" > ctl/facts.last
+for _k in code body hdr stderr rc; do
+  [ -f "$_d/$_k" ] && cat "$_d/$_k" > "ctl/curl_$_k"
+done
+exec ./bin/curl.real "$@"
+E2E_CURL
+  cat > "$POLL_WORK/bin/su" <<'E2E_SU'
+#!/bin/sh
+# 由 tests/poll.sh 的 poll_e2e_tools 生成：降权替身（按 ctl/su.mode 决定成败）
+printf '%s\n' "$*" >> ctl/su.calls
+[ "$(cat ctl/su.mode 2>/dev/null)" = "ok" ] && exit 0
+echo 'su: permission denied' >&2
+exit 1
+E2E_SU
+  chmod +x "$POLL_WORK/bin/curl" "$POLL_WORK/bin/su" "$POLL_WORK/bin/curl.real" 2>/dev/null
+}
+
+poll_e2e_inject() {
+  cat >> "$POLL_WORK/mod/lib/commands.sh" <<INJECT
+
+# ---- 断言注入（只存在于断言的副本里）：真实主循环的时间与休眠替身 ----
+E2E_ROUND=0
+# 时间：%s 与拨钟文件对齐（只拨墙钟的话，窗口判定与快照仍读真实时间，时间线会分叉）
+_now() {
+  local _d _base
+  case "\$1" in
+    +%s)
+      _d=\$(cat ctl/date 2>/dev/null)
+      case "\${_d%% *}" in
+        $POLL_E2E_D2) _base=$POLL_E2E_E2 ;;
+        *)            _base=$POLL_E2E_E1 ;;
+      esac
+      printf '%s' "\$(( _base / 1000 + \$(hm_minutes "\${_d#* }") * 60 ))"
+      ;;
+    *) "\$BB" date "\$@" ;;
+  esac
+}
+# 休眠：只把主循环那一跳（60 / 240 秒）当作一轮并拨钟；采样（3 秒）与提交短重试（15 秒）
+# 属于轮内等待，拨钟会把时间线搅乱，故直接返回。
+sleep() {
+  case "\${1:-}" in 60|240) ;; *) return 0 ;; esac
+  printf '%s\n' "\${1:-}" >> ctl/sleeps
+  E2E_ROUND=\$((E2E_ROUND + 1))
+  _r=\$(sed -n "\$((E2E_ROUND + 1))p" ctl/rounds 2>/dev/null)
+  if [ -z "\$_r" ]; then printf 'disabled\n' > mod/fafu-checkin.state; return 0; fi
+  set -- \$_r
+  printf '%s %s\n' "\$1" "\$2" > ctl/date
+  printf '%s\n' "\$3" > ctl/su.mode
+  return 0
+}
+# 刷新流程：它的时序（三段、提前关页）由 keepalive 套件用真实实现覆盖；在签到链路上
+# 它每次查询异常都会触发，而真实的采样循环要读几十遍 token 目录——那条路径与本票的
+# 六类日志无关，留着只会让这条用例撞上墙钟上限。替身只记「发生过刷新」、不产出新 token。
+refresh_token() { printf 'refresh\n' >> ctl/refresh; printf '%s' "\${E2E_NEWTOKEN:-}"; }
+INJECT
+}
+
+# 日志正文（去掉行首时间戳）整份落盘，输出路径：行数类断言与逐字比对都读它
+poll_e2e_log() {
+  sed 's/^\[[^]]*\][ ]*//' "$POLL_WORK/mod/fafu_checkin.log" 2>/dev/null > "$POLL_WORK/log.txt"
+  printf '%s' "$POLL_WORK/log.txt"
+}
+
+poll_case_e2e_logs() {
+  local log bt1 dl1 bt2 dl2
+  poll_e2e_setup
+  poll_start
+
+  # 防空转：主循环真的按计划跑完八轮，否则下面所有「日志里有某行」都可能只是没跑
+  t_eq "主循环按计划走完八轮（每轮末尾一次休眠；首轮是任务异常档的 4 分钟）" \
+    "$(poll_slept)" "240|60|60|60|60|60|60|60|"
+  log=$(poll_e2e_log)
+  t_file "日志非空" "$log"
+
+  bt1=$(( POLL_E2E_E1 + 1160 * 60000 )); dl1=$(( POLL_E2E_E1 + 1260 * 60000 ))
+  bt2=$(( POLL_E2E_E2 + 1160 * 60000 )); dl2=$(( POLL_E2E_E2 + 1260 * 60000 ))
+
+  # ---- ② 查询失败行：连接层的退出码与原始报错 + 查询参数（两个失败点各一行）----
+  t_has "查询失败：连接层退出码与工具原话进日志" "$log" \
+    "查询异常: rc=7 net rc=7 http=- err=$POLL_E2E_CONN 耗时="
+  t_has "查询失败：查询参数一起留下（分得清发出去的是什么）" "$log" \
+    "params=rows=3&pageNum=1"
+  t_has "刷新登录态后仍失败：第二个失败点也有自己的一行" "$log" \
+    "获取任务失败: rc=7 net rc=7 http=- err=$POLL_E2E_CONN 耗时="
+
+  # ---- ③ 任务变化行：首次拿到任务记一行；下一轮同样内容不记；跨日按日滚动重新算「新任务」----
+  t_has "任务变化：第一次拿到任务记一行（四元组旧值为空）" "$log" \
+    "任务变化: id=→88123 state=→0 begin=→$bt1 截止=→$dl1"
+  t_has "任务变化：跨日后再拿到（按日滚动，旧值仍为空）且状态已是已签到" "$log" \
+    "任务变化: id=→88123 state=→1 begin=→$bt2 截止=→$dl2"
+  t_eq "任务变化只记两行（第二轮任务没变就不记，正常轮询不啰嗦）" \
+    "$(LC_ALL=C grep -acF -e '任务变化' "$log")" "2"
+
+  # ---- ① 提交尝试行：每次调用一行，成功与失败同一字段集 ----
+  t_has "提交尝试（被拒）：发出去的任务号与坐标 + 状态码 + 完整正文 + 响应头四项 + 耗时" "$log" \
+    "提交尝试: try=1 rid=88123 lng=119.243462 lat=26.088417 http=400 body=$POLL_E2E_REJECT hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Content-Length: 53|Content-Type: application/json;charset=UTF-8|Server: nginx} 耗时="
+  t_has "提交尝试（成功）：同一字段集，只差状态码与正文" "$log" \
+    "提交尝试: try=1 rid=88123 lng=119.243462 lat=26.088417 http=200 body={\"code\":0,\"msg\":\"success\"} hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Content-Length: 53|Content-Type: application/json;charset=UTF-8|Server: nginx} 耗时="
+  t_has_re "提交尝试行以耗时读数结尾（值自带单位）" "$log" \
+    'lat=26\.088417 (http=400|http=200) .*耗时=[0-9]+(ms|s)$'
+  t_eq "每次提交调用各一行（9 次提交 + 两轮失败汇总，行数按真实调用数走）" \
+    "$(LC_ALL=C grep -acF -e 'rid=88123 lng=119.243462' "$log")" "11"
+  t_has "全部尝试都失败时另有一行汇总（试了几次 + 服务端原文）" "$log" \
+    "签到失败: rc=1 rid=88123 lng=119.243462 lat=26.088417 try=4 tries=2 http=400 body=$POLL_E2E_REJECT"
+
+  # ---- ④ 已签到记录行：服务端那条记录整条落盘，并排四种时间与两处环境 ----
+  t_has "检测到已签到：整条服务端记录落进日志（含签到时刻）" "$log" \
+    "记录={\"records\":[{\"id\":88123,"
+  t_has "检测到已签到：签到时刻与本地此刻、时区、库路径并排" "$log" \
+    "signTime=[$(( POLL_E2E_E2 + 1140 * 60000 ))]"
+  t_has "检测到已签到：本地此刻就是拨钟到的那一刻（跨日的第二天）" "$log" \
+    "now=[$POLL_E2E_D2 19:30:00] TZ=["
+
+  # ---- ⑤ 保活失败行：网络类与登录态失效各一行，一眼分得开 ----
+  t_has "保活失败（网络类）：rc 与连接层原话 + 屏幕状态 + 所采取的动作" "$log" \
+    "保活: ❌ 2_C0DE 调用失败 rc=7 screen=on net rc=7 http=- err=$POLL_E2E_CONN 耗时="
+  t_has "保活失败（登录态）：rc=0 + 服务端状态码与正文（与上一行不同档）" "$log" \
+    '保活: ❌ 2_C0DE 调用失败 rc=0 screen=on http=200 body={"code":1,"message":"not login"} hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Content-Length: 53|Content-Type: application/json;charset=UTF-8|Server: nginx} 耗时='
+  t_eq "两档各占一行，日志里分得清" \
+    "$(LC_ALL=C grep -acF -e '调用失败 rc=' "$log")" "2"
+
+  # ---- ⑥ 通知发送失败行：失败才记，且写清是哪个事件发不出去 ----
+  t_has "通知发送失败：拿不到任务那条（含失败片段）" "$log" \
+    "通知发送失败: event=failtask rc=1 err=su: permission denied"
+  t_has "通知发送失败：签到成功那条（发送失败不影响签到主流程）" "$log" \
+    "通知发送失败: event=sign rc=1 err=su: permission denied"
+  t_has "通知发送失败：检测到已签到那条" "$log" \
+    "通知发送失败: event=seen rc=1 err=su: permission denied"
+
+  # ---- 不变式：当日一次通知（两轮都提交失败，只发出一条）----
+  t_eq "提交失败两轮：当日只通知一条（成功才落标记，第二轮不再发）" \
+    "$(LC_ALL=C grep -acF -e 'fafu-failsign-20261001' "$POLL_WORK/ctl/su.calls")" "1"
+  t_eq "当日「失败类通知」标记落在第一天" \
+    "$(cat "$POLL_WORK/mod/.fafu_notify_fail" 2>/dev/null)" "$POLL_E2E_D1"
+
+  # ---- 不变式：按日滚动（完成标记 / 任务快照 / 保活统计）----
+  t_eq "完成标记跟着最后一天走" \
+    "$(cat "$POLL_WORK/mod/.fafu_checkin_done" 2>/dev/null)" "$POLL_E2E_D2"
+  t_has "任务快照按日滚动：日期键是最后一天" "$POLL_WORK/mod/.fafu_task_snap" \
+    "date=$POLL_E2E_D2"
+  t_has "任务快照记下的是跨日那一轮的任务状态" "$POLL_WORK/mod/.fafu_task_snap" \
+    "state=1"
+  t_has "保活统计按日归零：跨日后的成功行读作 1 成功 / 0 失败" "$log" \
+    "保活: ✅ 2_C0DE token 有效 (今日 1 成功 / 0 失败)"
+  t_has "保活统计文件的日期键也跟到第二天" "$POLL_WORK/mod/fafu_keepalive.status" \
+    "date=$POLL_E2E_D2"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
+t_case "poll · 六类排障日志在真实调用次序下都出现（端到端）" poll_case_e2e_logs
 t_case "poll · 轮询范围（拨钟逐时点）" poll_case_window
 t_case "poll · 当日已解决即停轮询（四类）" poll_case_resolved
 t_case "poll · 提交失败继续重试到范围止" poll_case_retry
