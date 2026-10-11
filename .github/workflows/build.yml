@@ -59,27 +59,24 @@ jobs:
       - name: 诊断 · 设备 busybox 上跑模块真正用的那几条命令
         run: |
           B=/usr/local/bin/busybox
-          probe() { printf '%s' "$2" | $B $3 > /tmp/o 2>/tmp/e; printf 'rc=%s out=[%s] err=[%s]\n' "$?" "$(cat /tmp/o)" "$(cat /tmp/e)"; }
-          echo "== 1 json_first 的形态（字符串字段） =="
-          probe x '{"records":[{"id":7,"name":"晚查寝签到"}]}' "grep -oE \"name\":(\"[^\"]*\"|[^,}]*)" || true
-          echo "== 2 同一模式取数字字段 =="
-          probe x '{"records":[{"id":7,"name":"x"}]}' "grep -oE \"id\":(\"[^\"]*\"|[^,}]*)" || true
-          echo "== 3 只用第一个分支（带引号） =="
-          probe x '{"id":"7"}' "grep -oE \"id\":\"[^\"]*\"" || true
-          echo "== 4 只用第二个分支（不带引号） =="
-          probe x '{"id":7}' "grep -oE \"id\":[^,}]*" || true
-          echo "== 5 普通 -oE =="
-          probe x 'a1b2' "grep -oE [0-9]" || true
-          echo "== 6 grep -m1 + cut =="
-          probe x 'sign_date=2026-10-12' "grep -m1 ^sign_date=" || true
-          echo "== 7 date / tr / base64 / md5sum =="
-          $B date +%s%3N || true
-          printf 'x' | $B tr -d '\n' | $B base64 | $B md5sum | $B cut -d' ' -f1 || true
-          $B head -c 24 /dev/urandom | $B base64 | $B tr -dc 'A-Za-z0-9' | $B head -c 16; echo
-          echo "== 8 改后的 json_first（真实实现） =="
           J='{"records":[{"id":123,"name":"晚查寝签到","signState":0,"beginTime":1759400000000,"signTime":"2026-10-03 21:30:00"}],"total":1}'
-          BB=$B sh -c '. lib/base.sh; printf "id=%s name=%s state=%s time=%s absent=[%s]\n" "$(json_first "$J" id)" "$(json_first "$J" name)" "$(json_first "$J" signState)" "$(json_first "$J" signTime)" "$(json_first "$J" nope)"' J="$J" || true
-          echo "== 版本 =="
+          export J
+          echo "== A 两趟各自的原始输出（逐字段） =="
+          for fld in id name signState signTime nope; do
+            p1=$(printf '%s' "$J" | $B grep -oE "\"$fld\":\"[^\"]*\"" 2>/tmp/e1; echo "rc=$?")
+            e1=$(cat /tmp/e1)
+            p2=$(printf '%s' "$J" | $B grep -oE "\"$fld\":[^,}]*" 2>/tmp/e2; echo "rc=$?")
+            e2=$(cat /tmp/e2)
+            printf '  %-9s pass1=[%s] err1=[%s]  pass2=[%s] err2=[%s]\n' "$fld" "$p1" "$e1" "$p2" "$e2"
+          done
+          echo "== B 真实 json_first（逐字段，走 lib/base.sh） =="
+          for fld in id name signState signTime nope; do
+            printf '  %-9s => [%s]\n' "$fld" "$(F="$fld" $B sh -c '. lib/base.sh; json_first "$J" "$F"')"
+          done
+          echo "== C 与 json_first 同形的交替组（旧写法） =="
+          probe() { printf '%s' "$2" | $B $3 > /tmp/o 2>/tmp/e; printf '  rc=%s out=[%s] err=[%s]\n' "$?" "$(cat /tmp/o)" "$(cat /tmp/e)"; }
+          probe x "$J" "grep -oE \"signState\":(\"[^\"]*\"|[^,}]*)" || true
+          echo "== D 版本 =="
           $B | head -n1
           exit 0
 
