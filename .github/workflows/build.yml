@@ -76,6 +76,12 @@ jobs:
           echo "== C 与 json_first 同形的交替组（旧写法） =="
           probe() { printf '%s' "$2" | $B $3 > /tmp/o 2>/tmp/e; printf '  rc=%s out=[%s] err=[%s]\n' "$?" "$(cat /tmp/o)" "$(cat /tmp/e)"; }
           probe x "$J" "grep -oE \"signState\":(\"[^\"]*\"|[^,}]*)" || true
+          echo "== E 诊断行的 hdr 段：sed 取 vs 参数展开取 =="
+          LINE='http=200 body=x hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Server: nginx} 耗时=12ms'
+          export LINE
+          printf '  sed rc=%s out=[%s]\n' "$(printf '%s' "$LINE" | $B sed -n 's/.*\(hdr={[^}]*}\).*/\1/p' >/tmp/so 2>/tmp/se; echo $?)" "$(cat /tmp/so)"
+          printf '  sed stderr=[%s]\n' "$(cat /tmp/se)"
+          printf '  真实 _api_hdrs=[%s]\n' "$($B sh -c 'printf "%s" "$LINE" > /tmp/diag; . lib/api.sh; _api_hdrs /tmp/diag')"
           echo "== D 版本 =="
           $B | head -n1
           exit 0
