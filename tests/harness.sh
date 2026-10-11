@@ -83,6 +83,64 @@ t_bb_wrap() {
   printf '%s' "$out"
 }
 
+# 生成 curl 替身（探测 + 一次 POST 调用），供用例注入「这一次网络调用的全部事实」。
+# $1=替身落点（要放进 PATH 上的目录，被测层用 CURL_BIN 指向它）
+# $2=控制目录：下面这些控制文件都在这里，每次生成都重置为缺省值（200 / 空正文 /
+#    空响应头 / 无报错 / 退出码 0），用例按需改写：
+#      curl_code    HTTP 状态码（附在正文之后，与真实 curl 的 -w '\n%{http_code}' 一致）
+#      curl_body    响应体
+#      curl_hdr     响应头原文：被测代码用 `-D <文件>` 时写进那个落点
+#      curl_stderr  网络工具打到 stderr 的报错原文（连接层失败的原始报错）
+#      curl_rc      退出码（非 0 即「连接层失败」，此时不上报状态码）
+#      curl_calls   每次调用的逐个参数追加一行（`|` 分隔，与替身 busybox 的 wget 记录同形）
+#      curl_dpaths  每次带 -D 的落点路径追加一行（断言「响应头写到了哪」用）
+t_curl_stub() {
+  local out ctl
+  out="$1"
+  ctl="$2"
+  mkdir -p "$(dirname "$out")" "$ctl"
+  printf '200\n' > "$ctl/curl_code"
+  : > "$ctl/curl_body"
+  : > "$ctl/curl_hdr"
+  : > "$ctl/curl_stderr"
+  printf '0\n' > "$ctl/curl_rc"
+  : > "$ctl/curl_calls"
+  : > "$ctl/curl_dpaths"
+  cat > "$out" <<STUB
+#!/bin/sh
+# 由 tests/harness.sh 的 t_curl_stub 生成：curl 替身（--version 探测 + 一次 POST 调用）
+CTL='$ctl'
+for _a in "\$@"; do
+  [ "\$_a" = "--version" ] && { echo "curl 8.0.0"; exit 0; }
+done
+{ for _a in "\$@"; do printf '%s|' "\$_a"; done; printf '\n'; } >> "\$CTL/curl_calls" 2>/dev/null
+# -D <文件>：把注入的响应头写进落点（分开写与连写两种形态都认），并记下落点路径
+_d_path=''
+_d_next=0
+for _a in "\$@"; do
+  if [ "\$_d_next" = "1" ]; then
+    _d_path="\$_a"; _d_next=0
+  else
+    case "\$_a" in
+      -D)  _d_next=1 ;;
+      -D*) _d_path="\${_a#-D}" ;;
+    esac
+  fi
+done
+if [ -n "\$_d_path" ]; then
+  cat "\$CTL/curl_hdr" > "\$_d_path" 2>/dev/null
+  printf '%s\n' "\$_d_path" >> "\$CTL/curl_dpaths" 2>/dev/null
+fi
+cat "\$CTL/curl_stderr" >&2 2>/dev/null
+cat "\$CTL/curl_body" 2>/dev/null
+printf '\n%s\n' "\$(cat "\$CTL/curl_code" 2>/dev/null | tr -dc '0-9')"
+_rc=\$(cat "\$CTL/curl_rc" 2>/dev/null | tr -dc '0-9')
+exit "\${_rc:-0}"
+STUB
+  chmod +x "$out" 2>/dev/null || true
+  printf '%s' "$out"
+}
+
 # 「今天」（YYYY-MM-DD）：用真实 busybox 取，绕开 mock 时钟。
 # 用例用它断言「落到状态文件里的日期就是今天」——断言因此不依赖具体日期。
 t_today() {
