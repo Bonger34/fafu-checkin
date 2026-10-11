@@ -116,6 +116,18 @@ ka_stat() { # $1=记号 ✅/❌/⚠️ $2=token $3=说明 $4=补充（无补充�
     "$1" "$2" "$3" "$(ka_ok_count)" "$(ka_fail_count)" "$4"
 }
 
+# 失败行的说明段：本层的返回码与屏幕状态，随后**原样**接上 api 层留下的那一行诊断
+# （`http=` / `net rc=` / `err=` / `耗时=` 都归 api 层拼，本层不自己拼、也不再自己截断）。
+# 「网络不通」与「登录态失效」因此第一次分得开：前者是 `net rc=` 加工具原话，
+# 后者是调用成功（rc=0）但响应里没有任务列表，带的是服务端的状态码与正文。
+_ka_fail_desc() { # $1=api 返回码 $2=屏幕状态（on / off）
+  local d
+  d=$(_api_err1 "$API_ERRLOG")
+  printf '调用失败 rc=%s screen=%s' "$1" "$2"
+  [ -n "$d" ] && printf ' %s' "$d"
+  return 0
+}
+
 keepalive_ping() {
   tok=$(get_token)
   [ -n "$tok" ] || return 0
@@ -125,20 +137,21 @@ keepalive_ping() {
     log "$(ka_stat ✅ "$tok" "token 有效" "")"
     return 0
   fi
-  # 调用未成功：可能 token 已失效，也可能只是网络异常（busybox wget 不输出错误正文，无法区分）
+  # 调用未成功：可能 token 已失效，也可能只是网络异常。两种都在同一行里留下证据
+  # （rc 取自 api 的返回码，随后原样接上 api 层那一行诊断），事后才分得清是哪一种。
   ka_note fail "$tok"
   # 屏幕亮着时延后刷新：避免白天出现无解释的页面弹出，留待熄屏（静默刷新）或签到时段处理
   if screen_is_on; then
-    log "$(ka_stat ❌ "$tok" "调用失败" " — 屏幕亮着，延后（熄屏或签到时段自动刷新）")"
+    log "$(ka_stat ❌ "$tok" "$(_ka_fail_desc "$rc" on)" " — 屏幕亮着，延后（熄屏或签到时段自动刷新）")"
     return 0
   fi
   now_ts=$(now_s)
   if [ $((now_ts - KA_LAST_REFRESH)) -lt 1800 ]; then
-    log "$(ka_stat ❌ "$tok" "调用失败" " — 刷新冷却中，稍后再试")"
+    log "$(ka_stat ❌ "$tok" "$(_ka_fail_desc "$rc" off)" " — 刷新冷却中，稍后再试")"
     return 0
   fi
   KA_LAST_REFRESH=$now_ts
-  log "$(ka_stat ⚠️ "$tok" "调用失败" " — 尝试静默刷新")"
+  log "$(ka_stat ⚠️ "$tok" "$(_ka_fail_desc "$rc" off)" " — 尝试静默刷新")"
   newt=$(refresh_token "$tok" 0)
   if [ -n "$newt" ] && [ "$newt" != "$tok" ]; then
     log "保活: ✅ 静默刷新成功 $tok → $newt"

@@ -121,13 +121,31 @@ ka_tick() {
   printf '%s\n' "\$_n" > ctl/step
   ka_at "\$_n"
 }
-# 网络替身：退出码与响应体都由 ctl/ 下的文件给（用例自己写），并记录 URL 与 Authorization
+# 网络替身：这一次调用的事实由 ctl/ 下的文件给（用例自己写），并记录 URL 与 Authorization
 # 两样——「本次刷新后用的是哪个 token」就看记录的 Authorization 里带的是谁。
+#   ctl/rc    工具退出码（非 0 = 连接层失败）
+#   ctl/body  响应体
+#   ctl/code  服务端状态码（rc 非 0 且给了它 = 服务端拒绝那一档；缺省表示拿不到状态码）
+#   ctl/err   工具打到 stderr 的原始报错
+# 诊断行不在这里拼：驱动只把这一次的事实交给 api 层的 _api_note，格式因此只有一份。
+# 两个耗时读数是固定值（13 位 = 毫秒档）：日志正文逐字可比，不会因机器快慢而变。
 http_post() {
   printf '%s | %s\n' "\$1" "\$2" >> ctl/api.calls
-  cat ctl/body 2>/dev/null
-  _rc=\$(cat ctl/rc 2>/dev/null | tr -dc '0-9')
-  return "\${_rc:-0}"
+  _rc=\$(cat ctl/rc 2>/dev/null | tr -dc '0-9'); _rc=\${_rc:-0}
+  _body=\$(cat ctl/body 2>/dev/null)
+  _code=\$(cat ctl/code 2>/dev/null | tr -dc '0-9')
+  if [ "\$_rc" = "0" ]; then
+    [ -n "\$_code" ] || _code=200
+    _api_note 0 "\$_code" "\$_body" "" "" 1791704215000 1791704215012
+    printf '%s' "\$_body"
+    return 0
+  fi
+  if [ -n "\$_code" ]; then
+    _api_note "\$_rc" "\$_code" "\$_body" "" "" 1791704215000 1791704215012
+  else
+    _api_note "\$_rc" "" "\$_body" "\$(cat ctl/err 2>/dev/null)" "" 1791704215000 1791704215012
+  fi
+  return "\$_rc"
 }
 # 观察面：哪些通知事件被报了、哪次刷新真的去开了页。
 # 通知正文 / tag / 降权链路由 tests/notify.sh 断言，这里只关心「业务层报了哪个事件名」。
@@ -413,7 +431,9 @@ printf 'ok_last=%s\n' "$(ka_last_result)"
 printf 'ok_tok=%s\n' "$(get_token)"
 
 # ---- ② 调用失败 + 亮屏：延后，不刷新（白天不无解释地弹页面）----
+# 失败档同时把响应体清空：替身不再回上一档的正文，日志里记的就是「这一档拿不到正文」
 printf '1\n' > ctl/rc
+: > ctl/body
 keepalive_ping
 printf 'on_fail=%s\n' "$(ka_fail_count)"
 printf 'on_tok=%s\n' "$(get_token)"
@@ -456,8 +476,10 @@ DRIVER
   t_eq "④ 冷却中：采样点没被消费（读到的仍是夹具最新值）" "$(ka_val "$d" cold_seen)" "2_BEEF"
   t_eq "④ 冷却中：失败仍照记" "$(ka_val "$d" cold_fail)" "3"
   t_eq "④ 冷却中给出可读的原因（那一行仍记了失败）" "$(ka_log "$KA_WORK/ctl/ka.log" '失败')" "4"
-  # ③ 的静默刷新已把状态文件里的 token 换成新的（2_BEEF），故 ④ 这一轮读到的是它
-  t_has "④ 冷却中的日志文案不变" "$KA_WORK/ctl/ka.log" "保活: ❌ 2_BEEF 调用失败 (今日 1 成功 / 3 失败) — 刷新冷却中，稍后再试"
+  # ③ 的静默刷新已把状态文件里的 token 换成新的（2_BEEF），故 ④ 这一轮读到的是它。
+  # 失败行的三段（rc + 屏幕状态 / api 层的诊断行 / 所采取的动作）在这一行里逐字钉住。
+  t_has "④ 冷却中的日志文案（rc + api 层那一行 + 屏幕状态与动作）" "$KA_WORK/ctl/ka.log" \
+    "保活: ❌ 2_BEEF 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 3 失败) — 刷新冷却中，稍后再试"
 }
 
 # 保活统计与日志文案（对外契约）：成功 / 失败两条各自逐字断言。
@@ -477,6 +499,7 @@ printf 'mWakefulness=Awake\n' > dev/power.txt
 keepalive_ping
 printf '1\n' > ctl/rc
 printf 'mWakefulness=Asleep\n' > dev/power.txt
+: > ctl/body
 LD='./ld2'
 ka_tokens ld2 2_DEAD
 keepalive_ping
@@ -487,8 +510,8 @@ DRIVER
   ka_near "$KA_WORK/ctl/ka.log" "保活" 5
   t_has "保活成功的日志文案（含今日成功/失败数）" "$KA_WORK/ctl/ka.log" \
     "保活: ✅ 2_C0DE token 有效 (今日 1 成功 / 0 失败)"
-  t_has "保活失败的日志文案（不可区分网络异常，故只报调用失败）" "$KA_WORK/ctl/ka.log" \
-    "保活: ⚠️ 2_DEAD 调用失败 (今日 1 成功 / 1 失败) — 尝试静默刷新"
+  t_has "保活失败的日志文案（rc + api 层那一行 + 屏幕状态与动作）" "$KA_WORK/ctl/ka.log" \
+    "保活: ⚠️ 2_DEAD 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 1 失败) — 尝试静默刷新"
 }
 
 # ============================================================
@@ -593,6 +616,146 @@ ka_case_boundary() {
   t_has "保活刷新显式禁止唤醒屏幕（第二参数 0）" "$T_ROOT/lib/keepalive.sh" 'refresh_token "$tok" 0'
 }
 
+# ============================================================
+# 六、保活失败行：rc + api 层那一行事实 + 屏幕状态 + 所采取的动作
+#
+# 旧文案只有「调用失败」四个字，于是「网络不通」与「登录态失效」在日志里长得一模一样，
+# 只能靠猜。这一节用两种替身响应各跑一次，并把两条日志行逐字钉住：
+# 连接层失败那一档给的是 `net rc=` 与工具原话，登录态那一档给的是服务端状态码与正文。
+# api 层那一行由 _api_note 拼（替身只提供「这一次的事实」），故断言面对的是真实诊断行。
+# ============================================================
+
+ka_case_fail_line() {
+  ka_setup failline
+  ka_env
+  ka_run failline <<'DRIVER'
+LD='./ld1'
+ka_tokens ld1 2_C0DE
+# ① 网络类：连不上（工具退出码 7 + 原始报错原文），熄屏且正处在刷新冷却里（这一档不再去刷新）
+printf '7\n' > ctl/rc
+printf 'curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused\n' > ctl/err
+printf 'mWakefulness=Asleep\n' > dev/power.txt
+KA_LAST_REFRESH=$(now_s)
+keepalive_ping
+# ② 登录态类：调用成功（服务端给了 200），但响应里没有 records——token 失效，不是网络问题
+printf '0\n' > ctl/rc
+printf '{"code":1,"message":"not login"}\n' > ctl/body
+printf 'mWakefulness=Awake\n' > dev/power.txt
+LD='./ld2'
+ka_tokens ld2 2_DEAD
+keepalive_ping
+DRIVER
+  ka_near "$KA_WORK/ctl/net.line" "2_C0DE" 2
+  # 网络类那一行：rc 与 api 层那一行（连接层形态）原样并列，屏幕状态与动作各就各位
+  t_has "网络类失败行（连接层：net rc + 报错原文 + 屏幕状态 + 动作）" "$KA_WORK/ctl/net.line" \
+    "保活: ❌ 2_C0DE 调用失败 rc=7 screen=off net rc=7 http=- err=curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused 耗时=12ms (今日 0 成功 / 1 失败) — 刷新冷却中，稍后再试"
+  t_hasnt "网络类那一行不伪造状态码" "$KA_WORK/ctl/net.line" "http=200"
+  ka_near "$KA_WORK/ctl/auth.line" "2_DEAD" 2
+  # 登录态那一行：rc=0 与服务端的状态码/正文并列——与上一行一眼分得开
+  t_has "登录态失败行（rc=0 + 服务端状态码与正文 + 屏幕状态 + 动作）" "$KA_WORK/ctl/auth.line" \
+    '保活: ❌ 2_DEAD 调用失败 rc=0 screen=on http=200 body={"code":1,"message":"not login"} 耗时=12ms (今日 0 成功 / 2 失败) — 屏幕亮着，延后（熄屏或签到时段自动刷新）'
+  t_hasnt "登录态那一行没有连接层事实（不是网络问题）" "$KA_WORK/ctl/auth.line" "net rc="
+  t_eq "两档各占一行，日志里分得清" \
+    "$(ka_log "$KA_WORK/mod/fafu_checkin.log" '调用失败')" "2"
+}
+
+# ============================================================
+# 七、节流未到期那一轮不产生保活日志行（跑真实入口的主循环）
+#
+# 节流判定在主循环里（ka_due 为真才调 keepalive_ping），故这一条只能跑**真实入口**：
+# 把模块拷成一份副本，只顶掉「时间推进 / token 来源 / 网络出口」三处环境事实，
+# 再数日志里出现保活行的时刻。计划刻意贴在 15 分钟节流的边界上：
+# 07:00（到期，记一行）→ 07:14（差一分钟，不记）→ 07:15（整 15 分钟，重新记一行）。
+# ============================================================
+
+KA_TH_DATE='2026-10-01'
+KA_TH_PLAN='07:00
+07:14
+07:15'
+
+# 副本里的观察面：时间源、保活要用的两处环境事实、按计划拨钟的休眠替身。
+# 注入点在副本的 commands 层尾部（最后一层），覆盖同名函数即生效。
+ka_th_setup() {
+  KA_WORK="$T_WORK_ROOT/keepalive-throttle"
+  rm -rf "$KA_WORK"
+  mkdir -p "$KA_WORK/ctl"
+  t_stage_module "$KA_WORK/mod" >/dev/null
+  t_bb_wrap "$KA_WORK/bin/bb" >/dev/null
+  ka_epoch                     # KA_EPOCH = 夹具日期那一天的零点（用真实 busybox 取）
+  printf 'NOTIFY=0\n' > "$KA_WORK/mod/fafu-checkin.conf"
+  printf '%s\n' "$KA_TH_PLAN" > "$KA_WORK/ctl/plan"
+  printf '%s 07:00\n' "$KA_TH_DATE" > "$KA_WORK/ctl/date"
+  : > "$KA_WORK/ctl/sleeps"
+  cat >> "$KA_WORK/mod/lib/commands.sh" <<INJECT
+
+# ---- 断言注入（只存在于断言的副本里）：主循环的观察面 ----
+# 墙钟仍走 mock 的拨钟文件 ctl/date；这里把 %s 也对齐到同一份文件——主循环用 now_s 推
+# 节流基准，两个时钟不一致时「15 分钟」在拨钟下永远到不了。
+KA_EPOCH=$KA_EPOCH
+_now() {
+  local _d
+  case "\$1" in
+    +%s) _d=\$(cat ctl/date 2>/dev/null)
+         printf '%s' "\$(( KA_EPOCH + \$(hm_minutes "\${_d#* }") * 60 ))" ;;
+    *)   "\$BB" date "\$@" ;;
+  esac
+}
+# 保活要用的两处环境事实：token 来源（本机没有 WebView 的本地存储）与网络出口
+get_token() { printf '%s' '2_C0DE'; }
+http_post() { printf '%s' '{"records":[]}'; return 0; }
+# 休眠替身：按 ctl/plan 逐行拨钟；计划走完就把服务置为停用，主循环随即收尾退出
+sleep() {
+  printf '%s\n' "\${1:-}" >> ctl/sleeps
+  KA_ROUND=\$((KA_ROUND + 1))
+  if [ "\$KA_ROUND" -gt 6 ]; then printf 'disabled\n' > mod/fafu-checkin.state; return 0; fi
+  _t=\$(sed -n "\$((KA_ROUND + 1))p" ctl/plan 2>/dev/null)
+  if [ -n "\$_t" ]; then
+    printf '%s %s\n' "$KA_TH_DATE" "\$_t" > ctl/date
+  else
+    printf 'disabled\n' > mod/fafu-checkin.state
+  fi
+  return 0
+}
+INJECT
+}
+
+# 跑入口守护进程（跑到计划用尽、服务被置停用为止）。外套一层墙钟上限：夹具万一没被
+# 注入进去，真实的守护进程会一直转下去。
+ka_th_start() {
+  local bb
+  bb=$(t_find_busybox)
+  (
+    cd "$KA_WORK" || exit 1
+    export PATH="$KA_WORK/bin:$PATH" BB_OVERRIDE='./bin/bb' MOCK_DATE_CTL='./ctl/date' \
+      MOCK_DEVICE_DIR='./ctl' FAFU_DAEMON=1 SU_MODE=''
+    if [ -n "$bb" ]; then "$bb" timeout 60 sh './mod/fafu_checkin.sh'
+    else sh './mod/fafu_checkin.sh'; fi
+  ) > "$KA_WORK/entry.out" 2> "$KA_WORK/entry.err"
+  [ -s "$KA_WORK/entry.err" ] || return 0
+  echo "  （守护进程的 stderr）"
+  sed 's/^/    /' "$KA_WORK/entry.err"
+}
+
+# 某一时刻那一刻写下的保活日志行数：时间戳与夹具 token 都是 ASCII，中文文案不参与匹配
+# （本机 grep 匹配多字节字符不稳，见 ka_log 的说明）。
+ka_th_hits() { # $1=时刻（HH:MM:SS）
+  LC_ALL=C grep -aF -e "$1" "$KA_WORK/mod/fafu_checkin.log" 2>/dev/null \
+    | LC_ALL=C grep -acF -e '2_C0DE' 2>/dev/null
+}
+
+ka_case_throttle_log() {
+  ka_th_setup
+  ka_th_start
+  # 防空转：主循环真的按计划转了三轮，否则下面的「0 行」只是因为什么都没跑
+  t_eq "主循环按计划走了三轮（每轮末尾一次休眠）" \
+    "$(tr '\n' '|' < "$KA_WORK/ctl/sleeps")" "60|60|60|"
+  t_eq "节流到期那一轮（07:00）：写一行保活日志" "$(ka_th_hits 07:00:00)" "1"
+  t_eq "节流未到期那一轮（07:14）：不新增保活日志行" "$(ka_th_hits 07:14:00)" "0"
+  t_eq "整 15 分钟那一轮（07:15）：重新写一行" "$(ka_th_hits 07:15:00)" "1"
+  t_eq "整段恰好两行保活日志（不多不少）" \
+    "$(LC_ALL=C grep -acF -e '2_C0DE' "$KA_WORK/mod/fafu_checkin.log" 2>/dev/null)" "2"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "keepalive · 窗口边界（06:59 / 07:00 / 21:25 / 21:30）" ka_case_window
@@ -601,3 +764,5 @@ t_case "keepalive · 保活四态（有效 / 亮屏延后 / 熄屏静默 / 冷�
 t_case "keepalive · 保活统计与日志文案" ka_case_stat_line
 t_case "keepalive · 15 分钟节流（拨钟）" ka_case_throttle
 t_case "keepalive · 结构边界（静态）" ka_case_boundary
+t_case "keepalive · 保活失败行（连接层 / 登录态两档可区分）" ka_case_fail_line
+t_case "keepalive · 节流未到期那一轮不写保活日志（真实入口）" ka_case_throttle_log
