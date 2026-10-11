@@ -365,7 +365,7 @@ DRIVER
 # ============================================================
 
 nt_case_cooldown() {
-  local d
+  local d nt_adv
   nt_setup warn
   nt_run warn <<DRIVER
 nt_send() { printf '%s\n' "\$1" >> "\$T_WORK/cmd.log"; printf '%s\t%s\n' "\$_NT_TITLE" "\$_NT_TEXT" >> "\$T_WORK/msg.log"; }
@@ -386,7 +386,17 @@ DRIVER
   t_has "预警 tag" "$d" "fafu-warn-20261001"
   t_has "预警标题" "$NT_WORK/msg.log" "🔄 正在刷新登录状态"
   t_has "预警正文含提前量" "$NT_WORK/msg.log" "5 秒后自动打开打卡页"
-  t_has_re "冷却基准被写到现在（不是回写旧值）" "$d" '^adv=-?[0-2]$'
+  # 冷却基准必须被写成这次调用的「现在」：写回旧值会差 600 秒，那一档在这里报红。
+  # 容忍量给 30 秒——这个读数里含着「发送那条命令本身要花的时间」（本机 Windows 上一次
+  # 命令替换就是几十毫秒，负载重时更大），卡在 ±2 秒上会让一条与行为无关的断言随机器
+  # 快慢闪红；而 30 秒相对「写回旧值」的 600 秒仍是两个数量级之差，语义没有被放宽。
+  nt_adv=$(nt_val "$d" adv)
+  case "$nt_adv" in -*) nt_adv=${nt_adv#-} ;; esac
+  if [ "${nt_adv:-9999}" -le 30 ] 2>/dev/null; then
+    _t_pass "冷却基准被写到现在（不是回写旧值，与当下相差 ${nt_adv}s）"
+  else
+    _t_fail "冷却基准被写到现在（不是回写旧值）：实际差 ${nt_adv}s（写回旧值会差 600 秒）"
+  fi
   t_eq "冷却窗口内：不再发（返回非 0）" "$(nt_val "$d" second)" "1"
   t_eq "冷却窗口内：命令数没变" "$(nt_val "$d" calls2)" "1"
   t_eq "熄屏（WAS_ON=0）：提前量为 0" "$(nt_val "$d" lead_dark)" "0"
@@ -772,6 +782,62 @@ nt_case_callsites() {
   t_hasnt "入口不直接调底层发送" "$T_ROOT/fafu_checkin.sh" 'notify "fafu-'
 }
 
+# ============================================================
+# 十、发送失败记一行：事件名 + 失败片段（成功与被跳过都不记）
+#
+# 这条链路此前是零日志：发送失败、被守卫挡掉、标题正文为空，三种情形在日志里长得一样，
+# 「提醒没收到」因此无据可查。这一节只钉**发送失败**这一档，并守住另外两档的零日志：
+# 失败片段要么是命令真的吐出来的原文，要么写成可读的占位（不许留空字段）。
+# ============================================================
+
+nt_case_send_fail_log() {
+  local d
+  nt_setup failog
+  nt_run failog <<'DRIVER'
+# ① 发送失败，且命令吐了原文 → 片段就是原文
+nt_send() { printf 'su: permission denied\n' >&2; return 1; }
+notify_once miss
+printf 'real=%s\n' "$(grep -c 'event=miss' mod/fafu_checkin.log 2>/dev/null)"
+# ② 发送失败，但命令什么都没吐 → 可读的占位（不留空字段）
+nt_send() { return 1; }
+notify_event supp
+printf 'blank=%s\n' "$(grep -c 'event=supp' mod/fafu_checkin.log 2>/dev/null)"
+# ③ 发送成功 → 不记
+nt_send() { return 0; }
+notify_event sign
+printf 'ok=%s\n' "$(grep -c 'event=sign' mod/fafu_checkin.log 2>/dev/null)"
+# ④ 被守卫挡掉（通知关闭 / 降权不可用）→ 不是失败，同样不记
+NOTIFY=0
+notify_event nopub
+NOTIFY=1; SU_MODE=""
+notify_once late
+printf 'guarded=%s\n' "$(grep -c 'event=' mod/fafu_checkin.log 2>/dev/null)"
+# ⑤ 预警（开页前那条）与测试通知各自的事件名：前者是 warn，后者没有业务事件名，
+#    记的是它自己的 tag（调用方没给名字时的兜底）
+SU_MODE="stub"; nt_cooldown 0; WAS_ON=1
+nt_send() { return 1; }
+notify_warn
+cmd_notify >/dev/null 2>&1
+printf 'warn=%s\n' "$(grep -c 'event=warn' mod/fafu_checkin.log 2>/dev/null)"
+printf 'test=%s\n' "$(grep -c 'event=fafu-test-20261001' mod/fafu_checkin.log 2>/dev/null)"
+printf 'lines=%s\n' "$(grep -c 'event=' mod/fafu_checkin.log 2>/dev/null)"
+# 失败行抓成一份小文件：中文文案的逐字断言打在它上面（本机 grep 匹配多字节字符不稳）
+LC_ALL=C grep -aF -e '通知发送失败' mod/fafu_checkin.log > ctl/fail.log 2>/dev/null
+DRIVER
+  d="$NT_WORK/failog.out"
+  t_has "发送失败：记一行，片段就是命令吐出来的原文" "$NT_WORK/ctl/fail.log" \
+    "通知发送失败: event=miss rc=1 err=su: permission denied"
+  t_has "命令什么都没吐时写成可读的占位（不留空字段）" "$NT_WORK/ctl/fail.log" \
+    "通知发送失败: event=supp rc=1 err=(无输出)"
+  # 行数与事件名一一对应：成功那一次、被守卫挡掉的那两次都没有留下任何行
+  t_eq "发送成功：不记" "$(nt_val "$d" ok)" "0"
+  t_eq "被守卫挡掉（通知关闭 / 降权不可用）：一条都不记" "$(nt_val "$d" guarded)" "2"
+  t_eq "预警失败：记的是它自己的事件名 warn" "$(nt_val "$d" warn)" "1"
+  t_eq "测试通知失败：记的是它自己的 tag（调用方没给事件名时的兜底）" "$(nt_val "$d" test)" "1"
+  t_eq "四次失败对应四行，成功与被跳过的两次一行都没有" "$(nt_val "$d" lines)" "4"
+  t_eq "失败行的行数就是失败次数" "$(grep -c . "$NT_WORK/ctl/fail.log")" "4"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "notify · 降权探测以身份为准" nt_case_probe
@@ -787,3 +853,4 @@ t_case "notify · 能力收口与相对顺序（静态）" nt_case_boundary
 t_case "notify · 截止提醒的正文与钟点" nt_case_remind_text
 t_case "notify · 任务未发布的兜底提醒" nt_case_notask
 t_case "notify · 调用点齐全（静态）" nt_case_callsites
+t_case "notify · 发送失败记一行（成功与被跳过都不记）" nt_case_send_fail_log
