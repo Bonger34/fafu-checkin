@@ -434,6 +434,83 @@ DRIVER
   t_eq "兜底提醒不占用 .fafu_notify_* 那份文件名空间" "$(st_val "$d" notify_files)" ""
 }
 
+# ============================================================
+# 五·六、任务快照（「今晚的任务什么时候出现 / 什么时候变了」的唯一依据）
+#
+# 四个任务键（id / state / begin / dline）加一个日期键：整份写入、按键读。
+# 与既有的三处当日判定同源：日期不是今天即视为「没有快照」——于是跨日后不会拿
+# 昨天的任务当作今天的比较基准。读判定只读：它不得新建文件、也不得改写文件内容。
+# ============================================================
+
+st_case_task_snap() {
+  local d
+  st_setup
+  st_write_env
+  # 预置一份「昨天写的」快照：今天必须读成「没有快照」，且内容原封不动
+  printf 'date=2026-10-02\nid=88123\nstate=1\nbegin=1790857800000\ndline=1790861400000\n' \
+    > "$ST_WORK/mod/.fafu_task_snap"
+  st_run snap <<'DRIVER'
+{
+  printf 'old_id=%s\n'    "$(task_snap_get id)"
+  printf 'old_begin=%s\n' "$(task_snap_get begin)"
+  printf 'kept=%s\n'      "$(cat "$MODDIR/.fafu_task_snap" | tr '\n' '|')"
+  # 整份写入：日期键由本层按今天填（调用方不需要知道有这个键）
+  task_snap_set 88123 1 1790857800000 1790861400000
+  printf 'raw=%s\n'   "$(cat "$MODDIR/.fafu_task_snap" | tr '\n' '|')"
+  printf 'id=%s\n'    "$(task_snap_get id)"
+  printf 'state=%s\n' "$(task_snap_get state)"
+  printf 'begin=%s\n' "$(task_snap_get begin)"
+  printf 'dline=%s\n' "$(task_snap_get dline)"
+  printf 'date=%s\n'  "$(task_snap_get date)"
+  printf 'miss=%s\n'  "$(task_snap_get nope)"
+  # 覆盖写：同一份快照换成新的任务数据
+  task_snap_set 88124 0 1790861400000 1790865000000
+  printf 'raw2=%s\n'  "$(cat "$MODDIR/.fafu_task_snap" | tr '\n' '|')"
+  printf 'id2=%s\n'   "$(task_snap_get id)"
+  # 跨日：同样的快照不再成立，四个任务键都读成空；读判定不修改文件
+  printf '%s\n' '2026-10-04 07:00' > "$MOCK_DATE_CTL"
+  printf 'next_id=%s\n'    "$(task_snap_get id)"
+  printf 'next_state=%s\n' "$(task_snap_get state)"
+  printf 'next_begin=%s\n' "$(task_snap_get begin)"
+  printf 'next_dline=%s\n' "$(task_snap_get dline)"
+  printf 'next_date=%s\n'  "$(task_snap_get date)"
+  printf 'next_raw=%s\n'   "$(cat "$MODDIR/.fafu_task_snap" | tr '\n' '|')"
+  # 没有快照时读出空，且读判定不把文件造出来
+  rm -f "$MODDIR/.fafu_task_snap"
+  printf 'none_id=%s\n'   "$(task_snap_get id)"
+  printf 'files=%s\n'     "$(ls -a "$MODDIR" | grep -c '^\.fafu_task_snap$')"
+  printf 'tmpleft=%s\n'   "$(ls "$MODDIR" | grep -c '\.tmp$')"
+} > "$T_WORK/snap.txt"
+DRIVER
+
+  d="$ST_WORK/snap.txt"
+  t_eq "昨天的快照：任务号读成空（不是今天的不算数）" "$(st_val "$d" old_id)" ""
+  t_eq "昨天的快照：开始时刻同样读成空" "$(st_val "$d" old_begin)" ""
+  t_eq "昨天的快照：读判定不改写文件内容" "$(st_val "$d" kept)" \
+    "date=2026-10-02|id=88123|state=1|begin=1790857800000|dline=1790861400000|"
+  t_eq "快照：五个键与顺序（日期在前，四个任务键随后）" "$(st_val "$d" raw)" \
+    "date=2026-10-03|id=88123|state=1|begin=1790857800000|dline=1790861400000|"
+  t_eq "快照：任务号读得回" "$(st_val "$d" id)" "88123"
+  t_eq "快照：签到状态读得回" "$(st_val "$d" state)" "1"
+  t_eq "快照：开始时刻读得回" "$(st_val "$d" begin)" "1790857800000"
+  t_eq "快照：截止时刻读得回" "$(st_val "$d" dline)" "1790861400000"
+  t_eq "快照：日期键是今天（调用方不必自己写）" "$(st_val "$d" date)" "2026-10-03"
+  t_eq "快照：未知键读成空" "$(st_val "$d" miss)" ""
+  t_eq "快照：再写一次是整份替换（不累积旧键）" "$(st_val "$d" raw2)" \
+    "date=2026-10-03|id=88124|state=0|begin=1790861400000|dline=1790865000000|"
+  t_eq "快照：替换后读到的是新任务" "$(st_val "$d" id2)" "88124"
+  t_eq "跨日后快照失效：任务号读成空" "$(st_val "$d" next_id)" ""
+  t_eq "跨日后快照失效：签到状态读成空" "$(st_val "$d" next_state)" ""
+  t_eq "跨日后快照失效：开始时刻读成空" "$(st_val "$d" next_begin)" ""
+  t_eq "跨日后快照失效：截止时刻读成空" "$(st_val "$d" next_dline)" ""
+  t_eq "跨日后快照失效：日期键也不再是今天" "$(st_val "$d" next_date)" ""
+  t_eq "跨日判定不改写快照文件" "$(st_val "$d" next_raw)" \
+    "date=2026-10-03|id=88124|state=0|begin=1790861400000|dline=1790865000000|"
+  t_eq "没有快照时读出空" "$(st_val "$d" none_id)" ""
+  t_eq "读判定不新建快照文件" "$(st_val "$d" files)" "0"
+  t_eq "快照写入不留临时文件" "$(st_val "$d" tmpleft)" "0"
+}
+
 # 每日一次去重：发送失败**不得**落标记（否则一次瞬时失败=整天不再提醒）
 st_case_notify_once() {
   local d
@@ -673,7 +750,7 @@ st_case_desc_trigger() {
 #   service.sh    —— 开机脚本，不加载库层，启动前只读一次开关文件
 st_case_ownership() {
   local pat owners files
-  pat='(^|[^"[:alnum:]_/])(>|>>|cat|grep|read|printf|rm|kill|mv|cp)[[:space:]]+"?\$(STATE|STATUS|KASTAT|DONE|TSEEN|NFAIL|NNOSIGN|NLATE|NMISS|NTLAST)"?'
+  pat='(^|[^"[:alnum:]_/])(>|>>|cat|grep|read|printf|rm|kill|mv|cp)[[:space:]]+"?\$(STATE|STATUS|KASTAT|DONE|TSEEN|TSNAP|NFAIL|NNOSIGN|NLATE|NMISS|NTLAST)"?'
   owners=""
   for f in "$T_ROOT"/*.sh "$T_ROOT"/lib/*.sh; do
     if grep -qE -e "$pat" "$f" 2>/dev/null; then
@@ -692,6 +769,7 @@ st_case_ownership() {
   t_has "state 层持有保活统计文件名" "$T_ROOT/lib/state.sh" 'KASTAT="$MODDIR/fafu_keepalive.status"'
   t_has "state 层持有完成标记文件名" "$T_ROOT/lib/state.sh" 'DONE="$MODDIR/.fafu_checkin_done"'
   t_has "state 层持有当日已取得任务标记文件名" "$T_ROOT/lib/state.sh" 'TSEEN="$MODDIR/.fafu_task_seen"'
+  t_has "state 层持有任务快照文件名" "$T_ROOT/lib/state.sh" 'TSNAP="$MODDIR/.fafu_task_snap"'
   t_has "state 层持有失败类通知标记文件名" "$T_ROOT/lib/state.sh" 'NFAIL="$MODDIR/.fafu_notify_fail"'
   t_has "state 层持有冷却基准文件名" "$T_ROOT/lib/state.sh" 'NTLAST="$MODDIR/.fafu_notify_last"'
   t_has "开机脚本仍读开关文件（豁免是有据的）" "$T_ROOT/service.sh" '[ -f "$STATE" ]'
@@ -705,6 +783,7 @@ t_case "state · 保活统计与跨日归零" st_case_keepalive_daily
 t_case "state · 保活统计文件格式" st_case_keepalive_format
 t_case "state · 当日完成标记" st_case_done_mark
 t_case "state · 当日已取得任务标记" st_case_task_seen
+t_case "state · 任务快照（按键读写与跨日失效）" st_case_task_snap
 t_case "state · 当日已解决判定" st_case_resolved
 t_case "state · 通知标记与跨日滚动" st_case_notify_marks
 t_case "state · 通知每日一次去重" st_case_notify_once

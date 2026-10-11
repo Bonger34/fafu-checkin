@@ -55,6 +55,22 @@ _sg_wait_ld() { # 等到 $LD 可读为止；等到返回 0，等满返回 1
   return 1
 }
 
+# 查询参数：与下面两处 api 调用点同源（调用点是字面量，api 层的断言逐字钉着它）。
+SG_QUERY='rows=3&pageNum=1'
+
+# 查询失败那一行：rc + api 层落下的那一行事实（原样转交，本层不自己拼 http= / body=）
+# + 查询参数，再加上本层才拿得到的正文。两种失败因此能分开：
+#   ① 调用失败（rc≠0）：正文由 api 层落盘；
+#   ② 应答了却没有任务列表（rc=0）：这一档的正文只有本层手里有，故自己压平带上。
+_sg_fetch_fail() { # $1=事件名 $2=rc $3=响应体
+  local line
+  line="$1: rc=$2 $(_api_err1 "$API_ERRLOG") params=$SG_QUERY"
+  case "$2" in
+    0) line="$line resp=$(_api_flat "$3")" ;;
+  esac
+  log "$line"
+}
+
 # 取任务：输出**两行** —— 第 1 行本次使用的 token、第 2 行响应体。
 # token 必须一起交出去：查询异常时本函数会刷新 token，随后提交要用刷新后的那一个
 # （单独再取一次是另一条时间线，会用到过期的 token）。无应用数据返回 2；
@@ -80,7 +96,7 @@ signin_fetch() { # $1=token → stdout=<token>\n<响应体>；返回码见文件
   if [ "$fail" = "1" ] || [ "$rc" != "0" ]; then
     # 查询失败也要留全：是「调用失败」还是「响应里没有 records」，两者的修法不同，
     # 而旧写法只记一个 rc，事后分不出（一天只有一次现场，值得多写这几个字节）。
-    log "查询异常: rc=$rc $(_api_err1 "$API_ERRLOG") resp=$(echo "$resp" | "$BB" head -c 200)"
+    _sg_fetch_fail "查询异常" "$rc" "$resp"
     newt=$(refresh_token "$tok"); [ -n "$newt" ] && tok="$newt"
     resp=$(api "sign_in/student/my/page" "rows=3&pageNum=1" "$tok"); rc=$?
     case "$resp" in
@@ -88,12 +104,26 @@ signin_fetch() { # $1=token → stdout=<token>\n<响应体>；返回码见文件
       *) fail=1 ;;
     esac
     if [ "$fail" = "1" ] || [ "$rc" != "0" ]; then
-      log "获取任务失败: rc=$rc $(_api_err1 "$API_ERRLOG") resp=$(echo "$resp" | "$BB" head -c 200)"
+      _sg_fetch_fail "获取任务失败" "$rc" "$resp"
       notify_once failtask
       return 2
     fi
   fi
   printf '%s\n%s' "$tok" "$resp"
+}
+
+# 任务四元组变了才记一行（第一次拿到任务也算变化，旧值为空）。
+# 正常轮询每分钟一轮而任务数据几乎不变，每轮都记会让几百行日志里没有一行提供信息；
+# 判据是**任务号 / 签到状态 / 开始 / 截止**任一与上一轮不同。快照本身归 state 层管
+# 并按日滚动，故跨日后同样的任务又算「新任务」而不是「无变化」。
+_sg_task_note() { # $1=任务号 $2=签到状态 $3=开始（毫秒） $4=截止（毫秒）
+  local oid ost ob od
+  oid=$(task_snap_get id); ost=$(task_snap_get state)
+  ob=$(task_snap_get begin); od=$(task_snap_get dline)
+  if [ "$oid" != "$1" ] || [ "$ost" != "$2" ] || [ "$ob" != "$3" ] || [ "$od" != "$4" ]; then
+    log "任务变化: id=$oid→$1 state=$ost→$2 begin=$ob→$3 截止=$od→$4"
+    task_snap_set "$1" "$2" "$3" "$4"
+  fi
 }
 
 # 解析任务字段：$1=响应体。字段名由接口决定，取法只有一处（base 层的 json_first）。
@@ -150,7 +180,9 @@ signin_decide() { # $1=响应体 $2=token $3=任务号 $4=名称 $5=状态 $6=�
       # 取到的戳不对，四者都会给出同一个「对不上」的表象，故一并留下：
       # now=本机此刻（与日志行首时间戳必须一致）、TZ/LD_LIBRARY_PATH=换算时的环境、
       # 第二条 date 输出=另一种解释（对不上时能直接看出差在哪个偏移上）。
-      log "时间核对: signTime=[$sst] → sign_time=[$stime] now=[$(now_full)] TZ=[${TZ:-未设}] LDP=[${LD_LIBRARY_PATH:-未设}] alt=[$("$BB" date -u -d "@$((sst / 1000))" +%H:%M 2>/dev/null)]"
+      # 末尾整条服务端记录（字段名以接口返回的为准，含签到时刻）：描述里的钟点若又不对，
+      # 「服务端给了哪些字段、每个字段是什么」不必再靠推理。
+      log "时间核对: signTime=[$sst] → sign_time=[$stime] now=[$(now_full)] TZ=[${TZ:-未设}] LDP=[${LD_LIBRARY_PATH:-未设}] alt=[$("$BB" date -u -d "@$((sst / 1000))" +%H:%M 2>/dev/null)] 记录=$(_api_flat "$resp")"
     fi
     update_desc
     # 检测到已签到 / 已请假 → 通知（每次检测到都发；同事件同 tag 覆盖，不会堆积）
@@ -379,6 +411,8 @@ run_once() {
   tok=$(printf '%s\n' "$out" | "$BB" head -n 1)
   resp=$(printf '%s\n' "$out" | "$BB" tail -n 1)
   signin_parse "$resp" rid name state bt dline et || return $?
+  # 任务四元组与上一轮不同才记一行（快照的读写都发生在拿到任务之后）
+  _sg_task_note "$rid" "$state" "$bt" "$dline"
   task_seen_mark    # 真的拿到了任务：兜底提醒据此不再打扰（任务没发布是另一回事）
   now_ms=$(( $(now_s) * 1000 ))
   signin_decide "$resp" "$tok" "$rid" "$name" "$state" "$bt" "$dline" "$et"; rc=$?
