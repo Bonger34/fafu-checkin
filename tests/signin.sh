@@ -679,6 +679,46 @@ DRIVER
   t_eq "坐标缺失：记为 normal" "$(sg_status sign_kind)" "normal"
 }
 
+# 坐标取值的优先级：signInStudent（最近一次签到的真实位置）＞ 任务顶层 ＞ 内置坐标。
+# 真机 2026-10-12 的形状是「顶层 lng/lat 是 null、signInStudent 里是真坐标」——
+# 按「取第一次出现」会拿到字符串 `null`，它非空、回退也不触发，于是请求里真的发出
+# `lng=null&lat=null`，服务端回 400（Content-Length: 0）。本用例钉住修复后的优先级。
+sg_case_coords_priority() {
+  local d
+  sg_setup coords-priority
+  sg_at 1290
+  # ① 真机形状：顶层 null，signInStudent 内是真坐标
+  printf '{"records":[{"id":316929,"name":"晚查寝签到","beginTime":%s,"supplementEndTime":%s,"endTime":%s,"lng":null,"lat":null,"signInStudent":{"id":46721331,"signState":0,"lng":118.23577500,"lat":25.07802600}}]}\n' \
+    "$((SG_EPOCH * 1000 + 1290 * 60000))" "$((SG_EPOCH * 1000 + 1380 * 60000))" \
+    "$((SG_EPOCH * 1000 + 1350 * 60000))" > "$SG_WORK/ctl/body.page"
+  printf '%s\n' "$SG_SIGN_OK" > "$SG_WORK/ctl/body.sign"
+  printf '%s\n' "$SG_SEQ_OK" > "$SG_WORK/ctl/api.seq"
+  sg_run coords_real <<'DRIVER'
+run_once; printf 'rc=%s\n' "$?"
+printf 'real=%s\n' "$(grep -c 'lng=118.23577500&lat=25.07802600' ctl/api.calls 2>/dev/null)"
+printf 'nulllit=%s\n' "$(grep -c 'lng=null' ctl/api.calls 2>/dev/null || echo 0)"
+DRIVER
+  d="$SG_WORK/coords_real.out"
+  t_eq "顶层是 null：提交仍成功" "$(sg_val "$d" rc)" "0"
+  t_eq "顶层是 null：用的是 signInStudent 里的真实坐标" "$(sg_val "$d" real)" "1"
+  t_eq "顶层是 null：绝不把字符串 null 发出去" "$(sg_val "$d" nulllit)" "0"
+
+  # ② 顶层有真值、signInStudent 没有坐标 → 用顶层
+  sg_setup coords-top
+  sg_at 1290
+  printf '{"records":[{"id":9,"name":"晚查寝签到","beginTime":%s,"supplementEndTime":%s,"endTime":%s,"lng":120.1,"lat":30.2,"signInStudent":{"signState":0}}]}\n' \
+    "$((SG_EPOCH * 1000 + 1290 * 60000))" "$((SG_EPOCH * 1000 + 1380 * 60000))" \
+    "$((SG_EPOCH * 1000 + 1350 * 60000))" > "$SG_WORK/ctl/body.page"
+  printf '%s\n' "$SG_SIGN_OK" > "$SG_WORK/ctl/body.sign"
+  printf '%s\n' "$SG_SEQ_OK" > "$SG_WORK/ctl/api.seq"
+  sg_run coords_top <<'DRIVER'
+run_once; printf 'rc=%s\n' "$?"
+printf 'top=%s\n' "$(grep -c 'lng=120.1&lat=30.2' ctl/api.calls 2>/dev/null)"
+DRIVER
+  d="$SG_WORK/coords_top.out"
+  t_eq "signInStudent 无坐标：退回顶层真值" "$(sg_val "$d" top)" "1"
+}
+
 # ============================================================
 # 三·五、token 一路传到提交（端到端：真实的 get_token → 提交）
 #
@@ -1500,6 +1540,7 @@ t_case "signin · 任务信息不完整（可重试）" sg_case_parse_incomplete
 t_case "signin · 解析写回调用方字段（端到端）" sg_case_parse_outputs
 t_case "signin · 截止字段回退 endTime" sg_case_parse_fallback
 t_case "signin · 坐标缺失回退内置坐标" sg_case_coords_fallback
+t_case "signin · 坐标取值优先级（signInStudent ＞ 顶层 ＞ 内置）" sg_case_coords_priority
 t_case "signin · token 一路传到提交（端到端）" sg_case_token_chain
 t_case "signin · 提交：补签（supplement）" sg_case_submit_supplement
 t_case "signin · 提交失败：尝试行与汇总行" sg_case_submit_failed

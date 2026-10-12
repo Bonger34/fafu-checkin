@@ -86,6 +86,27 @@ J='{"records":[{"id":123,"name":"晚查寝签到","signState":0,"beginTime":1759
   printf 'time=%s\n'      "$(json_first "$J" signTime)"
   printf 'jtabsent=[%s]\n' "$(json_first "$J" nope)"
 
+  # 坐标取值：真机上顶层 lng/lat 是 null、真值在 signInStudent 里（且真值在后面）。
+  # 单独钉住三件事：取最后一份合法数值、null 不算值、非数值形状一律当没取到。
+  C1='{"records":[{"id":1,"lng":null,"lat":null,"signInStudent":{"signState":0,"lng":118.23577500,"lat":25.07802600}}]}'
+  printf 'coord1=%s,%s\n'  "$(_json_coord "$C1" lng)" "$(_json_coord "$C1" lat)"
+  # signInStudent 里若嵌了别的对象（块切法会在第一个 } 处截断、把坐标切没），这里仍要取到：
+  # 这是「不靠对象块形状取值」的理由，也是这个陷阱的守卫。
+  C2='{"records":[{"id":1,"lng":null,"lat":null,"signInStudent":{"class":{"id":7},"lng":118.5,"lat":25.5}}]}'
+  printf 'nested=%s,%s\n'  "$(_json_coord "$C2" lng)" "$(_json_coord "$C2" lat)"
+  # 带空格的写法（接口给过 `"lng": 118.2`）也要取到数值本身
+  printf 'space=%s,%s\n'   "$(_json_coord '{"lng": 120.1,"lat": 30.2}' lng)" "$(_json_coord '{"lng": 120.1,"lat": 30.2}' lat)"
+  # 两份都是 null / 形状不合法 → 空（调用方据此回退内置坐标）
+  printf 'allnull=[%s]\n'  "$(_json_coord '{"lng":null,"lat":null}' lng)"
+  printf 'junk=[%s]\n'     "$(_json_coord '{"lng":"abc"}' lng)"
+  # _json_last 与 json_first 的方向必须相反（同一个键出现两次时）
+  J2='{"lng":null,"signInStudent":{"lng":118.5}}'
+  printf 'last=%s\n'       "$(_json_last "$J2" lng)"
+  # 时区偏移：「时间核对」行末尾那个判据靠它，**绝不能是空**（空会让 TZ=[…] 退化成
+  # [未设/]，读的人分不清「没取到偏移」与「偏移为零」）。形状按 [+-]???? 判。
+  printf 'tz=[%s]\n'       "$(tz_offset)"
+  printf 'tzshape=%s\n'    "$(case "$(tz_offset)" in [+-][0-9][0-9][0-9][0-9]) echo ok ;; *) echo bad ;; esac)"
+
   # 原子写：内容落盘且不留临时文件；空内容不覆盖已有内容（别把状态清空）
   printf 'atom\n' | write_atomic "$T_WORK/mod/atom.txt"
   printf 'atom=%s\n' "$(cat "$T_WORK/mod/atom.txt")"
@@ -105,6 +126,13 @@ DRIVER
   t_eq "json_first 取 signState" "$(sk_val "$f" state)" "0"
   t_eq "json_first 取含冒号的字符串字段" "$(sk_val "$f" time)" "2026-10-03 21:30:00"
   t_eq "json_first 字段不存在时为空" "$(sk_val "$f" jtabsent)" "[]"
+  t_eq "坐标：顶层是 null 时取到 signInStudent 里的真值" "$(sk_val "$f" coord1)" "118.23577500,25.07802600"
+  t_eq "坐标：signInStudent 内嵌对象也不截断（不靠块形状取值）" "$(sk_val "$f" nested)" "118.5,25.5"
+  t_eq "坐标：冒号后有空格也能取到" "$(sk_val "$f" space)" "120.1,30.2"
+  t_eq "坐标：两份都是 null 时为空" "$(sk_val "$f" allnull)" "[]"
+  t_eq "坐标：非数值形状当没取到" "$(sk_val "$f" junk)" "[]"
+  t_eq "_json_last 取最后一次出现（与 json_first 相反）" "$(sk_val "$f" last)" "118.5"
+  t_eq "tz_offset 输出 [+-]???? 形状的偏移（不能为空）" "$(sk_val "$f" tzshape)" "ok"
   t_eq "write_atomic 写入内容" "$(sk_val "$f" atom)" "atom"
   t_eq "write_atomic 拒绝用空内容覆盖已有内容" "$(sk_val "$f" kept)" "atom"
   t_eq "写入与轮转都不留临时文件" "$(sk_val "$f" tmpleft)" "0"

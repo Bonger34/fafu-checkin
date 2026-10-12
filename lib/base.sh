@@ -116,3 +116,92 @@ json_first() {
   esac
   printf '%s' "$v"
 }
+
+# 取字段值：$1=JSON 文本 $2=字段名 $3=first|last → 该次出现处的值（去引号，两侧空格剥掉）。
+# 值有「带引号」与「不带引号」两种形状，裁到引号 / 逗号 / `}` / `]` 为止——这一小段被
+# json_first 与 _json_last 共用（两处各写一遍迟早分叉成两种读法）。
+# 只做参数展开，不起子进程（理由见 json_first 上方）。
+_json_val() {
+  local rest v
+  case "$3" in
+    # 模式写法与 json_first 一致（引号在里、外面再包一层引号）：写成 ${1##*\"$2\":} 这种
+    # 裸 \" 形状时，这份 busybox 的 ash 会报「unterminated quoted string」。照抄一处形状，
+    # 两种取值方向就不会各自演化出不同的读法。
+    last) rest=${1##*"\"$2\":"} ;;      # `##` 最长前缀匹配 → 停在**最后**一次出现处
+    *)    rest=${1#*"\"$2\":"} ;;       # `#`  最短前缀匹配 → 停在第一次出现处
+  esac
+  case "$rest" in
+    \"*) v=${rest#\"}; v=${v%%\"*} ;;
+    *)   v=${rest%%,*}; v=${v%%\}*}; v=${v%%\]*} ;;
+  esac
+  # 逐字符剥掉两侧空格。值里不会真的含空格（字段值是数字或时间戳），故剥到底为止；
+  # 写成循环是因为 POSIX case 没有「一个或多个字符」的写法。
+  while :; do
+    case "$v" in
+      ' '*) v=${v#?} ;;
+      *) break ;;
+    esac
+  done
+  while :; do
+    case "$v" in
+      *' ') v=${v%?} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$v"
+}
+
+# 某字段**最后一次**出现的值（语义见下面的 _json_coord）。
+_json_last() { # $1=JSON $2=字段名
+  case "$1" in
+    *"\"$2\":"*) _json_val "$1" "$2" last ;;
+  esac
+}
+
+# 从响应里取一个**可用**的经纬度：$1=JSON 文本 $2=lng|lat。
+# 「可用」＝数值形状（服务端给的是 `118.23577500`；null / 空 / 别的东西一律不算），
+# 且取**最后一次**出现：顶层与 signInStudent 内各有一份 lng/lat，真值在后一份，而
+# json_first 会先撞上顶层的 null（字符串 `null` 非空，回退判据也不成立）——真机上就是
+# 这样把 `lng=null&lat=null` 发出去、被服务端回 400 的。
+# 为什么不挑「signInStudent 块内的那一份」：切块要先假定对象不嵌套（块里出现 `{`
+# 就截错），而这个形状是接口的实现细节、会变；按「最后一个形状合法的候选」取值，
+# 形状怎么变都还取得到那个真值。判据在 _json_coord 里，取法在 _json_val 里。
+_json_coord() {
+  local v
+  v=$(_json_last "$1" "$2")
+  case "$v" in
+    ''|null|NULL|None) v=$(json_first "$1" "$2") ;;   # 最后一份不可用 → 再看第一份
+  esac
+  case "$v" in
+    null|NULL|None|'') printf '' ;;
+    *[!0-9.+-]*) printf '' ;;           # 非数值形状 → 当作没取到，走回退
+    *) printf '%s' "$v" ;;
+  esac
+}
+
+# 本机时区偏移（形如 +0800）：排查「换算不对」时，只有它能把「时区库不对」与
+# 「设备时钟偏了」分开——标准时区偏移必是整小时或半点，出现 +0423 这种就不是代码算错。
+# **保证给得出东西**：`date +%z` 不被支持时退化成「本地时刻与 UTC 时刻的差」（同一事实
+# 的另一算法，只到小时）。绝不输出空——空值会让日志里的 TZ=[…] 段退化成 [未设/]，
+# 读的人分不清「没取到偏移」与「偏移为零」。
+tz_offset() {
+  local z n u
+  z=$("$BB" date +%z 2>/dev/null)
+  case "$z" in
+    [+-][0-9][0-9][0-9][0-9]) printf '%s' "$z"; return 0 ;;
+  esac
+  # 退化路径：本地时刻与 UTC 时刻的差（同一事实的另一算法，只到小时）。
+  # 先确认两个读数都是数字再算——$BB 不可用时 now_s 会给空，直接相减是算术语法错误。
+  n=$(now_s)
+  u=$("$BB" date -u +%s 2>/dev/null)
+  case "$n$u" in
+    ''|*[!0-9]*) printf '+0000'; return 0 ;;
+  esac
+  n=$(( n - u ))
+  # 负数要写成 `-8` 而不是 `- 8`：POSIX 模式下 printf 把前者当参数
+  if [ "$n" -lt 0 ]; then
+    printf '%s%d' - $(( (0 - n + 1800) / 3600 ))
+  else
+    printf '+%d' $(( (n + 1800) / 3600 ))
+  fi
+}
