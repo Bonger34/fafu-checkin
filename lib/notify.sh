@@ -5,7 +5,6 @@
 # 业务层只报**事件名**（sign / supp / seen / leave / failsign / failtask / nosign /
 # late / miss / nopub），tag 与文案都由本层的两张表查出来；新增一条通知要动三处
 # （事件表、tag 表、_msg_* 文案），但都只在这一个文件里，漏写会被断言报红。
-# 对外提供：probe_su / notify_event / notify_once / notify_warn / notify_lead / tag_of。
 # 配置：开关与阈值都经配置层的 cfg_notify / cfg_notify_lead / cfg_notify_cooldown 取值。
 # 注入点（生产环境不设置）：SU_BIN、NOTIFY_CMD、FAFU_SU_MODE。
 # ============================================================
@@ -16,29 +15,26 @@ SU_BIN="${SU_BIN:-/system/bin/su}"         # su 路径（可用环境变量覆�
 
 SU_MODE=""                # 生效的降权写法，由 probe_su() 探测后写入
 NT_ERR=""                 # 最近一次发送命令的输出（失败片段；命令什么都没吐时为空）
-_NT_TITLE=""              # 通知标题（文案表设置）
-_NT_TEXT=""               # 通知正文；留空则复用标题
+_NT_TITLE=""              # 由文案表设置
+_NT_TEXT=""               # 留空则正文复用标题
 # 事件名 → 文案模板名（tag 拼法见 tag_of）。写错名字等于该类提醒静默失效。
 # 「当日首次失败」有两个事件名（failsign / failtask）：文案与 tag 各不同，但共用同一个
 # 当日标记（_NT_MARK_* 都指向 state 层的 fail），一次失败之后同类提醒当天不再重复。
-# 之所以要这张显式的表：模板名会出现在两处对外契约上（tag 后缀、state 层标记名），
-# 让它跟着事件名走就等于把两处契约交给「函数名恰好相同」这种巧合。
+
+# 这张表必须显式：模板名同时是两处对外契约的一部分（tag 后缀、state 层标记名）。
 _NT_TPL_sign=sign;         _NT_TPL_supp=supp;         _NT_TPL_seen=seen
 _NT_TPL_leave=leave;       _NT_TPL_failsign=failsign; _NT_TPL_failtask=failtask
 _NT_TPL_nosign=nosign;     _NT_TPL_late=late;         _NT_TPL_miss=miss
 _NT_TPL_nopub=nopub
 _NT_MARK_failsign=fail;    _NT_MARK_failtask=fail
 _NT_MARK_nosign=nosign;    _NT_MARK_late=late;        _NT_MARK_miss=miss
-# 兜底提醒（任务未发布）复用 state 层当日的「已取得任务」标记：真的取到任务时它是
-# 「今天不用再问」，兜底发出去时它是「今天已经提醒过」——同一份事实，故不另立标记。
+# 兜底提醒（任务未发布）复用 state 层的「已取得任务」标记：取到任务是「今天不用再问」，发过兜底是「今天已经提醒过」。
 _NT_MARK_nopub=nopub
-# 落盘状态（每日标记、冷却基准）归 state 层：本层只经 notify_marked / notify_mark /
-# nt_cooldown 访问。冷却基准必须落盘——refresh_token 总在 $( ) 子 shell 里被调用，
-# 普通变量活不过那个子 shell，冷却会永远不生效。
+# 落盘状态（每日标记、冷却基准）归 state 层，本层只经 notify_marked / notify_mark / nt_cooldown 访问。
+# 冷却基准必须落盘（改这里会坏什么）：refresh_token 在 $( ) 子 shell 里被调用，普通变量活不过去。
 
 # ---- tag 表：事件名 → 通知 tag 后缀（完整 tag = fafu-<后缀>-<当日 tag>） ----
-# 默认后缀就是事件名本身，只有两个例外：seen 与 sign 同 tag（同为「已签到」，同日互相
-# 覆盖不堆积），三个未签时点用 t2200 / t2230 / miss。这两个例外是**对外契约**，别顺手改。
+# 默认后缀就是事件名本身；例外三条是**对外契约**，别顺手改：seen→sign、nosign→t2200、late→t2230。
 # tag 里含日期，故整条策略是「按日滚动」：同事件次日覆盖前一天，通知栏条数恒有上限。
 tag_of() { # $1=事件名 → 事件对应的 tag 后缀（未知事件输出空）
   case "$1" in
@@ -50,10 +46,8 @@ tag_of() { # $1=事件名 → 事件对应的 tag 后缀（未知事件输出空
 }
 
 # ---- 降权身份探测（通知必须以 shell 身份发送） ----
-# 不能用退出码判断可用性：KernelSU 的 su 用 Rust getopts 且默认 StopAtFirstFree，长度为 1 的
-# `-` 会被当作 free 参数终止选项解析，于是 `su - shell -c CMD` 实际 exec 出交互式登录 shell、
-# 把 CMD 丢掉，`</dev/null` 下立刻 EOF 退出 0 —— 只看退出码会记成「可用」，之后每条通知都变成
-# 「rc=0 但什么都没发生」。故必须验证命令真的执行了、身份真的降到了 shell：`id -u` 读作 2000。
+# 探测必须验语义、不能只看退出码（改这里会坏什么）：`su - shell -c CMD` 这种写法会把 CMD 丢掉，
+# `</dev/null` 下照样退出 0——只看退出码会记成「可用」，之后每条通知都变成「rc=0 但什么都没发生」。
 probe_su() {
   local c u su
   SU_MODE=""
@@ -67,7 +61,6 @@ probe_su() {
   su=$(command -v "$SU_BIN" 2>/dev/null)
   [ -n "$su" ] || su=$(command -v su 2>/dev/null)
   [ -n "$su" ] || { log "通知链路: 找不到 su（$SU_BIN），通知将静默跳过"; return 0; }
-  # 候选写法逐条试：三种都是设备上见过的调用形状，哪种真的降权以 id 校验为准。
   # 命令名用解析出的**绝对路径**（同一条链路上的同一个二进制）：探测的注入点只有一处，
   # 测试要顶掉 su 时不必去猜 PATH 上哪个名字会被内建 applet 抢先命中。
   for c in "$su - shell -c" "$su shell -c" "$su shell /system/bin/sh -c"; do
@@ -102,7 +95,7 @@ _msg_leave()  { _NT_TITLE="🏖 今日查寝已请假";    _NT_TEXT="$PL 状态�
 _msg_failsign() { _NT_TITLE="⚠️ 查寝签到失败";    _NT_TEXT="$PL 提交失败，仍在重试"; }
 _msg_failtask() { _NT_TITLE="⚠️ 拿不到查寝任务";  _NT_TEXT="$PL 无法获取任务，仍在重试"; }
 # 这一档的标题里有个数（还剩多少分钟），故由 signin 层在发之前把提前量放进 _NT_LEAD_MIN；
-# 取不到时回退默认值，标题里因此不再有一个会与实现漂移的写死数字。
+# 取不到时回退到标题里写死的那个数（与 signin 层的提前量常量是两处，改一处要想起另一处）。
 _msg_nosign() { _NT_TITLE="⏰ 尚未签到，主窗口还剩 ${_NT_LEAD_MIN:-30} 分钟"; }
 _msg_late()   { _NT_TITLE="⏰ 主窗口已过，进入补签时段"; }
 _msg_miss()   { _NT_TITLE="❌ 今晚未能自动签到"; }
