@@ -121,7 +121,10 @@ J='{"records":[{"id":123,"name":"晚查寝签到","signState":0,"beginTime":1759
   printf 'crossday=%s\n'   "$(ms_to_hm 86400000 28800)"
   printf 'empty=[%s]\n'    "$(ms_to_hm '')"
   printf 'nooff=[%s]\n'    "$(ms_to_hm 1791811959000 "")"
-  printf 'offsets=%s\n'    "$(tz_offset_s)"
+  # 注意：这里**不能**直接断言 `tz_offset_s` 的绝对值——它取自跑测机器的 `date +%z`，
+  # CI（UTC）给 0、开发机（+0800）给 28800。要钉的是解析规则，用 MOCK_TZ 显式给输入
+  # （那几条断言在下面的 tzd 驱动里）。
+  printf 'offsets_shape=%s\n' "$(case "$(tz_offset_s)" in ''|*[!0-9-]*) echo bad ;; *) echo num ;; esac)"
 
   # 原子写：内容落盘且不留临时文件；空内容不覆盖已有内容（别把状态清空）
   printf 'atom\n' | write_atomic "$T_WORK/mod/atom.txt"
@@ -186,7 +189,7 @@ DRIVER
   t_eq "坐标：非数值形状当没取到" "$(sk_val "$f" junk)" "[]"
   t_eq "_json_last 取最后一次出现（与 json_first 相反）" "$(sk_val "$f" last)" "118.5"
   t_eq "tz_offset 输出 [+-]???? 形状的偏移（不能为空）" "$(sk_val "$f" tzshape)" "ok"
-  t_eq "tz_offset_s 把 +0800 解成秒数" "$(sk_val "$f" offsets)" "28800"
+  t_eq "tz_offset_s 解出的秒数是数字形状（见下方 MOCK_TZ 那几条钉具体值）" "$(sk_val "$f" offsets_shape)" "num"
   # 解析与跑测机器的时区无关：三种输入用替身钉死。CI 跑在 UTC 上（%z = +0000），
   # 所以「零偏移」必须是 0 而不是空——把它当成「判不出来」就把合法值丢了。
   # 诊断行留在上面那张 tzout 里（第一项断言的「实际值」就是它，不必另开用例）
