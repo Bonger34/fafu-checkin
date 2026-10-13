@@ -69,12 +69,19 @@ if [ "$MODE" = "dev" ]; then
   done
   grep -v '^updateJson=' "$STAGE/module.prop" > "$STAGE/module.prop.new"
   mv "$STAGE/module.prop.new" "$STAGE/module.prop"
+  # 开发版的版本串带上短 SHA：包名里有、包内却没有，装机后就分不出装的是哪一版
+  # （版本号是「进行中版本」，多次内部改动之间保持不变，而 dev 包反复产出）。
+  # 与包名同一口径（都用同一个短 SHA），只是在暂存目录里改，不动仓库那份。
+  # 模式用 `^version=`：`versionCode=` 不会被误伤。
+  DEV_VER="${VER}.dev.${SHA}"
+  sed "s/^version=.*/version=$DEV_VER/" "$STAGE/module.prop" > "$STAGE/module.prop.new"
+  mv "$STAGE/module.prop.new" "$STAGE/module.prop"
   # 统一权限（避免受 umask 影响）
   chmod 644 "$STAGE/module.prop"
   chmod 755 "$STAGE"/*.sh
   chmod 644 "$STAGE"/lib/*.sh
   SRC="$STAGE"
-  NOTE="（开发版：已移除 updateJson，不参与更新检测）"
+  NOTE="（开发版：版本串 ${DEV_VER}，已移除 updateJson、不参与更新检测）"
 else
   OUT="$ROOT/dist/fafu-checkin-${VER}.zip"
   SRC="$ROOT"
@@ -101,6 +108,17 @@ for f in $ALLFILES; do
   fi
 done
 echo "产物校验通过：$(printf '%s' "$ALLFILES" | wc -w) 个文件（含全部层文件与页面入口）"
+
+# 断言四：产物里的版本串就是它该有的那个——开发版带短 SHA、发布版不带。
+# 这一条是「版本串真的注进去了」的正向判据：注入那几行若被重构掉，构建当场失败，
+# 而不是产出一个「看着一样、其实分不出是哪版」的包。
+WANT_VER="${DEV_VER:-$VER}"
+GOT_VER=$(unzip -p "$OUT" module.prop | sed -n 's/^version=//p' | head -n1)
+if [ "$GOT_VER" != "$WANT_VER" ]; then
+  echo "打包失败：产物里的版本串是 [$GOT_VER]，应为 [$WANT_VER]" >&2
+  exit 1
+fi
+echo "产物版本串：$GOT_VER"
 
 echo "已生成: dist/$(basename "$OUT") $NOTE"
 echo ""
