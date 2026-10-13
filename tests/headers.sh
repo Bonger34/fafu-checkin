@@ -2,7 +2,8 @@
 # 注释口径守卫 —— 两条口径：
 #   ① 全部脚本：文件头 ≤15 行（只留用法与配置）、不写文档指针、不留历史叙事；
 #   ② 模块本体（入口 + 十个层 + 四个脚本 + 页面）：文件内任何注释块 ≤3 行、
-#      不出现仓库侧的名字（模块外指针）。受管范围 = 本体清单 − 过渡豁免清单。
+#      不出现仓库侧的名字（模块外指针）。受管范围 = 本体清单 − 过渡豁免清单，
+#      豁免清单已删空，故受管范围就是本体清单本身（十六个文件，无人为例外）。
 #
 # 用法：由 tools/run-tests.sh 加载，扫的是仓库里的文本，不看任何实现。
 # 守卫自己不在被检查之列——它的判据里就必须写出那些字样与超限样本。
@@ -105,10 +106,9 @@ hd_body_files() {
     "$T_ROOT/customize.sh" "$T_ROOT/uninstall.sh" "$T_ROOT/webroot/index.html"
 }
 
-# 过渡豁免：本轮只加严判据、不动本体文件，故先把十六个整体列进来；
-# 此后每批瘦身完成一批就移出一批，删光即自动失效（一空，判据对全部本体生效）。
-# 语义是失败关闭：不在这行里的本体文件默认受管。
-HD_EXEMPT="fafu_checkin.sh lib/base.sh lib/config.sh lib/state.sh lib/api.sh lib/device.sh lib/notify.sh lib/desc.sh lib/keepalive.sh lib/signin.sh lib/commands.sh service.sh action.sh customize.sh uninstall.sh webroot/index.html"
+# 过渡豁免清单：瘦身期间分批移出，现已删空——本体十六个文件全部受管，无人为例外。
+# 语义是失败关闭：不在这行里的本体文件默认受管，所以空清单就是「判据对本体全量生效」。
+HD_EXEMPT=""
 
 # 在豁免清单里返回 0（$1=文件；绝对路径与仓库内相对路径都认）
 hd_exempt() {
@@ -450,6 +450,43 @@ hd_case_body_self_check() {
     "$(HD_BODY="$ok3 $over4" HD_EXEMPT="$ok3" hd_managed_count)" "1"
 }
 
+# 豁免清单的自证：清单已删空，所以这里要钉住两件事——空的时候本体一个不漏地被扫，
+# 非空的时候它真的还会豁免。少了任何一头，「全量生效」都可能只是清单空转的假象。
+# 成员判定不用 case 通配（本机 busybox 对含换行的长串会失配），改为两条清单逐条精确比对。
+hd_case_exempt_list() {
+  local f m e hit body managed
+  body=$(hd_body_files)
+  managed=$(hd_managed_files)
+  hit=0
+  for f in $body; do
+    for m in $managed; do
+      [ "$m" = "$f" ] && hit=$((hit + 1))
+    done
+  done
+  t_ne "自证：本体清单非空（否则下面「一个不漏」的说法没有内容）" "$(hd_body_count)" "0"
+  t_eq "自证：名单里出现的本体文件数 = 本体文件数（空清单 = 一个不漏）" \
+    "$hit" "$(hd_body_count)"
+  t_eq "自证：受管数与本体数相同（清单为空即全量生效）" \
+    "$(hd_managed_count)" "$(hd_body_count)"
+
+  # 反向样本：证明清单本身还是个开关，而不是一个恒不生效的摆设
+  e="$HD_WORK/exempt.sh"
+  mkdir -p "$HD_WORK"
+  {
+    printf '#!/bin/sh\n# 头部\n\n'
+    printf '# 一\n# 二\n# 三\n# 四\n'
+    printf 'echo hi\n'
+  } > "$e"
+  t_ne "自证：样本在受管时报出超限块" \
+    "$(HD_BODY="$e" HD_EXEMPT='' hd_body_block_hits)" ""
+  t_eq "自证：样本进清单后判据不再生效、受管数减一" \
+    "$(HD_BODY="$e" HD_EXEMPT="$e" hd_managed_count)" "0"
+  t_eq "自证：未设 HD_EXEMPT 时同样全量受管（默认失败关闭）" \
+    "$(unset HD_EXEMPT; HD_BODY="$e" hd_managed_count)" "1"
+  t_eq "自证：清单只认精确路径，同前缀的另一个文件不受影响" \
+    "$(HD_BODY="$e" HD_EXEMPT="${e%/*}/exempt-other.sh" hd_managed_count)" "1"
+}
+
 # 分区标题只免计数，不是块边界：两侧的注释仍算同一块（减压手段是空行）
 hd_case_divider_scope() {
   local two
@@ -501,5 +538,6 @@ t_case "headers · 判据自证" hd_case_self_check
 t_case "headers · 本体注释块不超过 3 行" hd_case_body_block_limit
 t_case "headers · 本体不写仓库侧指针" hd_case_body_word
 t_case "headers · 本体判据自证" hd_case_body_self_check
+t_case "headers · 豁免清单自证（空清单 = 全量生效）" hd_case_exempt_list
 t_case "headers · 分区标题的范围自证" hd_case_divider_scope
 t_case "headers · 页面注释自证" hd_case_page_self_check
