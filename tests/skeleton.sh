@@ -106,6 +106,20 @@ J='{"records":[{"id":123,"name":"晚查寝签到","signState":0,"beginTime":1759
   # [未设/]，读的人分不清「没取到偏移」与「偏移为零」）。形状按 [+-]???? 判。
   printf 'tz=[%s]\n'       "$(tz_offset)"
   printf 'tzshape=%s\n'    "$(case "$(tz_offset)" in [+-][0-9][0-9][0-9][0-9]) echo ok ;; *) echo bad ;; esac)"
+  # 偏移秒数 + 纯粹算术换算：真机上 `date -d @<戳>` 给错值（2026-10-13 探针：同一个戳
+  # 给 17:09 / 09:09，正确值 21:32 / 13:32），所以这条路必须自己算。这里钉住：
+  #   · 设备那个 epoch 在 +0800 下是 21:32、在 UTC 视角下是 13:32（就是真机错的那两个数）
+  #   · 非整点偏移（+0545）与负偏移（-0500）都对——这两个是「自己算」最容易写错的边界
+  #   · 缺值给空，调用方据此不写钟点（而不是写个假的 00:00）
+  printf 'devlocal=%s\n'   "$(ms_to_hm 1791811959000 28800)"
+  printf 'devutc=%s\n'     "$(ms_to_hm 1791811959000)"
+  printf 'half=%s\n'       "$(ms_to_hm 1791811959000 19800)"
+  printf 'neg=%s\n'        "$(ms_to_hm 1791811959000 -18000)"
+  printf 'epoch0=%s\n'     "$(ms_to_hm 0 28800)"
+  printf 'crossday=%s\n'   "$(ms_to_hm 86400000 28800)"
+  printf 'empty=[%s]\n'    "$(ms_to_hm '')"
+  printf 'nooff=[%s]\n'    "$(ms_to_hm 1791811959000 "")"
+  printf 'offsets=%s\n'    "$(tz_offset_s)"
 
   # 原子写：内容落盘且不留临时文件；空内容不覆盖已有内容（别把状态清空）
   printf 'atom\n' | write_atomic "$T_WORK/mod/atom.txt"
@@ -133,6 +147,16 @@ DRIVER
   t_eq "坐标：非数值形状当没取到" "$(sk_val "$f" junk)" "[]"
   t_eq "_json_last 取最后一次出现（与 json_first 相反）" "$(sk_val "$f" last)" "118.5"
   t_eq "tz_offset 输出 [+-]???? 形状的偏移（不能为空）" "$(sk_val "$f" tzshape)" "ok"
+  t_eq "tz_offset_s 把 +0800 解成秒数" "$(sk_val "$f" offsets)" "28800"
+  t_eq "ms_to_hm：真机那个戳在本机偏移下是 21:32（设备 date 给的是 17:09）" "$(sk_val "$f" devlocal)" "21:32"
+  t_eq "ms_to_hm：同一戳的 UTC 视角是 13:32（设备 date -u 给的是 09:09）" "$(sk_val "$f" devutc)" "13:32"
+  t_eq "ms_to_hm：非整点偏移 +0545" "$(sk_val "$f" half)" "19:02"
+  t_eq "ms_to_hm：负偏移 -0500" "$(sk_val "$f" neg)" "08:32"
+  t_eq "ms_to_hm：epoch 0 在 +0800 下是 08:00" "$(sk_val "$f" epoch0)" "08:00"
+  t_eq "ms_to_hm：跨日取模（第 86400 秒回到 08:00）" "$(sk_val "$f" crossday)" "08:00"
+  t_eq "ms_to_hm：缺值给空（调用方据此不写钟点）" "$(sk_val "$f" empty)" "[]"
+  # 「偏移判不出来」必须与「按 UTC 算」区分开：前者输出空（宁可不写钟点），后者是第二参省略
+  t_eq "ms_to_hm：偏移显式给空时不写钟点（不是按 UTC 硬算）" "$(sk_val "$f" nooff)" "[]"
   t_eq "write_atomic 写入内容" "$(sk_val "$f" atom)" "atom"
   t_eq "write_atomic 拒绝用空内容覆盖已有内容" "$(sk_val "$f" kept)" "atom"
   t_eq "写入与轮转都不留临时文件" "$(sk_val "$f" tmpleft)" "0"

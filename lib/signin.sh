@@ -181,8 +181,11 @@ signin_decide() { # $1=响应体 $2=token $3=任务号 $4=名称 $5=状态 $6=�
       case "$sst" in
         ""|*[!0-9]*) : ;;   # 戳不可用（如请假记录本就没有签到时刻）：两个换算位都留空
         *)
-          stime=$("$BB" date -d "@$((sst / 1000))" +%H:%M 2>/dev/null)
-          salt=$("$BB" date -u -d "@$((sst / 1000))" +%H:%M 2>/dev/null)
+          # 换算走 base 的纯算术（ms_to_hm），**不用 `date -d @`**：设备上那条路给错值
+          # （真机 2026-10-13 探针：同一个戳给 17:09 / 09:09，正确值是 21:32 / 13:32）。
+          # 两个换算位：本地 = 叠本机偏移；alt = 叠 0（即 UTC 视角）。
+          stime=$(ms_to_hm "$sst" "$(tz_offset_s)")
+          salt=$(ms_to_hm "$sst")
           ;;
       esac
       if [ "$state" = "2" ]; then
@@ -364,10 +367,14 @@ signin_remind_30min() { # $1=主窗口截止毫秒 $2=当前毫秒
 # 通知带着空正文发出去、rc 却仍是 0。
 # 发一次就够：复用 notify_once 的「当日一次」标记，事件名与标记文件都不新建。
 signin_remind_deadlines() { # $1=补签截止毫秒 $2=主窗口截止毫秒 $3=当前毫秒
-  local dline et now t_close t_due t_sup t_lead
+  local dline et now t_close t_due t_sup t_lead off
   dline="$1"; et="$2"; now="$3"
   case "$dline$et$now" in ''|*[!0-9]*) return 0 ;; esac
   signin_resolved_today && return 0     # 当日已解决 → 一条都不发
+  # 时区偏移判不出来（本机连时间源都拿不到）时，文案里的钟点算不出真值。此时**宁可不发**：
+  # `signin_ms_hm` 会给空，拼出来就是「主窗口  关闭」这种缺了钟点的假话。
+  off=$(tz_offset_s)
+  [ -n "$off" ] || return 0
   # ① 主窗口还剩多少分钟：锚点就是主窗口截止，文案同时给出「连几点」与「几点关」。
   # 标题里那个数也由这里算出来（提前量是常量，写在标题里就成了会漂移的副本）。
   if signin_remind_30min "$et" "$now"; then
@@ -393,11 +400,16 @@ signin_remind_deadlines() { # $1=补签截止毫秒 $2=主窗口截止毫秒 $3=
   return 0
 }
 
-# 毫秒时间戳 → HH:MM：任务数据里的钟点只在文案里出现，换算只有这一处。
+# 毫秒时间戳 → HH:MM（**本地钟点**，文案里给用户看的那个）：任务数据里的钟点只在
+# 提醒文案与状态里出现，换算只有这一处。
+# 走 base 的纯算术 ms_to_hm + 本机偏移，**不是因为省事，而是设备上 `date -d @` 给错值**：
+# 真机探针里 `date -d @1791811959 +%H:%M` 给 17:09（正确 21:32）、`-u` 给 09:09（正确
+# 13:32），而同一次 `date +%s` / `+%z` / now_full 都对。若这里继续用 date，提醒文案里的
+# 钟点会整体偏 8 小时——用户按文案去签会迟到。
 # 缺值输出空，调用方据此不写钟点（而不是写一个假的 00:00）。
 signin_ms_hm() { # $1=毫秒时间戳
   case "$1" in ''|*[!0-9]*) return 0 ;; esac
-  "$BB" date -d "@$(( $1 / 1000 ))" +%H:%M 2>/dev/null
+  ms_to_hm "$1" "$(tz_offset_s)"
 }
 
 # ---- 「任务未发布」兜底提醒：挂本地时钟，与轮询窗口无关 ----
