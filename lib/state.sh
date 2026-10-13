@@ -3,10 +3,6 @@
 #
 # 加载顺序：第 3 层。本层是模块目录内运行时文件的**唯一归属地**：其余层与入口只经
 # 这里的函数访问，不自己读写这些文件。
-# 对外提供：svc_is_disabled / svc_set、sign_get / sign_set、signin_resolved_today、
-#   ka_counts / ka_ok_count / ka_fail_count / ka_last_time / ka_last_result / ka_is_today /
-#   ka_note、done_marked / done_mark、task_seen_marked / task_seen_mark、
-#   task_snap_get / task_snap_set、notify_marked / notify_mark、nt_cooldown。
 # 契约：文件名、字段名、字段顺序与内容格式对使用者可见——升级后不丢当日记录，不要改。
 # 「按日滚动」的四处判定（保活统计、完成标记、通知的「一日一次」、任务快照）都只在本层发生。
 # ============================================================
@@ -15,10 +11,8 @@ STATE="$MODDIR/fafu-checkin.state"       # 服务开关（enabled / disabled）
 STATUS="$MODDIR/fafu_checkin.status"     # 最近签到记录（动态描述用）
 KASTAT="$MODDIR/fafu_keepalive.status"   # 保活统计（今日成功/失败、最近 token）
 DONE="$MODDIR/.fafu_checkin_done"        # 当日签到完成标记
-# 当日「已取得任务」标记：两个事实共用一份——真的取到了今晚的任务，或已经为此提醒过。
-# 任何一个成立都表示今天不必再为「任务还没发布」打扰，故兜底提醒与它共用去重依据。
+# 当日「已取得任务」标记：真的取到任务 / 已经为此提醒过，两者共用这一份去重依据
 TSEEN="$MODDIR/.fafu_task_seen"
-# 任务快照：最近一轮拿到的任务四元组（供下一轮比较「变了没有」），按日滚动
 TSNAP="$MODDIR/.fafu_task_snap"
 # 三个未签提醒各自独立标记：共用标记会让先到的那个时点把后面的永久挡住
 NFAIL="$MODDIR/.fafu_notify_fail"        # 当日「失败类通知」已发标记
@@ -53,8 +47,7 @@ svc_is_disabled() {
 }
 
 svc_set() { # $1=enabled|disabled
-  # 用原子写：开关是「停用 = 不再有任何网络请求」的唯一依据，宁可保持旧值，
-  # 也不要留下半截内容被读成「启用」
+  # 用原子写：宁可保持旧值，也不要半截内容被读成「启用」
   printf '%s\n' "$1" | write_atomic "$STATE"
 }
 
@@ -136,9 +129,8 @@ task_seen_mark() { # 记为今天已取得任务（真的取到任务之后调�
 }
 
 # ---- 任务快照（「今晚的任务什么时候出现 / 什么时候变了」的唯一依据） ----
-# 整份写入、按键读：四个任务键（id / state / begin / dline）加一个日期键，日期由本层
-# 按今天填，调用方不必知道有这个键。日期不是今天即视为「没有快照」——于是跨日后不会
-# 拿昨天的任务当作今天的比较基准（与上面三处按日滚动同源）。
+# 整份写入、按键读：四个任务键（id / state / begin / dline）加一个日期键，日期由本层按
+# 今天填，调用方不必知道有这个键；日期不是今天即视为「没有快照」。
 task_snap_get() { # $1=键名（date / id / state / begin / dline）→ 值；没有今天的快照时输出空
   [ "$(kv_get "$TSNAP" date)" = "$(today)" ] || return 0
   kv_get "$TSNAP" "$1"
