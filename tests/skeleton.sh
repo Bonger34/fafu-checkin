@@ -405,6 +405,13 @@ sk_page_scan_self_check() {
 # 本机（Windows）没有 zip/unzip，这一段只在 CI 上跑。
 sk_package_build() {
   local pkg zip rc f
+ 
+  # 产物里 module.prop 的某个字段（$2=字段名）。用 `unzip -p` 只吐那一个成员：
+  # 「包里的版本串对不对」只能这样看，看构建目录里的文件不算数（那还没进包）。
+  sk_zip_field() { # $1=zip $2=字段名
+    unzip -p "$1" module.prop 2>/dev/null | sed -n "s/^$2=//p" | head -n1
+  }
+
   sk_setup
   pkg="$SK_WORK/pkg"
   mkdir -p "$pkg/tools"
@@ -415,7 +422,12 @@ sk_package_build() {
   cp -R "$T_ROOT/lib" "$pkg/lib"
   cp -R "$T_ROOT/webroot" "$pkg/webroot"
 
-  ( cd "$pkg" && sh build.sh dev ) > "$SK_WORK/pkg.out" 2>&1
+  # 固定一个 SHA 再打包：开发版的版本串要带短 SHA，而用例目录里没有 .git
+  # （不固定的话短 SHA 退化成 unknown，断言就钉不住真实形状）。
+  # 与 CI 同一口径：GITHUB_SHA 前 7 位。
+  tsha=0123456789abcdef0123456789abcdef01234567
+  want_ver="$(sed -n 's/^version=//p' "$T_ROOT/module.prop" | head -n1).dev.0123456"
+  ( cd "$pkg" && GITHUB_SHA="$tsha" sh build.sh dev ) > "$SK_WORK/pkg.out" 2>&1
   rc=$?
   zip=$(ls "$pkg"/dist/*.zip 2>/dev/null | head -n1)
   t_eq "层齐：构建成功" "$rc" 0
@@ -427,6 +439,14 @@ sk_package_build() {
     done
     # 结构断言二：页面入口文件确实在产物里，且是清单里那个路径
     t_has "产物含页面入口 webroot/index.html" "$SK_WORK/pkg.list" " webroot/index.html"
+    # 开发版的版本串带短 SHA：包名里有、包内却没有的话，装机后就分不出装的是哪一版
+    # （版本号是「进行中版本」，多次内部改动之间保持不变，而 dev 包反复产出）。
+    t_eq "开发版：产物里的版本串带短 SHA" "$(sk_zip_field "$zip" version)" "$want_ver"
+    # 版本码不能跟着变：它决定更新检测看不看得见这一版
+    t_eq "开发版：versionCode 原样不动" \
+      "$(sk_zip_field "$zip" versionCode)" "$(sed -n 's/^versionCode=//p' "$T_ROOT/module.prop" | head -n1)"
+    t_has "开发版：构建输出里写明版本串" "$SK_WORK/pkg.out" "$want_ver"
+    t_hasnt "开发版：产物里没有 updateJson（不参与更新检测）" "$SK_WORK/pkg.list" "updateJson"
   fi
 
   # 反向一：少一层必须构建失败（半装是最难排查的失败模式）
@@ -451,6 +471,16 @@ sk_package_build() {
   rc=$?
   t_ne "页面引入外部链接：构建失败" "$rc" 0
   t_has "页面引入外部链接：报出原因" "$SK_WORK/pkg4.out" "外部资源"
+
+  # 正向：发布路径（不带 dev）不注入短 SHA——发布产物的版本串必须与 module.prop 逐字一致，
+  # 否则「源码里的版本」与「用户装到的版本」就对不上了。
+  cp "$T_ROOT/webroot/index.html" "$pkg/webroot/index.html"
+  ( cd "$pkg" && sh build.sh ) > "$SK_WORK/pkg5.out" 2>&1
+  rc=$?
+  relzip=$(ls "$pkg"/dist/*.zip 2>/dev/null | grep -v -- '-dev\.' | head -n1)
+  t_eq "发布路径：构建成功" "$rc" 0
+  t_eq "发布路径：产物版本串与 module.prop 逐字一致" \
+    "$(sk_zip_field "$relzip" version)" "$(sed -n 's/^version=//p' "$T_ROOT/module.prop" | head -n1)"
 }
 
 sk_case_package() {
