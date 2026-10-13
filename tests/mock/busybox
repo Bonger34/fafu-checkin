@@ -52,6 +52,18 @@ if [ "$BB_REAL" = "busybox" ]; then
   fi
 fi
 
+# ---- 分派前缀：applet 名不一定在 $1 ----
+# 调用方有两种形状：CI/设备上直接跑 mock 时 applet 在 `$1`；本机（Windows）经
+# `busybox.exe sh <脚本> date …` 起时，解释器会多留一个 `sh`，applet 就跑到 `$2` 上。
+# 若等到文件末尾才剥离，下面这些**按位置参数判 applet** 的接管档在本机全部失灵
+# （MOCK_TZ / MOCK_EPOCH / MOCK_DATE_CTL 都受影响），断言看着在跑其实没测到。
+# 故在这里统一成「$1 永远是 applet 名」，后面所有档都按同一个位置判。
+_bb_applet="$1"
+if [ "$1" = "sh" ] && [ -n "${2:-}" ]; then
+  shift
+  _bb_applet="$1"
+fi
+
 # ---- date 的**可选特性**：不是每份 busybox 都编了 FEATURE_DATE_NANO ----
 # 没编进去时 `date +%s%3N` 会把 `%3N` 原样吐出来（Ubuntu 的 busybox-static 就是这样），
 # 于是「耗时」只能退化成秒——而「窗口刚开那几秒」正是要靠它分辨的。
@@ -62,6 +74,32 @@ if [ "$1" = "date" ] && [ -n "${MOCK_DATE_NO_NANO:-}" ]; then
   case "$2" in
     *%3N*|*%N*) printf '%s%%3N\n' "$("$BB_REAL" date +%s)"; exit 0 ;;
   esac
+fi
+
+# ---- 时区偏移的**取不到**那一档：`date +%z` 与 `date -u +%s` 一起失效时，
+# base 的 tz_offset 要走「本地秒减 UTC 秒」的退化路径。两个读数分别由
+# MOCK_EPOCH_LOCAL / MOCK_EPOCH_UTC 给出（不设则透传真实时间）。
+# 判据用 `$*`（整串）而不是位置参数：上面的分派前缀会 shift，位置会往后挪一位，
+# 按 `$2`/`$3` 判会漏掉（`date -u +%s` 就会漏，于是 tz_offset 走了真实时间那条路）。
+# 必须排在 MOCK_TZ 那一档之前：退化路径的前提是 `%z` 也拿不到，两个控制项会同时出现。
+case "$*" in
+  "date +%s")
+    [ -n "${MOCK_EPOCH_LOCAL:-}" ] && { printf '%s\n' "$MOCK_EPOCH_LOCAL"; exit 0; } ;;
+  "date -u +%s")
+    # 只给了 MOCK_EPOCH_LOCAL 时，UTC 读数就取它（差值 0）——这样「偏移为零」与
+    # 「偏移判不出来」两档不会互相串。
+    [ -n "${MOCK_EPOCH_UTC:-}" ] && { printf '%s\n' "$MOCK_EPOCH_UTC"; exit 0; }
+    [ -n "${MOCK_EPOCH_LOCAL:-}" ] && { printf '%s\n' "$MOCK_EPOCH_LOCAL"; exit 0; } ;;
+esac
+
+# ---- 时区：跑测机器的时区是「环境事实」，不该让断言随它变（CI 跑在 UTC 上、
+# 开发机常常是 +0800——同一个断言在两边结果不同，就是假红灯/假绿灯的来源）。
+# MOCK_TZ 设了就让 `date +%z` **原样**回这个值，包括 `--` 这类**假值**：那一档专门用来
+# 造「偏移判不出来」。所以这里不能只认 `[+-]????` 的合法形状——只认合法值时，假值会
+# 悄悄透传给真实 date，断言就成了「看着在跑、其实没测到东西」。
+# 与 MOCK_DATE_CTL 分开放：那个控制项只管「现在几点」，两者可各自独立设定。
+if [ "$1" = "date" ] && [ "$2" = "+%z" ] && [ -n "${MOCK_TZ:-}" ]; then
+  printf '%s\n' "$MOCK_TZ"; exit 0
 fi
 
 if [ "$1" = "date" ] && [ -n "${MOCK_DATE_CTL:-}" ] && [ -f "$MOCK_DATE_CTL" ]; then

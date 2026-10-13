@@ -65,7 +65,7 @@ sk_val() { # $1=文件 $2=键
 # ============================================================
 
 sk_case_base_primitives() {
-  local f
+  local f tzfd
   sk_setup
   sk_write_env
   sk_run prim <<'DRIVER'
@@ -103,9 +103,11 @@ J='{"records":[{"id":123,"name":"晚查寝签到","signState":0,"beginTime":1759
   J2='{"lng":null,"signInStudent":{"lng":118.5}}'
   printf 'last=%s\n'       "$(_json_last "$J2" lng)"
   # 时区偏移：「时间核对」行末尾那个判据靠它，**绝不能是空**（空会让 TZ=[…] 退化成
-  # [未设/]，读的人分不清「没取到偏移」与「偏移为零」）。形状按 [+-]???? 判。
+  # [未设/]，读的人分不清「没取到偏移」与「偏移为零」）。
+  # 形状判据故意不写 `[+-]`：ash 把那个当区间，`--` 会被判成合法偏移——正是要拦住的哨兵值。
+  # 所以这里写 `[+][0-9]…|[-][0-9]…`，与 base 里保持一致。
   printf 'tz=[%s]\n'       "$(tz_offset)"
-  printf 'tzshape=%s\n'    "$(case "$(tz_offset)" in [+-][0-9][0-9][0-9][0-9]) echo ok ;; *) echo bad ;; esac)"
+  printf 'tzshape=%s\n'    "$(case "$(tz_offset)" in [+][0-9][0-9][0-9][0-9]|[-][0-9][0-9][0-9][0-9]) echo ok ;; *) echo bad ;; esac)"
   # 偏移秒数 + 纯粹算术换算：真机上 `date -d @<戳>` 给错值（2026-10-13 探针：同一个戳
   # 给 17:09 / 09:09，正确值 21:32 / 13:32），所以这条路必须自己算。这里钉住：
   #   · 设备那个 epoch 在 +0800 下是 21:32、在 UTC 视角下是 13:32（就是真机错的那两个数）
@@ -130,6 +132,43 @@ J='{"records":[{"id":123,"name":"晚查寝签到","signState":0,"beginTime":1759
 } > "$T_WORK/prim.txt"
 DRIVER
 
+  # 偏移的解析**不能依赖跑测机器的时区**（CI 是 UTC、开发机常常 +0800，同一断言两边
+  # 结果不同就是假红/假绿）。mock 必须能被 `"$BB" date +%z` 这样**当命令跑**：
+  #   · 直接 exec tests/mock/busybox → 本机没有可执行位，Permission denied，然后**静默
+  #     透传给真实 date**，断言就成了「看着在跑、其实没测到东西」；
+  #   · 把 BB 设成「busybox sh mock」这种多词命令 → `"$BB"` 是加引号的，不会词分割；
+  #   · 包一层 `#!/bin/sh`（harness 的 t_bb_wrap 那样）→ 本机 exec 不了。
+  # 唯一两边都成立的：包一层，其 shebang 直接是**真实 busybox + sh applet**
+  # （`#!<busybox> sh`），由它去读 mock。bb_real 要写成 POSIX 路径（`#!D:\…` 不认）。
+  sksh=$(t_sh)                      # 形如 `<busybox>.exe sh`，用于跑生成的驱动
+  bb_real=$(find_busybox)
+  case "$bb_real" in
+    */*:/*) bb_real=$(printf '%s' "$bb_real" | sed 's|^\([A-Za-z]\):|/\1|') ;;   # D:/… → /d/…
+  esac
+  {
+    printf '#!%s sh\n' "$bb_real"
+    printf '%s "$@"\n' "$T_ROOT/tests/mock/busybox"
+  } > "$SK_WORK/bbz"
+  chmod +x "$SK_WORK/bbz" 2>/dev/null
+  {
+    echo ". '$SK_WORK/_env.sh'"
+    echo "BB='$SK_WORK/bbz'"
+    echo 'printf "tz_a=%s\n"     "$(MOCK_TZ=+0545 tz_offset_s)"'
+    echo 'printf "tz_zero=%s\n"  "$(MOCK_TZ=+0000 tz_offset_s)"'
+    echo 'printf "tz_neg=%s\n"   "$(MOCK_TZ=-0530 tz_offset_s)"'
+    echo 'printf "tz_bad=%s\n"   "$(MOCK_TZ=-- MOCK_EPOCH_LOCAL=1000000 tz_offset_s)"'
+    echo '# 偏移判不出来时 tz_offset 仍要给得出东西（日志的 TZ=[…] 段靠它）；'
+    echo '# 这里两个读数取同一个值，于是「算出来的偏移」是 0——tz_offset 会输出 +0，'
+    echo '# 而 tz_offset_s 必须与「合法的 +0000」区分开：判不出来的那档给空。'
+    echo 'printf "tz_off_bad=%s\n" "$(MOCK_TZ=-- MOCK_EPOCH_LOCAL=1000000 tz_offset)"'
+    echo '# 退化路径：%z 判不出来、两个读数由 MOCK_EPOCH_* 给出 → 差值 6 小时'
+    echo 'printf "tz_fb=%s\n"    "$(MOCK_TZ=-- MOCK_EPOCH_LOCAL=1000000 MOCK_EPOCH_UTC=978400 tz_offset)"'
+    echo 'printf "tz_fbs=%s\n"   "$(MOCK_TZ=-- MOCK_EPOCH_LOCAL=1000000 MOCK_EPOCH_UTC=978400 tz_offset_s)"'
+  } > "$SK_WORK/tzd.sh"
+  # 输出读进变量、**不落 .work 下的文件**：那些文件会被后面的用例（sk_setup）清掉，
+  # 断言就会读成空——「测试看着在跑、其实读到空」比测试失败更坏。
+  tzout=$($sksh "$SK_WORK/tzd.sh" 2>&1)
+
   f="$SK_WORK/prim.txt"
   t_eq "kv_get 按键取值" "$(sk_val "$f" get)" "21:30"
   t_eq "kv_get 键不存在时为空" "$(sk_val "$f" absent)" "[]"
@@ -148,6 +187,18 @@ DRIVER
   t_eq "_json_last 取最后一次出现（与 json_first 相反）" "$(sk_val "$f" last)" "118.5"
   t_eq "tz_offset 输出 [+-]???? 形状的偏移（不能为空）" "$(sk_val "$f" tzshape)" "ok"
   t_eq "tz_offset_s 把 +0800 解成秒数" "$(sk_val "$f" offsets)" "28800"
+  # 解析与跑测机器的时区无关：三种输入用替身钉死。CI 跑在 UTC 上（%z = +0000），
+  # 所以「零偏移」必须是 0 而不是空——把它当成「判不出来」就把合法值丢了。
+  # 诊断行留在上面那张 tzout 里（第一项断言的「实际值」就是它，不必另开用例）
+  t_eq "tz_offset_s：整点带分钟 +0545" "$(printf '%s\n' "$tzout" | sed -n 's/^tz_a=//p')" "20700"
+  t_eq "tz_offset_s：合法零偏移（UTC runner 上的 %z）解成 0" "$(printf '%s\n' "$tzout" | sed -n 's/^tz_zero=//p')" "0"
+  t_eq "tz_offset_s：负偏移 -0530" "$(printf '%s\n' "$tzout" | sed -n 's/^tz_neg=//p')" "-19800"
+  t_eq "tz_offset_s：偏移判不出来时给空（与零偏移区分开）" "$(printf '%s\n' "$tzout" | sed -n 's/^tz_bad=//p')" ""
+  # 偏移判不出来时 `tz_offset` 仍不输出空（日志的 TZ 段要有东西），但交出去的是 `--(旁证)`
+  # 这种**不能当偏移用**的写法：差值只作肉眼判断，绝不参与换算。
+  t_eq "tz_offset：判不出来时给 --(旁证)，不给一个可当偏移的值" "$(printf '%s\n' "$tzout" | sed -n 's/^tz_off_bad=//p')" "--(+0)"
+  t_eq "退化路径：差值算出来也只作旁证（+6 小时）" "$(printf '%s\n' "$tzout" | sed -n 's/^tz_fb=//p')" "--(+6)"
+  t_eq "旁证写法不会被当成偏移解成秒数" "$(printf '%s\n' "$tzout" | sed -n 's/^tz_fbs=//p')" ""
   t_eq "ms_to_hm：真机那个戳在本机偏移下是 21:32（设备 date 给的是 17:09）" "$(sk_val "$f" devlocal)" "21:32"
   t_eq "ms_to_hm：同一戳的 UTC 视角是 13:32（设备 date -u 给的是 09:09）" "$(sk_val "$f" devutc)" "13:32"
   t_eq "ms_to_hm：非整点偏移 +0545" "$(sk_val "$f" half)" "19:02"
