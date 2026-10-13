@@ -426,7 +426,7 @@ sk_package_build() {
   # （不固定的话短 SHA 退化成 unknown，断言就钉不住真实形状）。
   # 与 CI 同一口径：GITHUB_SHA 前 7 位。
   tsha=0123456789abcdef0123456789abcdef01234567
-  want_ver="$(sed -n 's/^version=//p' "$T_ROOT/module.prop" | head -n1).dev.0123456"
+  want_ver="$(sed -n 's/^version=//p' "$T_ROOT/module.prop" | head -n1)-dev.0123456"
   ( cd "$pkg" && GITHUB_SHA="$tsha" sh build.sh dev ) > "$SK_WORK/pkg.out" 2>&1
   rc=$?
   zip=$(ls "$pkg"/dist/*.zip 2>/dev/null | head -n1)
@@ -441,7 +441,10 @@ sk_package_build() {
     t_has "产物含页面入口 webroot/index.html" "$SK_WORK/pkg.list" " webroot/index.html"
     # 开发版的版本串带短 SHA：包名里有、包内却没有的话，装机后就分不出装的是哪一版
     # （版本号是「进行中版本」，多次内部改动之间保持不变，而 dev 包反复产出）。
+    # 连接号不能省：少了它就不是合法语义化版本（见 build.sh 里那段说明）。
     t_eq "开发版：产物里的版本串带短 SHA" "$(sk_zip_field "$zip" version)" "$want_ver"
+    t_eq "开发版：版本串是合法的语义化先行版本（连接号 + 点分标识符）" \
+      "$(printf '%s' "$want_ver" | sed -n 's/^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*-[0-9A-Za-z.-][0-9A-Za-z.-]*$/ok/p')" "ok"
     # 版本码不能跟着变：它决定更新检测看不看得见这一版
     t_eq "开发版：versionCode 原样不动" \
       "$(sk_zip_field "$zip" versionCode)" "$(sed -n 's/^versionCode=//p' "$T_ROOT/module.prop" | head -n1)"

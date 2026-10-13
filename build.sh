@@ -71,9 +71,12 @@ if [ "$MODE" = "dev" ]; then
   mv "$STAGE/module.prop.new" "$STAGE/module.prop"
   # 开发版的版本串带上短 SHA：包名里有、包内却没有，装机后就分不出装的是哪一版
   # （版本号是「进行中版本」，多次内部改动之间保持不变，而 dev 包反复产出）。
+  # 形如 v1.2.1-dev.45fa426：**连接号是必需的**——语义化版本规范里，先行版本号要
+  # 「先加上一个连接号再加上一连串以句点分隔的标识符」（BNF 是 core "-" pre-release）；
+  # 少了它 `1.2.1.dev.x` 就不是合法语义化版本，解析版本号的工具会认不出来。
   # 与包名同一口径（都用同一个短 SHA），只是在暂存目录里改，不动仓库那份。
   # 模式用 `^version=`：`versionCode=` 不会被误伤。
-  DEV_VER="${VER}.dev.${SHA}"
+  DEV_VER="${VER}-dev.${SHA}"
   sed "s/^version=.*/version=$DEV_VER/" "$STAGE/module.prop" > "$STAGE/module.prop.new"
   mv "$STAGE/module.prop.new" "$STAGE/module.prop"
   # 统一权限（避免受 umask 影响）
