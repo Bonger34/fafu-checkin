@@ -98,7 +98,7 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
       <div class="row">
         <div class="txt">
           <b>保活开关</b>
-          <small>关闭后白天不再保活（白天不会为了刷新登录状态而短暂弹出打卡页），只保留签到时段的自动签到。</small>
+          <small>关闭后白天不再保活（白天不会为了刷新登录状态而短暂弹出打卡页），只保留轮询范围内的自动签到。</small>
           <small class="eff" id="h_keepalive">当前生效值：读取中…</small>
         </div>
         <input class="sw" type="checkbox" id="f_keepalive" aria-label="保活开关">
@@ -406,7 +406,7 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
     script(want ? 'enable' : 'disable').then(function (r) {
       box.disabled = false;
       if (r.errno !== 0) {
-        box.checked = !want;   /* 失败：开关回到原位，落盘状态没被改动 */
+        box.checked = !want;   /* 切换失败：落盘状态没被改动 */
         note('❌ 切换失败：' + reason(r) + '　服务仍是' + (want ? '停用' : '启用') + '态', 'bad');
         return;
       }
