@@ -1,14 +1,10 @@
 # ============================================================
 # config 层 —— 配置：键登记、默认值、校验、写入、生效值读数
 #
-# 加载顺序：第 2 层（在环境与工具层之后、状态层之前）。本层是配置文件
-# fafu-checkin.conf 的唯一归属地：其余层与入口只经这里的函数取值，不自己读写它，
-# 也不各自兜默认值。
-# 对外提供：cfg_load / cfg_effective / cfg_keys / cfg_time_ok / cfg_int_ok /
-#   cfg_switch_ok / cfg_valid / cfg_reason / cfg_write，
-#   以及各键的读取函数 cfg_keepalive / cfg_poll_start / cfg_poll_end / cfg_notify /
-#   cfg_notify_lead / cfg_notify_cooldown / cfg_ka_start / cfg_ka_end。
-# 生效值存放在与键同名的变量里：层加载时先落默认值，cfg_load 再按配置文件覆盖。
+# 加载顺序：第 2 层（在环境与工具层之后、状态层之前）。配置文件 fafu-checkin.conf 是
+# 本层的唯一读写口：其余层与入口不自己读写它，也不各自兜默认值。
+# 生效值存放在与键同名的变量里：层加载时先落默认值，cfg_load 再按配置文件覆盖；
+# 写回配置文件只经 cfg_write 这一个闸门。
 # ============================================================
 
 CFG_FILE="$MODDIR/fafu-checkin.conf"
@@ -53,7 +49,7 @@ SPECS
   return 1
 }
 
-# 写入某个键的生效值（赋值者只有 cfg_load 与它的起止修正）
+# 写入某个键的生效值：本层对生效值的赋值只经这一个出口
 _cfg_set() { # $1=键（必须在册） $2=值
   eval "$1=\$2"
 }
@@ -75,7 +71,7 @@ cfg_effective() { # $1=键
   printf '%s' "$v"
 }
 
-# 各键的读取函数：其余层与入口用它取值，不直接读变量
+# 各键的读取函数：取值默认走这里；直接读同名变量的少数地方各自写明理由
 cfg_keepalive()       { cfg_effective KEEPALIVE; }
 cfg_poll_start()      { cfg_effective POLL_START; }
 cfg_poll_end()        { cfg_effective POLL_END; }
@@ -142,8 +138,7 @@ cfg_reason() { # $1=键 $2=值
 _cfg_defaults
 
 # ---- 加载配置文件 ----
-# 入口在装配阶段调一次。缺文件即全取默认值；某个键的值不合法（只有手改能造出）
-# 就退回该键的默认值——坏文件不该让程序崩，也不该悄悄改变行为。
+# 入口在装配阶段调一次。缺文件即全取默认值；某个键的值不合法（只有手改能造出）就退回该键默认值。
 cfg_load() {
   local k v
   while read -r k; do
@@ -213,7 +208,7 @@ cfg_write() { # $1…=「键=值」
     echo "保活时段起（$(_cfg_cand KA_START "$@")）必须早于止（$(_cfg_cand KA_END "$@")），不支持跨午夜" >&2
     return 1
   fi
-  # 整份原子重写：按登记顺序写出全部键（不保留手写注释，也不保留表外的键）
+  # 按登记顺序写出全部键：不保留手写注释，也不保留表外的键
   body=""
   for k in $(cfg_keys); do
     v=$(_cfg_cand "$k" "$@")
