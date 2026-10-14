@@ -1356,6 +1356,11 @@ nohup sh /sdcard/Download/device-smoke.sh > /sdcard/Download/fafu-smoke.log 2>&1
   故装机后从 `status`、启动日志、模块列表或配置页都能分辨装的是哪一次构建；
   发布构建的版本串与 `module.prop` 逐字一致，`versionCode` 两者都不动
   （它决定更新检测看不看得见这一版；`update.json` 在发版前故意停在已发布的那一版）
+- **发布 tag 一律带注释**（`git tag -a`）：注释存的是发布标题，v1.0.0 起的每个版本都这样。
+  两个走过的坑：① `gh release create --verify-tag=false` 会**顺手建轻量 tag**，
+  破坏这个约定（v1.3.0 首次发布时踩到，只能删掉 tag 重建）；② **删远端 tag 会让 Release 变成 draft**
+  ——更新源仍在、但管理器看不到更新，故重建 tag 后必须 `gh release edit <tag> --draft=false`
+  把它发布回来（v1.3.0 修复时踩到）。命令与顺序见 README「发布新版本」
 - **文案**：日期用绝对形式（如 `09-14`），不用「今日」等相对表述——守护进程退出后信息不失真
 - **代码**：一次性 / 临时的逻辑不入代码，在会话中给出命令即可
 - **注释**：口径见 §2.1 的层结构约定（第二版），论证与依据写进 §2.1.2 的「层内实现注记」，

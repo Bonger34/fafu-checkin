@@ -463,13 +463,23 @@ git push
 
 ```sh
 sh build.sh          # → dist/fafu-checkin-v1.1.7.zip
+# tag 先本地建好并推上去：**必须是带注释的**（-a），与历史版本同形，
+# 注释就是发布标题——全部 v1.x 版本都这样，别建成轻量 tag
+git tag -a v1.1.7 -m "v1.1.7：一句话摘要"
+git push origin refs/tags/v1.1.7
 gh release create v1.1.7 ./dist/fafu-checkin-v1.1.7.zip \
   --title "v1.1.7：一句话摘要" \
   --notes-file CHANGELOG_SECTION.md    # 内容取自 CHANGELOG 对应小节
 ```
 
-tag 要打在**步骤 2 那个已通过 CI 的提交**上（`gh release create v1.1.7` 默认取当前
-`HEAD`），这样包与 tag 指向的是同一份代码。
+tag 要打在**步骤 2 那个已通过 CI 的提交**上（`git tag` 不带提交号即取当前 `HEAD`），
+这样包与 tag 指向的是同一份代码。
+
+> **两个踩过的坑**：
+> ① `gh release create --verify-tag=false` 会**顺手建一个轻量 tag**，把标签约定搞乱
+>    （要么别用这个开关，要么像上面那样自己先建带注释的 tag）；
+> ② **删掉远端 tag 会让 GitHub 把 Release 转成 draft**（更新源仍在，但管理器看不到更新）。
+>    真要重建 tag，删完必须 `gh release edit <tag> --draft=false` 把它发布回来。
 
 **4. 同步 update.json**（这一步才会让管理器开始提示更新）
 
