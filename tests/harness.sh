@@ -252,17 +252,29 @@ t_file() {
   if [ -s "$2" ]; then _t_pass "$1"; else _t_fail "$1（$2 不存在或为空）"; fi
 }
 
-# 把 grep 结果写进临时文件并输出匹配行数。
-# 不走 $( ) + 管道：本机 busybox（Windows 版）在这种嵌套命令替换下会直接栈溢出崩掉，
-# 写文件是等价且稳定的做法。
-# $3 可选：-F（默认，字面量）或 -E（正则）——需要「空白量可变」这类断言时用正则。
-_t_grep_count() { # $1=模式 $2=-F|-E $3=文件 [$4=-E]
-  local f="$T_WORK_ROOT/.grep.tmp" mode
-  mode="${4:--F}"
-  mkdir -p "$T_WORK_ROOT"
-  grep "$mode" -e "$1" -- "$3" > "$f" 2>/dev/null
-  grep -c . "$f" > "$T_WORK_ROOT/.grep.n" 2>/dev/null
-  cat "$T_WORK_ROOT/.grep.n" 2>/dev/null
+# 数文件里命中模式的**非空行**，输出行数（调用方要的是「几处」，空行不算一处）。
+# 字面量（默认）走内建 read + case：不起外部进程。本机（Windows）每个裸 applet 调用都在
+# 几十毫秒一档，而这个函数被几百处断言调用，旧写法一次要起 3 个进程。
+# 正则（第二参数 -E）仍用 grep：case 的模式是 glob，没有 `|`、`+`、分组这些 ERE 语义。
+#
+# 三条约束（少一条就会静默数错，或被 shell 直接终止）：
+#   1) 最后一行没有换行时 read 会填值却返回 1，故循环必须带 `|| [ -n "$l" ]` 兜底；
+#   2) 非交互 shell 里 exec 的重定向失败会**终止脚本**，故先判文件存在、且给 exec 兜底；
+#   3) 「命中」与「非空行」是**两个条件**：正则那一支要按顺序走两次 grep，不能只数命中行
+#      （能匹配空行的正则——空模式、`x*`、`^$`——否则会把空行也数进去）。
+_t_grep_count() { # $1=模式 $2=-F|-E $3=文件
+  local n=0 l
+  if [ "${2:--F}" = "-E" ]; then
+    grep -E -e "$1" -- "$3" 2>/dev/null | grep -c . 2>/dev/null
+    return 0
+  fi
+  [ -f "$3" ] || { printf '%s' 0; return 0; }
+  exec 3< "$3" || { printf '%s' 0; return 0; }
+  while IFS= read -r l <&3 || [ -n "$l" ]; do
+    case "$l" in *"$1"*) n=$((n + 1)) ;; esac
+  done
+  exec 3<&-
+  printf '%s' "$n"
 }
 
 # 行数相等：t_lines <说明> <路径> <期望行数>
@@ -289,7 +301,7 @@ t_has() {
 # 写死空格会让重构排版制造假红灯。
 t_has_re() { # t_has_re <说明> <文件> <正则> [次数]
   local n
-  n=$(_t_grep_count "$3" -E "$2" -E)
+  n=$(_t_grep_count "$3" -E "$2")
   [ -n "$n" ] || n=0
   if [ "$n" -ge 1 ] && { [ -z "${4:-}" ] || [ "$n" = "$4" ]; }; then
     _t_pass "$1 ($n 处)"
