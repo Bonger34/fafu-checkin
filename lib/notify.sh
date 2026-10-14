@@ -31,7 +31,7 @@ _NT_MARK_nosign=nosign;    _NT_MARK_late=late;        _NT_MARK_miss=miss
 # 兜底提醒（任务未发布）复用 state 层的「已取得任务」标记：取到任务是「今天不用再问」，发过兜底是「今天已经提醒过」。
 _NT_MARK_nopub=nopub
 # 落盘状态（每日标记、冷却基准）归 state 层，本层只经 notify_marked / notify_mark / nt_cooldown 访问。
-# 冷却基准必须落盘（改这里会坏什么）：refresh_token 在 $( ) 子 shell 里被调用，普通变量活不过去。
+# 冷却基准必须落盘（改这里会坏什么）：预警是从 $( ) 里发出的，普通变量活不过那个子 shell。
 
 # ---- tag 表：事件名 → 通知 tag 后缀（完整 tag = fafu-<后缀>-<当日 tag>） ----
 # 默认后缀就是事件名本身；例外三条是**对外契约**，别顺手改：seen→sign、nosign→t2200、late→t2230。

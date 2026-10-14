@@ -142,7 +142,9 @@ hd_managed_count() { hd_count_of $(hd_managed_files); }
 
 # 仓库侧的名字（模块外指针）：模块被刷进手机之后，这些路径与文档在那台机器上都翻不到。
 # 这组词只对本体的受管文件生效，不影响断言与工具脚本自己的旧判据（HD_DOC）。
-HD_BODY_WORDS="tools/ tests/ scripts/ .github/ build.sh update.json CHANGELOG.md README DEVELOPMENT"
+# `docs` 不带斜杠：指针写法既有 `docs/DEVELOPMENT.md` 也有裸的「见 docs 里的那一节」，两种都要拦。
+# `module.prop` / `fafu_checkin.log` / `fafu-checkin.state` 这些是**包内的**运行时文件，不算外指针。
+HD_BODY_WORDS="tools/ tests/ scripts/ .github/ build.sh update.json CHANGELOG.md README DEVELOPMENT docs"
 
 # ---- 块扫描 ----
 
@@ -172,19 +174,23 @@ hd_divider() {
   [ -n "${s% *}" ]                        # 文本段非空
 }
 
-# shell 文件的注释块：块 = 连续若干行「去掉行首空白后以 # 开头」，空行或非注释行即切断。
-# 第一个块是文件头（只受 HD_LIMIT 管，不适用 HD_BLOCK_LIMIT）；分区标题从扫描里排除——
-# 它既不自成一块，也不算进它后面那个块。行尾短注不以 # 起头，故天然不计入。
+# shell 文件的注释块：块 = 连续若干行「去掉行首空白后以 # 开头」，**空行切断块**（与
+# hd_lines 的「跳过块前空行、再从第一行注释数到第一个非注释行」口径一致）；shebang 不进块，
+# 也不算块内容。**文件头 = 前两行内开始的第一个块**（无 shebang 时即首行开始的那个，
+# shebang 本身在第 1 行），只有它豁免 ≤ HD_BLOCK_LIMIT、只受 HD_LIMIT 管；头块只豁免一次，
+# 之后（以及以代码开头的文件里）每个块都照常受管。分区标题从扫描里排除——它不自成一块，
+# 也不算进后面那个块。
 hd_sh_blocks() { # $1=文件 $2=块长上限
-  local f limit line lead rest n start no first
+  local f limit line lead rest n start seen b4code line_no
   f="$1"
   limit="$2"
   n=0
   start=0
-  no=0
-  first=1
+  seen=0
+  b4code=0
+  line_no=0
   while IFS= read -r line || [ -n "$line" ]; do
-    no=$((no + 1))
+    line_no=$((line_no + 1))
     lead="${line%%[! 	]*}"
     rest="${line#"$lead"}"
     if hd_divider "$rest"; then
@@ -192,35 +198,45 @@ hd_sh_blocks() { # $1=文件 $2=块长上限
     fi
     case "$rest" in
       '#!'*)
-        [ "$n" -eq 0 ] && [ "$first" -eq 1 ] && continue   # 文件开头的 shebang：与 hd_lines 一致
+        continue                        # shebang 只是一行宣告，不属于任何注释块
         ;;
       '#'*)
         n=$((n + 1))
-        [ "$start" -gt 0 ] || start=$no
+        [ "$start" -gt 0 ] || start=$line_no
         continue
         ;;
     esac
-    [ "$n" -gt 0 ] || continue
-    [ "$first" -eq 1 ] || hd_block_report "$f" "$start" "$n" "$limit"
-    n=0
-    start=0
-    first=0
+    # 空行或代码行都收块：空行切断块，正是「拆块」这个减压手段的实现
+    if [ "$n" -gt 0 ]; then
+      if [ "$seen" -eq 1 ] || [ "$b4code" -eq 1 ] || [ "$start" -gt 2 ]; then
+        hd_block_report "$f" "$start" "$n" "$limit"
+      fi
+      seen=1
+      n=0
+      start=0
+    elif [ "$seen" -eq 0 ]; then
+      b4code=1                          # 文件头之前就有代码：这一段里没有头块可豁免
+    fi
   done < "$f"
-  [ "$first" -eq 1 ] || hd_block_report "$f" "$start" "$n" "$limit"
+  [ "$n" -gt 0 ] || return 0
+  if [ "$seen" -eq 1 ] || [ "$b4code" -eq 1 ] || [ "$start" -gt 2 ]; then
+    hd_block_report "$f" "$start" "$n" "$limit"
+  fi
   return 0
 }
 
-# 页面的注释块：`/* … */` 与行首的 `//`；空行切断、块内空行不计、一个块 ≤ 上限。
-# 只认行首（含缩进）的注释，贴在代码行后的短注与 shell 侧一样不计入。
-# 页面没有文件头判据，故第一块不豁免——否则等于给它留一个没人管的角。
+# 页面的注释块：`/* … */` 与 `//`（行首与行尾都算）；空行切断、块内空行不计、一个块 ≤ 上限。
+# `//` 行尾短注与 shell 侧不一致——这里**计入**：两种写法在页面上是同一个东西，
+# 一边计一边不计就成了「换个写法绕过判据」的口子。页面没有文件头判据，故第一块也不豁免。
 hd_html_blocks() { # $1=文件 $2=块长上限
-  local f limit line lead rest n start no in_block
+  local f limit line lead rest n start no in_block inline
   f="$1"
   limit="$2"
   n=0
   start=0
   no=0
   in_block=0
+  inline=""
   while IFS= read -r line || [ -n "$line" ]; do
     no=$((no + 1))
     lead="${line%%[! 	]*}"
@@ -250,11 +266,21 @@ hd_html_blocks() { # $1=文件 $2=块长上限
         continue
         ;;
     esac
-    hd_block_report "$f" "$start" "$n" "$limit"
-    n=0
-    start=0
+    # 到块边界：先判刚结束的 // 段，再把若干行尾短注各自当「1 行的块」一并记下
+    # （它们不合成一个多行块——判据只看单个注释有多长，不约束一段代码后面跟几条短注）
+    if [ "$n" -gt 0 ]; then
+      hd_block_report "$f" "$start" "$n" "$limit"
+      n=0
+      start=0
+    fi
+    case "$line" in
+      *'//'*) inline="$inline $no" ;;
+    esac
   done < "$f"
   hd_block_report "$f" "$start" "$n" "$limit"
+  for no in $inline; do
+    hd_block_report "$f" "$no" 1 "$limit"
+  done
   return 0
 }
 
@@ -426,6 +452,7 @@ hd_case_body_self_check() {
   {
     printf '#!/bin/sh\n# 头部\n'
     printf '# 用法：见 tools/run-tests.sh\n'
+    printf '# 说明见 docs 里的那一节\n'
     printf 'echo hi\n'
   } > "$word"
   t_file "自证：合规的 3 行块样本已落盘" "$ok3"
@@ -455,6 +482,69 @@ hd_case_body_self_check() {
     "$(HD_BODY="$over4" HD_EXEMPT="$over4" hd_body_block_hits)" ""
   t_eq "自证：受管数按「本体清单 − 豁免清单」算" \
     "$(HD_BODY="$ok3 $over4" HD_EXEMPT="$ok3" hd_managed_count)" "1"
+  self_check_extra "$ok3" "$over4"
+}
+
+# 块长判据的边缘自证（分出来只为让上面那条用例短一点）：
+# 头块的作用范围、页面的行尾 `//`、以及 hd_lines 自己的反向样本。
+self_check_extra() { # $1=合规样本 $2=超限样本
+  local ok3 noshebang nth4 hdr overhdr inline5 page
+  ok3="$1"
+  over4="$2"
+
+  # 头块的豁免只给「文件里第一个注释块」：以代码开头时第一个块照常受管
+  noshebang="$HD_WORK/noshebang.sh"
+  {
+    printf 'echo hi\n'
+    printf '# 一\n# 二\n# 三\n# 四\n'
+    printf 'echo hi\n'
+  } > "$noshebang"
+  t_eq "自证：以代码开头的文件，第一个块不再是头块、照常报超限" \
+    "$(HD_BODY="$noshebang" HD_EXEMPT='' hd_body_block_hits)" "${noshebang##*/}:2:4"
+  # 头块落在文件开头 → 仍然豁免块长上限（否则上面那条会把真正的头块也一起打红）
+  t_eq "自证：落在文件开头的头块仍然豁免块长上限" \
+    "$(HD_BODY="$ok3" HD_EXEMPT='' hd_body_block_hits)" ""
+  # 头块之后隔了空行再来一个四行块 → 照常受管（头块只消费一次，空行不是口子）
+  nth4="$HD_WORK/nth4.sh"
+  {
+    printf '#!/bin/sh\n# 头部\n\n'
+    printf '# 一\n# 二\n# 三\n# 四\n'
+    printf 'echo hi\n'
+  } > "$nth4"
+  t_eq "自证：头块之后的四行块照常受管" \
+    "$(HD_BODY="$nth4" HD_EXEMPT='' hd_body_block_hits)" "${nth4##*/}:4:4"
+
+  # hd_lines 自己的反向样本：没写它，「HD_LIMIT=15 判得对」就只是信任
+  hdr="$HD_WORK/hdr13.sh"
+  overhdr="$HD_WORK/hdr16.sh"
+  {
+    printf '#!/bin/sh\n'
+    printf '# 一\n# 二\n# 三\n# 四\n# 五\n# 六\n# 七\n# 八\n# 九\n# 十\n# 十一\n# 十二\n# 十三\n'
+    printf 'echo hi\n'
+  } > "$hdr"
+  {
+    printf '#!/bin/sh\n'
+    printf '# 一\n# 二\n# 三\n# 四\n# 五\n# 六\n# 七\n# 八\n# 九\n# 十\n# 十一\n# 十二\n# 十三\n# 十四\n# 十五\n# 十六\n'
+    printf 'echo hi\n'
+  } > "$overhdr"
+  t_eq "自证：13 行的头块数出 13（$HD_LIMIT 判得对）" "$(hd_lines "$hdr")" "13"
+  t_eq "自证：16 行的头块数出 16（确实超 $HD_LIMIT）" "$(hd_lines "$overhdr")" "16"
+
+  # 页面的行尾 `//` 与行首那种同一形状：一并计入，换个写法绕不过去
+  inline5="$HD_WORK/inline5.html"
+  {
+    printf '<p>a</p>   // 一\n<p>b</p>   // 二\n<p>c</p>   // 三\n'
+    printf '<p>d</p>   // 四\n<p>e</p>   // 五\n'
+  } > "$inline5"
+  page="$HD_WORK/page-inline.html"
+  printf '<p>a</p>   // 一\n<p>b</p>\n' > "$page"
+  t_eq "自证：页面的行尾 // 短注逐条计为 1 行的块（五行都合规）" \
+    "$(HD_BODY="$inline5" HD_EXEMPT='' hd_body_block_hits)" ""
+  t_eq "自证：页面行尾短注与行首 // 是同一形状、同一判据" \
+    "$(HD_BODY="$page" HD_EXEMPT='' hd_body_block_hits)" ""
+  hd_html_blocks "$inline5" 0
+  t_eq "自证：把上限压到 0，五条行尾短注各自被报出（判据真的在看它们）" \
+    "$(hd_html_blocks "$inline5" 0 | wc -l | tr -dc '0-9')" "5"
 }
 
 # 豁免清单的自证：清单已删空，所以这里要钉住两件事——空的时候本体一个不漏地被扫，
