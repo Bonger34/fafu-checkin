@@ -34,6 +34,10 @@
 
 更新源：仓库根目录的 [`update.json`](update.json)（指向最新 Release）。
 
+> **它是唯一打开「有更新」提示的开关**：两个管理器都只比对这里的 `versionCode`
+> （大于本机已装的版本才提示），`module.prop` 只被本机读取、仓库里那份不会被拉取。
+> 因此**必须先有 Release 与它的 zip，再同步这个文件**——顺序反了，用户点更新只会拿到 404。
+>
 > **发布新版本时**需更新 `update.json` 的 `version` / `versionCode` / `zipUrl` 三项
 > （可用 `scripts/sync_update_json.py` 生成，见「开发与发布」）；
 > `changelog` 固定指向本仓库 `CHANGELOG.md` 的 raw 地址（管理器按 Markdown 渲染），无需随版本改动。
@@ -448,18 +452,26 @@ git push
 推送后 [`.github/workflows/build.yml`](.github/workflows/build.yml) 会自动构建，
 产物在 Actions 运行页的 **Artifacts** 中下载（保留 90 天）。
 
-**3. 手动创建 Release**
+> **此时管理器还不会提示更新**：两个管理器都只按 `update.json` 里的 `versionCode`
+> 判定（`module.prop` 只被本机读取，仓库里那份不会被拉取）。真正打开提示的是第 4 步。
 
-在 GitHub 网页创建 Release（选择新建 tag），或使用 gh CLI：
+**3. 出发布包并创建 Release**
+
+**发布包必须本地用 `sh build.sh` 出**（见「两种构建模式」）：CI 跑的是 dev 模式，
+包名与包内版本串都带 `-dev.<短 SHA>` 且移除了 `updateJson`，而发布产物的版本串要与
+`module.prop` **逐字一致**（`build.sh` 会硬校验这一条），拿 CI 产物当发布包会在那里失败。
 
 ```sh
-# 下载 CI 产物后
-gh release create v1.1.7 ./fafu-checkin-v1.1.7.zip \
+sh build.sh          # → dist/fafu-checkin-v1.1.7.zip
+gh release create v1.1.7 ./dist/fafu-checkin-v1.1.7.zip \
   --title "v1.1.7：一句话摘要" \
   --notes-file CHANGELOG_SECTION.md    # 内容取自 CHANGELOG 对应小节
 ```
 
-**4. 同步 update.json**（供管理器检测更新）
+tag 要打在**步骤 2 那个已通过 CI 的提交**上（`gh release create v1.1.7` 默认取当前
+`HEAD`），这样包与 tag 指向的是同一份代码。
+
+**4. 同步 update.json**（这一步才会让管理器开始提示更新）
 
 ```sh
 python3 scripts/sync_update_json.py v1.1.7 9 \
@@ -468,6 +480,10 @@ git commit -am "chore(release): 同步 update.json 至 v1.1.7"
 git push
 ```
 
+> **顺序不能颠倒**：`update.json` 的 `versionCode` 一旦大于用户已装版本，提示立刻出现；
+> 这一步必须排在 Release 与它的资源**都已经存在**之后，否则用户点更新只会拿到 404。
+> 第 3 步在任何顺序下都不会有这个问题。
+>
 > 也可直接用 GitHub 网页手动编辑 `update.json`（仅需改 `version` / `versionCode` / `zipUrl` 三项）。
 
 **CI 职责划分**
