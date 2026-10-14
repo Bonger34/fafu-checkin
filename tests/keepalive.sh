@@ -53,13 +53,16 @@ ka_at() {
 }
 
 # 每个用例自备工作目录：替身 busybox + 设备命令替身（am / input / wm / dumpsys）+ 模块目录。
-# dv_tools 由 tests/device.sh 定义（用例文件名 device.sh 排在 keepalive.sh 之前）。
+# 设备命令替身的生成器来自 tests/_device-tools.sh（与 device / notify 共用一份）。
 ka_setup() {
   KA_WORK="$T_WORK_ROOT/keepalive-$1"
   rm -rf "$KA_WORK"
   mkdir -p "$KA_WORK/mod" "$KA_WORK/bin" "$KA_WORK/dev" "$KA_WORK/ctl" "$KA_WORK/ld"
   t_bb_wrap "$KA_WORK/bin/bb" >/dev/null
   DV_WORK="$KA_WORK"
+  # 设备命令替身的生成器与 device / notify 共用一份（见 tests/_device-tools.sh）：
+  # 别指望「别的用例文件已经 source 过它」，并行时每个文件各自一个子进程
+  . "$T_ROOT/tests/_device-tools.sh"
   dv_tools
   : > "$KA_WORK/ld/token"      # 空的 localStorage 文件 = 应用里没有 token
   printf '0\n' > "$KA_WORK/dev/rc"

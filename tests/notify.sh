@@ -464,6 +464,9 @@ nt_case_warn_order() {
   # 前导里的 PATH='./bin:...' 正好命中 dv_tools 写的那些包装器。
   # DV_WORK 必须在 nt_setup 之后取——那之前 NT_WORK 还是上一条用例的目录
   DV_WORK="$NT_WORK"
+  # 设备命令替身的生成器与 device / keepalive 共用一份（见 tests/_device-tools.sh）：
+  # 别指望「别的用例文件已经 source 过它」，并行时每个文件各自一个子进程
+  . "$T_ROOT/tests/_device-tools.sh"
   dv_tools
   nt_run order <<DRIVER
 # 通知与设备命令落进**同一条时间线**：跨进程的先后只有共享一个记录文件才可比

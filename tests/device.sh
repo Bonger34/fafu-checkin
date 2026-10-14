@@ -16,6 +16,9 @@
 
 DV_WORK="$T_WORK_ROOT/device"
 
+# 设备命令替身的生成器与 keepalive / notify 共用一份（见该文件头的说明）
+. "$T_ROOT/tests/_device-tools.sh"
+
 # 夹具路径一律用**相对路径**（驱动先 cd 到 $DV_WORK 再运行）：Windows 的 D:/ 路径喂进
 # 被测代码会变成残缺路径（见 tests/state.sh 的说明），而运行时用的是手机上的绝对路径。
 DV_MODDIR="./mod"
@@ -41,28 +44,7 @@ DV_HARDEN='</dev/null >/dev/null 2>&1'
 #   1) `#!$bb sh` 起头：Windows 上「可执行」要求存在解释器，只有 busybox 认这个 shebang；
 #      没有它时 PATH 上的 dumpsys 会**静默变成 no-op**（断言全部空转，最难发现的一种失败）。
 #   2) 末尾再按「显式解释器」跑一遍：CI 的 /bin/sh 与本地多套一个 busybox .exe 时都能落地。
-dv_tools() {
-  local t bb real
-  bb=$(t_find_busybox)
-  [ -n "$bb" ] || bb="busybox"
-  case "$bb" in
-    *.exe|*.EXE) real="$bb sh \"\$0\" \"\$@\"" ;;
-    *)           real="$bb \"\$0\" \"\$@\"" ;;
-  esac
-  mkdir -p "$DV_WORK/bin"
-  for t in am input wm dumpsys; do
-    {
-      echo "#!$bb sh"
-      echo '# 由 tests/device.sh 生成：设备命令替身（记录命令行与 fd 见证，并注入输出）'
-      echo "BB_REAL='$bb'"
-      echo "MOCK_DIR='$T_ROOT/tests/mock'"
-      echo 'export BB_REAL'
-      echo "if [ -x \"\$MOCK_DIR/busybox\" ]; then exec \"\$MOCK_DIR/busybox\" $t \"\$@\"; fi"
-      echo "$real"
-    } > "$DV_WORK/bin/$t"
-    chmod +x "$DV_WORK/bin/$t" 2>/dev/null || true
-  done
-}
+# 实现已抽到 tests/_device-tools.sh（keepalive / notify 也用它），此处不再重复定义。
 
 dv_setup() {
   rm -rf "$DV_WORK"
