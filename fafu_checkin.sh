@@ -28,8 +28,7 @@ MODDIR="${SELF%/*}"
 [ -f "$MODDIR/fafu_checkin.sh" ] || MODDIR="/data/adb/modules_update/fafu-checkin"
 
 # ---- 按序加载各层 ----
-# 顺序即依赖方向：一层只能引用更早加载的层（tools/check-layer-order.sh 守着这条）。
-# 注意 keepalive 必须排在 signin 之前——签到决策会调用刷新流程。
+# 顺序即依赖方向：一层只能引用更早加载的层。注意 keepalive 必须排在 signin 之前——签到决策会调用刷新流程。
 FAFU_LAYERS="base config state api device notify desc keepalive signin commands"
 LIBDIR="$MODDIR/lib"
 # 库层缺失时 base 还没加载，这条失败日志的路径只能就地取（与 base 层里的那处一致）
@@ -56,10 +55,9 @@ CMD="$1"
 # 下面转发时 $@ 才只剩参数（不会把子命令名算成一个）
 [ $# -eq 0 ] || shift
 cmd_known "$CMD" || { cmd_usage; exit 1; }
-# 降权写法在这里探一次（探不探由 cmd_probe_needed 按命令表判）：启动路径必探——守护进程是
-# 下面 cmd_start 派生出来的后台进程，它自己不再探（从 FAFU_SU_MODE 继承）。漏探则 daemon 的
-# SU_MODE 为空，而空的 SU_MODE 会让 notify() 直接返回——自动签到那几条通知会静默消失且没有
-# 任何报错。只读与配置写入类子命令不探（白等一次 su，且探测日志会落进它们自己交出的日志尾部）。
+# 降权写法在这里探一次（探不探由 cmd_probe_needed 按命令表判）：守护进程是下面 cmd_start
+# 派生出来的后台进程，它自己不再探（从 FAFU_SU_MODE 继承）；漏探则 daemon 的 SU_MODE 为空，
+# 而空的 SU_MODE 会让 notify() 直接返回——自动签到那几条通知会静默消失且没有任何报错。
 cmd_probe_needed "$CMD" && probe_su "$CMD"
 cmd_dispatch "$CMD" "$@"
 
@@ -107,13 +105,11 @@ while true; do
     rm -f "$PIDF"
     exit 0
   fi
-  # 描述定时刷新（每约 10 分钟一次；内容变化时才写入）
   if [ $DESC_TICK -le 0 ]; then
     update_desc
     DESC_TICK=10
   fi
   DESC_TICK=$((DESC_TICK-1))
-  # 日志轮转（每小时检查一次）
   if [ $ROT_TICK -le 0 ]; then
     rotate_log
     ROT_TICK=60
@@ -121,28 +117,23 @@ while true; do
   ROT_TICK=$((ROT_TICK-1))
   now=$(now_hm)
   PL=$(today_tag)   # 每轮重算：守护进程常驻，跨日后 tag 不应仍停在启动那天
-  rc_wait=60        # 本轮的休眠时长：查看任务时可能被改短或被放宽（任务异常档 4 分钟）
+  rc_wait=60        # 本轮休眠：查看任务时可能被放宽（任务异常档 4 分钟）；只有 60 与 240 两档
   if [ ! "$now" \< "$POLL_START" ] && [ ! "$now" \> "$POLL_END" ]; then
     # ---- 轮询范围内：查看今晚的任务（该不该签由服务端任务数据决定）----
-    # 时刻比较直接用 now_hm 的零填充字符串：字典序即时间序，不必换算分钟；
-    # 两条否定合起来读作 POLL_START <= now <= POLL_END（test 没有 >= / <= 的写法）。
-    # 当日已解决时不再查看——「今晚的事办完了就不再反复查询」。
+    # 时刻比较直接用 now_hm 的零填充字符串：字典序即时间序，两条否定合起来读作
+    # POLL_START <= now <= POLL_END（test 没有 >= / <= 的写法）。
     if ! signin_resolved_today; then
       run_once; rc=$?
       [ $rc -eq 0 ] && done_mark
-      # 「任务未发布」兜底：到 min(轮询范围止, 本地 23 点) 仍未取得任务就喊一条。
-      # 它挂本地时钟、不看任务数据，但目标时刻必然落在轮询范围内，故判定就在这里，
-      # 不另开一条不看时间的旁路。当日已解决时同样一条都不发。
+      # 「任务未发布」兜底：到 min(轮询范围止, 本地 23 点) 仍未取得任务就喊一条；当日已解决时不发。
       # **它必须排在那条「任务异常就跳 4 分钟」之前**：rc=2 恰恰就是「取不到任务」——
       # 也就是最该喊这一条的情形，跳过去等于把兜底静默吞掉。
       signin_remind_notask "$now"
-      # 任务异常（取不到任务）时下一轮排到 4 分钟后，与上面那条提醒互不相干
       [ $rc -eq 2 ] && rc_wait=240
     fi
   fi
   # ---- 白天保活：与「轮询范围内」并列，不受当日是否已解决影响 ----
-  # 这两个条件都成立才保活：时段在配置里（窗口与节流都由 keepalive 层判定）；
-  # 签到办完了照样要续期，且轮询范围与保活时段本就大面积重叠。
+  # 两个条件都成立才保活：时段在配置里（窗口与节流都由 keepalive 层判定）；签到办完了照样要续期。
   if [ "$(cfg_keepalive)" = "1" ] && ka_in_window; then
     now_ts=$(now_s)
     if ka_due "$now_ts"; then
