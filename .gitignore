@@ -13,9 +13,11 @@ Thumbs.db
 .scratch/
 
 # 断言运行时的临时产物（用例工作目录）
-# .work/ 是串行跑用的；.work-run/ 是总入口给并行跑准备的「一个用例文件一份工作根」
+# .work/ 是串行跑用的；.work-run/ 是总入口默认的工作根（一个用例文件一份子目录）；
+# .work-*/ 兜住给 T_WORK_BASE 起的其它工作根（本机并行验证用）
 tests/.work/
 tests/.work-run/
+tests/.work-*/
 
 # 本机跑断言用的 busybox（随附本地，不入库）
 tools/busybox/

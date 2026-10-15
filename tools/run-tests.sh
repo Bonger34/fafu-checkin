@@ -88,11 +88,13 @@ run_sh() {
 
 # 用例文件：tests/ 下不以 _ 开头的 .sh、且不是 harness 自己；每个文件跑完自己的用例
 # 再换下一个，这样某个文件里注册出错不会连累其他文件。
-# 顺序按**耗时降序**排（signin 一个就占全量三分之一以上）：并行时先起最长的，
-# 关键路径才不会被一小撮长套件拖住。新增用例文件请按耗时插进这个清单；
-# 没登记的会被下面的兜底扫描按文件名顺序补在末尾，不会被漏掉。
-SUITE_ORDER="signin.sh commands.sh poll.sh api.sh keepalive.sh notify.sh config.sh state.sh
-device.sh headers.sh skeleton.sh layer-order.sh"
+# 顺序**短套件在前、长套件在后**：并行时按 JOBS 攒批（批内并发、批间串行），把短的排前面
+# 能让它们先占满早期批次、把并发的长套件（signin 的几份实现文件）挤进同一批同时起跑，
+# 关键路径才不被拖长。新增用例文件请按这个口径插进清单；没登记的会被下面的兜底扫描
+# 按文件名顺序补在末尾，不会被漏掉。
+SUITE_ORDER="skeleton.sh layer-order.sh headers.sh device.sh config.sh state.sh notify.sh
+keepalive.sh api.sh poll.sh signin-refresh.sh signin-query.sh signin-remind.sh
+signin-submit.sh commands.sh signin.sh"
 SUITES=""
 for s in $SUITE_ORDER; do
   [ -f "$ROOT/tests/$s" ] && SUITES="$SUITES $s"
