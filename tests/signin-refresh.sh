@@ -181,3 +181,8 @@ DRIVER
   t_has "刷新成功那一行同样带触发原因" "$SG_WORK/mod/fafu_checkin.log" \
     "刷新成功: OLD → NEWTOKEN 触发原因=签到查询失败"
 }
+
+# ---- 注册（顺序即执行顺序）----
+t_case "signin-refresh · 提交失败后的短重试" sg_case_submit_retry
+t_case "signin-refresh · 窗口边界（21:29 / 21:30 / 22:30 / 22:59 / 23:00）" sg_case_boundaries
+t_case "signin-refresh · token 失效后刷新重试" sg_case_token_refresh

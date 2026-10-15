@@ -118,7 +118,9 @@ poll_start() {
     LD_DIR="${POLL_LD_DIR:-}" CURL_BIN="${POLL_CURL_BIN:-}" FAFU_SU_MODE="${POLL_SU_MODE:-}"
     export LD_DIR CURL_BIN FAFU_SU_MODE
     if [ -n "$bb" ]; then
-      "$bb" timeout "${POLL_TIMEOUT:-120}" sh './mod/fafu_checkin.sh'
+      # 默认 240 秒是挂死保险（防夹具没注入进去、主循环空转），不是断言的一部分：
+      # 多轮用例在并行压满时会慢好几倍；单独需要更长的用例自己设 POLL_TIMEOUT
+      "$bb" timeout "${POLL_TIMEOUT:-240}" sh './mod/fafu_checkin.sh'
     else
       sh './mod/fafu_checkin.sh'
     fi
@@ -494,7 +496,8 @@ poll_e2e_setup() {
   POLL_LD_DIR='./ld'
   POLL_CURL_BIN='./bin/curl'
   POLL_SU_MODE='./bin/su - shell -c'
-  POLL_TIMEOUT=300     # 这条用例要走八轮、十几次网络调用，120 秒的墙钟上限不够
+  # 八轮 + 十几次网络调用：并发压满时能把默认上限用光，故这条自己给足
+  POLL_TIMEOUT=600
   # 保活时段覆盖全天（拨钟跨度大），轮询范围覆盖两天的拨钟时点
   poll_config 'KEEPALIVE=1
 KA_START=00:00

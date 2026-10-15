@@ -297,3 +297,9 @@ DRIVER
   t_eq "连不上：日志里没有任何数字状态码（不拿 000 冒充）" \
     "$(grep -c 'http=[0-9]' "$f" 2>/dev/null)" "0"
 }
+
+# ---- 注册（顺序即执行顺序）----
+t_case "signin-remind · 截止提醒的判定（纯函数）" sg_case_remind_due
+t_case "signin-remind · 三条截止提醒按任务数据各发一次" sg_case_remind_events
+t_case "signin-remind · 提交失败的原因留在日志里（HTTP 状态码 / 超时）" sg_case_fail_reason
+t_case "signin-remind · 提交尝试行的字段集（拒绝 / 成功 / 连接层失败）" sg_case_attempt_lines

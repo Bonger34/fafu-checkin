@@ -172,6 +172,9 @@ tok=$(printf '%s' "$raw" | cut -d: -f4)
 exp=$(printf '%s' "${SECRET}${U}${ts}${nonce}" | "$BB" md5sum | cut -d' ' -f1)
 # 换一个 URL 反算：签名里必须真的带着 URL（否则上面的巧合会掩盖缺项）
 exp2=$(printf '%s' "${SECRET}${U}/x${ts}${nonce}" | "$BB" md5sum | cut -d' ' -f1)
+# 容差 ±60 秒：签名时刻 ts 必然 ≤ 这里的 now（签名在前），故只是给「机器被压满时
+# 这一段多进程开销」留余量。不能放宽到「当日零点」那种量级（差 4 万秒）——那会漏掉
+# 「拿当天零点冒充当前时刻」这类真错。
 now=$(now_s)
 
 printf 'api_base=%s\n' "$API"
@@ -180,7 +183,7 @@ printf 'fields=%s\n' "$(printf '%s' "$raw" | "$BB" awk -F: '{print NF}')"
 printf 'hash_ok=%s\n' "$([ "$hash" = "$exp" ] && echo yes || echo no)"
 printf 'url_signed=%s\n' "$([ "$hash" != "$exp2" ] && echo yes || echo no)"
 printf 'ts_num=%s\n' "$(printf '%s' "$ts" | "$BB" tr -dc '0-9' | "$BB" wc -c | "$BB" tr -dc '0-9')"
-printf 'ts_now=%s\n' "$([ "$ts" -ge $((now - 5)) ] && [ "$ts" -le $((now + 5)) ] && echo yes || echo no)"
+printf 'ts_now=%s\n' "$([ "$ts" -ge $((now - 60)) ] && [ "$ts" -le $((now + 60)) ] && echo yes || echo no)"
 printf 'nonce=%s\n' "$nonce"
 printf 'nonce_len=%s\n' "${#nonce}"
 printf 'token=%s\n' "$tok"

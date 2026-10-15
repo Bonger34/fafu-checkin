@@ -201,3 +201,8 @@ sg_case_boundary() {
   t_has "文件头写明「可重试」档" "$T_ROOT/lib/signin.sh" '1 = 可重试'
   t_has "文件头写明「任务异常」档" "$T_ROOT/lib/signin.sh" '2 = 任务异常'
 }
+
+# ---- 注册（顺序即执行顺序）----
+t_case "signin-query · 查询失败：参数与完整正文" sg_case_fetch_fail
+t_case "signin-query · 任务变化：四元组变了才记一行（含跨日）" sg_case_task_change
+t_case "signin-query · 判定链与主循环分支（静态）" sg_case_boundary

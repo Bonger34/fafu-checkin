@@ -88,13 +88,14 @@ run_sh() {
 
 # 用例文件：tests/ 下不以 _ 开头的 .sh、且不是 harness 自己；每个文件跑完自己的用例
 # 再换下一个，这样某个文件里注册出错不会连累其他文件。
+# signin.sh 必须跳过：它只是兼容入口（把四个 signin 实现 source 进来），而那四个已经各自
+# 会跑——把它也当 worker 会让同一条用例注册并执行两遍（计数会翻成 424 项 = 212 的两倍）。
 # 顺序**短套件在前、长套件在后**：并行时按 JOBS 攒批（批内并发、批间串行），把短的排前面
-# 能让它们先占满早期批次、把并发的长套件（signin 的几份实现文件）挤进同一批同时起跑，
-# 关键路径才不被拖长。新增用例文件请按这个口径插进清单；没登记的会被下面的兜底扫描
-# 按文件名顺序补在末尾，不会被漏掉。
-SUITE_ORDER="skeleton.sh layer-order.sh headers.sh device.sh config.sh state.sh notify.sh
-keepalive.sh api.sh poll.sh signin-refresh.sh signin-query.sh signin-remind.sh
-signin-submit.sh commands.sh signin.sh"
+# 能让它们先占满早期批次、把并发的长套件挤进同一批同时起跑，关键路径才不被拖长。
+# 新增用例文件请按这个口径插进清单；没登记的会被下面的兜底扫描按文件名顺序补在末尾。
+SUITE_ORDER="layer-order.sh headers.sh skeleton.sh device.sh config.sh state.sh notify.sh
+keepalive.sh api.sh signin-query.sh signin-refresh.sh commands.sh poll.sh
+signin-remind.sh signin-submit.sh"
 SUITES=""
 for s in $SUITE_ORDER; do
   [ -f "$ROOT/tests/$s" ] && SUITES="$SUITES $s"
@@ -103,7 +104,7 @@ for f in "$ROOT"/tests/*.sh; do
   [ -f "$f" ] || continue
   s="${f##*/}"
   case "$s" in
-    _*|harness.sh) continue ;;
+    _*|harness.sh|signin.sh) continue ;;   # signin.sh 见上：只是兼容入口，不能当 worker
   esac
   case " $SUITES " in
     *" $s "*) ;;

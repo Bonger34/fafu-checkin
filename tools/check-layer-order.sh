@@ -230,8 +230,10 @@ done
 
 echo "层序检查 · 清单：$FILES"
 
-PROG="$ROOT/tests/.work/layer-order.awk"
-mkdir -p "$ROOT/tests/.work"
+# awk 程序落在工作根里，并带上进程号：断言并行跑时每个用例文件一个子进程
+# （各自的 T_WORK_ROOT 不同），固定名会互相截断
+PROG="${T_WORK_ROOT:-$ROOT/tests/.work}/layer-order-$$.awk"
+mkdir -p "${PROG%/*}"
 write_prog > "$PROG"
 
 $AWK -v files="$FILES" -v wl="$WL" -f "$PROG" /dev/null

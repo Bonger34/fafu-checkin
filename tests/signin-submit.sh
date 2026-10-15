@@ -556,3 +556,21 @@ DRIVER
   t_eq "当日仅首次通知：当日真的只发出一条" "$(sg_val "$d" sent)" "1"
   t_eq "当日仅首次通知：第二轮因落过标记被判成已发过" "$(sg_val "$d" skipped)" "1"
 }
+
+# ---- 注册（顺序即执行顺序）----
+t_case "signin-submit · 时钟与夹具自证" sg_case_clock
+t_case "signin-submit · 三档返回码（成功 / 可重试 / 任务异常）" sg_case_codes
+t_case "signin-submit · 等 App 数据就绪（等到就用，等不到有界退回）" sg_case_wait_appdata
+t_case "signin-submit · 分支：已签到（记录 + 通知）" sg_case_branch_seen
+t_case "signin-submit · 分支：已请假（记录 + 通知）" sg_case_branch_leave
+t_case "signin-submit · 分支：窗口内提交（normal）" sg_case_branch_window
+t_case "signin-submit · 分支：不在时段（可重试）" sg_case_branch_outside
+t_case "signin-submit · 任务信息不完整（可重试）" sg_case_parse_incomplete
+t_case "signin-submit · 解析写回调用方字段（端到端）" sg_case_parse_outputs
+t_case "signin-submit · 截止字段回退 endTime" sg_case_parse_fallback
+t_case "signin-submit · 坐标缺失回退内置坐标" sg_case_coords_fallback
+t_case "signin-submit · 坐标取值优先级（signInStudent ＞ 顶层 ＞ 内置）" sg_case_coords_priority
+t_case "signin-submit · token 一路传到提交（端到端）" sg_case_token_chain
+t_case "signin-submit · 提交：补签（supplement）" sg_case_submit_supplement
+t_case "signin-submit · 提交失败：尝试行与汇总行" sg_case_submit_failed
+t_case "signin-submit · 提交失败当日仅首次通知（跨轮）" sg_case_submit_failed_once

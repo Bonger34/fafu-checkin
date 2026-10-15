@@ -735,7 +735,9 @@ ka_th_start() {
     cd "$KA_WORK" || exit 1
     export PATH="$KA_WORK/bin:$PATH" BB_OVERRIDE='./bin/bb' MOCK_DATE_CTL='./ctl/date' \
       MOCK_DEVICE_DIR='./ctl' FAFU_DAEMON=1 SU_MODE=''
-    if [ -n "$bb" ]; then "$bb" timeout 60 sh './mod/fafu_checkin.sh'
+    # 180 秒是挂死保险（防夹具没注入进去、真守护进程空转），不是断言的一部分：
+    # 计划只 3 轮，机器被并行压满时会慢好几倍
+    if [ -n "$bb" ]; then "$bb" timeout 180 sh './mod/fafu_checkin.sh'
     else sh './mod/fafu_checkin.sh'; fi
   ) > "$KA_WORK/entry.out" 2> "$KA_WORK/entry.err"
   [ -s "$KA_WORK/entry.err" ] || return 0
