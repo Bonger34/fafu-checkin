@@ -868,7 +868,7 @@ sh $M/fafu_checkin.sh once         # 手动签到检查（幂等）
   ```
   时间核对: signTime=[…] → sign_time=[…] … alt=[…] 记录={"records":[{"id":88123,… 记录len=2650 记录trunc=1 hdr={…}
   ```
-  （这条来自 `tests/signin.sh` 的「记录超限」那一档；记录段本身按上限 2048 字节截断。）
+  （这条来自 `tests/signin-submit.sh` 的「记录超限」那一档；记录段本身按上限 2048 字节截断。）
 - **保活失败行**（`保活: ❌/⚠️ … 调用失败 …`）：`rc=` 是 keepalive 观察到的返回码、`screen=`
   是当时的屏幕状态，随后原样接上 api 层那一行事实，末尾是所采取的动作——判断「网络不通」
   （`net rc=` + 工具原话）还是「登录态失效」（`rc=0` 且服务端给了状态码与正文但没有任务列表）。
@@ -905,8 +905,9 @@ sh $M/fafu_checkin.sh once         # 手动签到检查（幂等）
 
 > 本节引用的每一行都是测试夹具跑出的真实产物，想自己复现同样几行：
 > `sh tools/run-tests.sh '六类排障日志'`（端到端，完整日志落在
-> `tests/.work/poll-e2e-logs/mod/fafu_checkin.log`）与 `sh tools/run-tests.sh '保活失败行'`
-> （保活两档，落在 `tests/.work/keepalive-failline/mod/fafu_checkin.log`）。
+> `tests/.work-run/poll.sh/poll-e2e-logs/mod/fafu_checkin.log`）与 `sh tools/run-tests.sh '保活失败行'`
+> （保活两档，落在 `tests/.work-run/keepalive.sh/keepalive-failline/mod/fafu_checkin.log`）。
+> 工作根是「一个用例文件一份」（`tests/.work-run/<用例文件名>/`），故路径里那一层是文件名。
 
 ---
 
@@ -963,8 +964,9 @@ sh build.sh                                 # 构建（含产物文件核对）
   跑得更快用 **`sh tools/run-tests.sh -j N`**（也可设 `TEST_JOBS`）：一次并行 N 个用例文件，
   每个文件一个子进程 + 一份独立工作根（`tests/.work-run/<文件>/`），固定名的工作目录因此不会
   互相覆盖；套件按「短在前、长在后」起跑，输出仍按固定顺序整块打印，计数与退出码与串行一致。
-  不加 `-j` 时行为与串行完全相同（CI 与 pre-commit 照旧）。两趟 `run-tests.sh` 同时跑要各自
-  指定 `T_WORK_BASE`，否则会互删工作根。
+  不加 `-j` 时按 `-j 1` 走：每个文件仍是一个子进程、一份独立工作根（与串行脚本自己
+  一个进程跑完全部文件不同），计数、输出顺序与退出码都与串行时一致，CI 与 pre-commit 无需改。
+  两趟 `run-tests.sh` 同时跑要各自指定 `T_WORK_BASE`，否则会互删工作根。
   上限不在 CPU，而在**进程创建**：单次 busybox exec 约 58 ms，并发吞吐 12 路见顶（约 85 次/秒）、
   16 路回落约 19%；全量 1410 项要起约 3.7 万个进程，故理论地板约 7 分钟。本机（16 逻辑核）实测
   串行约 32–36 分钟、`-j 16` 约 13 分钟且全绿（曾出现的假红根因只有两个：`api` 的「时间戳取
@@ -981,7 +983,7 @@ sh build.sh                                 # 构建（含产物文件核对）
 - 注入缝沿用运行时既有开关，不加测试专用后门：时间走 `BB_OVERRIDE` + `tests/mock/busybox`
   （设 `MOCK_DATE_CTL` 即可把 `"$BB" date` 拨到任意时刻，`tests/skeleton.sh` 与 `tests/state.sh`
   用它验时间源与跨日行为；秒位没有可控来源，完整时间戳固定输出 `:00`），
-  `tests/signin.sh` 的拨钟更进一步：它把 `_now +%s` 也换成断言自己的 EPOCH
+  `tests/_signin-common.sh` 的拨钟更进一步：它把 `_now +%s` 也换成断言自己的 EPOCH
   （`MOCK_DATE_CTL` 只管展示格式），于是「窗口判定读的是哪个时钟」这件事本身也被钉住——
   signin 层若绕过 base 层的时间源直接调 `date +%s`，那一套边界断言会立刻报红；
   降权写法走 `SU_MODE`（探测本身走 `SU_BIN`），通知命令走 `NOTIFY_CMD`，
@@ -992,8 +994,8 @@ sh build.sh                                 # 构建（含产物文件核对）
   直接改 `LD`）；
   **诊断行本身也有一个接缝**：格式的唯一拼装处是 api 层的 `_api_note`（先清空
   `$API_ERRLOG` 再写恰好一行），驱动只把「这一次调用的事实」交给它，行仍由真实代码写——
-  `tests/signin.sh` 与 `tests/keepalive.sh` 的路线 A 就是这么做的（要「第 N 次调用返回什么」
-  这种序列时用它；`tests/signin.sh` 的替身还把响应头原文所在文件当第五个参数传进去，
+  `tests/_signin-common.sh` 与 `tests/keepalive.sh` 的路线 A 就是这么做的（要「第 N 次调用返回什么」
+  这种序列时用它；`tests/_signin-common.sh` 的替身还把响应头原文所在文件当第五个参数传进去，
   缺省那份是空的，于是默认「没给头」）；要连 api 层一起跑（状态码、响应头白名单、压平、
   耗时都是真实代码）就把 `CURL_BIN` 指向 `tests/harness.sh` 的 `t_curl_stub` 生成的 curl 替身，
   控制文件是 `curl_code` / `curl_body` / `curl_hdr` / `curl_stderr` / `curl_rc`（**路线 B**）；
@@ -1001,14 +1003,16 @@ sh build.sh                                 # 构建（含产物文件核对）
   `hdr={…}` 那一段或空）——它们仍然不自己拼 `hdr=`；
   `refresh_token` 的**第三个参数是触发原因**（`签到查询失败` / `签到提交失败` / `保活` /
   `手动命令`），日志里那一行因此能说明是谁触发的；要给真实 `refresh_token` 写下的那几行
-  断言时，`tests/signin.sh` 的 `SG_REFRESH_MODE=real` 让前导不再顶替它（`tests/commands.sh`
+  断言时，`tests/_signin-common.sh` 的 `SG_REFRESH_MODE=real` 让前导不再顶替它——那个变量是
+  在前导**写入时**展开的，所以用例在调 `sg_run` 之前把它设进自己的 shell 即可（用例函数里设置：
+  `tests/signin-refresh.sh`、`tests/signin-remind.sh`；`tests/commands.sh`
   的 `cd_write_env real`、`tests/keepalive.sh` 本来就用真实实现）；
   `tests/poll.sh` 的端到端那条用例把路线 A/B 叠起来用：真实入口主循环 + 真实 api 层 +
   一个「按调用序号喂事实」的 curl 分发器，另加三处按需注入
   （`POLL_LD_DIR` / `POLL_CURL_BIN` / `POLL_SU_MODE`，与 poll 既有用例共用同一个启动函数；
   **每条用例开工时都复位成空**，否则端到端那条设下的注入会漏给后面每一条用例）；
   任务快照（`.fafu_task_snap`）的读写契约在 `tests/state.sh`，「变了才记一行 / 跨日重新算新任务」
-  在 `tests/signin.sh` 与 `tests/poll.sh` 的端到端用例里验；
+  在 `tests/signin-query.sh` 与 `tests/poll.sh` 的端到端用例里验；
   要看**真实发出的命令行**时，把 `MOCK_WGET_DIR` 指向一个控制目录，替身 busybox 会逐个记录
   每次 wget 的参数并按 `help` / `body` / `rc` / `stderr` / `hdr` 五个文件应答
   （`hdr` 是 `-S` 形状的服务端响应：首行状态行 + 若干缩进两格的头行，整段写到 stderr，
@@ -1061,19 +1065,21 @@ sh build.sh                                 # 构建（含产物文件核对）
   ③ `su` 是 busybox 的**内建 applet**，PATH 上的同名文件拦不到它——探测改成显式走 `SU_BIN`；
   ④ 工作目录路径里带空格时，`$变量` 当命令名会因词分割执行失败——顶掉命令要用同名**函数**
   （`nt_send` / `http_post`），不要用「把变量指向函数名」的写法；
-- **被 shell 与断言咬过的两处写法**（都在 `tests/signin.sh` 里踩过，改代码/改断言时尽量避开）：
+- **被 shell 与断言咬过的两处写法**（改代码/改断言时尽量避开）：
   ① 驱动前导用**不带引号**的 heredoc 拼接时，`$( )` 与 `${ }` 会在**写入时**就被展开，
-  生成出来的脚本里只剩空串——不是报错，是静默变成另一段程序。要留给运行时展开就写 `\$`；
+  生成出来的脚本里只剩空串——不是报错，是静默变成另一段程序。要留给运行时展开就写 `\$`
+  （前导在 `tests/_signin-common.sh`，同一条口径在 `tests/keepalive.sh` 也用过）；
   ② 分层时**删掉的那个东西往往正是活性所在**：签到提交的成败判据原先写作
   `[ $rc -eq 0 ] && ! echo "$resp" | grep -q '"timestamp"'`，按注释应当「没有 timestamp 才算成功」，
   但实测该式在 busybox 1.35 上把两档判反了（无 timestamp 的响应被判成失败、带 timestamp 的
-  被判成成功）。这类判据一旦拆进新函数，就会被新写下的断言原样固化下来——所以断言必须与
+  被判成成功）。**正解落在 `lib/signin.sh` 的 `_sg_submit_ok`**（改用 `case`），
+  这类判据一旦拆进新函数，就会被新写下的断言原样固化下来——所以断言必须与
   **注释声明的语义**对齐，而不是与旧实现的输出对齐；否则旧 bug 会跟着注释一起被"验证通过"。
 - 驱动脚本里的路径**一律用相对路径**（`cd` 进临时目录再以 `./x.sh` 运行）：
   Windows 的 `D:/...` 在 sh 里既没有根目录也会被当成分隔符，喂进被测代码会得到 `/mod/...`
   这类残缺路径（踩过）；被测代码在设备上用的仍是绝对路径，这里只是替身环境；
   驱动本体需要的绝对路径（如 `SU_BIN`、`T_WORK`）由前导写好——**别在驱动里读 `$PWD`**；
-- 每个驱动一份独立的工作目录（`tests/.work/notify-<驱动名>`）：同一条用例里的多个驱动
+- 每个驱动一份独立的工作目录（`tests/.work-run/notify.sh/notify-<驱动名>/`）：同一条用例里的多个驱动
   共用目录时，后一个驱动会覆盖前一个留下的产物，断言会静默空转（踩过）；
 - 按关键字筛选用例时，含非 ASCII 的关键字在 Windows 控制台上会因代码页被改写，
   优先用 `^api` / `^commands` / `^device` / `^headers` / `^keepalive` / `^layer` / `^notify` /
@@ -1173,7 +1179,7 @@ sh build.sh                                 # 构建（含产物文件核对）
   已取得任务就不发）；
 - `tests/signin-*.sh`（四份实现各自注册用例，用例名前缀 `signin-<片> · `；共用前导在
   `_signin-common.sh`，`tests/signin.sh` 只是把四份 source 进来的兼容入口、本身不含用例与实现
-  ——它是全量最长的一层，拆开是为了并行的关键路径不被它单独占满）：签到决策的四条口径——**三档返回码**（0 已解决 / 1 可重试 / 2 任务异常）、
+  ——这四份加起来是全量最长的一层（212 项），拆开是为了并行的关键路径不被它单独占满）：签到决策的四条口径——**三档返回码**（0 已解决 / 1 可重试 / 2 任务异常）、
   **四个判定分支**（不在时段 / 已签到 / 已请假 / 窗口内提交）、**窗口边界**（21:29 / 21:30 /
   22:30 / 22:59 / 23:00 逐点各比一侧，基准是毫秒时刻而不是「几点几分」）、
   **提交并记录**（主窗口与补签的区分、成功才落记录与通知、失败当日仅首次通知）；

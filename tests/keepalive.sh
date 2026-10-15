@@ -16,6 +16,11 @@
 
 KA_WORK="$T_WORK_ROOT/keepalive"
 
+# 设备命令替身的生成器（am / input / wm / dumpsys）与 device / notify 共用一份。
+# source 放文件级而不是用例里：它与 DV_WORK 的取值时机无关，放用例里会让人以为有时序要求
+# （tests/device.sh 也是文件级）。
+. "$T_ROOT/tests/_device-tools.sh"
+
 # 夹具日期：拨钟的墙钟与 %s 的 EPOCH 都从这一天出发（同 tests/signin.sh）
 KA_DATE='2026-10-01'
 KA_EPOCH=0
@@ -60,9 +65,6 @@ ka_setup() {
   mkdir -p "$KA_WORK/mod" "$KA_WORK/bin" "$KA_WORK/dev" "$KA_WORK/ctl" "$KA_WORK/ld"
   t_bb_wrap "$KA_WORK/bin/bb" >/dev/null
   DV_WORK="$KA_WORK"
-  # 设备命令替身的生成器与 device / notify 共用一份（见 tests/_device-tools.sh）：
-  # 别指望「别的用例文件已经 source 过它」，并行时每个文件各自一个子进程
-  . "$T_ROOT/tests/_device-tools.sh"
   dv_tools
   : > "$KA_WORK/ld/token"      # 空的 localStorage 文件 = 应用里没有 token
   printf '0\n' > "$KA_WORK/dev/rc"

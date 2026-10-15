@@ -221,8 +221,7 @@ sg_case_attempt_lines() {
   printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/curl_hdr"
   # 提交失败也会触发一次刷新（老 token 失效是常见档）：那一行同样要说明触发原因，
   # 故这一档让真实 refresh_token 跑起来（采样等待与 token 来源换成替身）。
-  SG_REFRESH_MODE=real
-  export SG_REFRESH_MODE
+  SG_REFRESH_MODE=real   # 前导写入时就展开它，故只要在本函数里设好即可
   sg_run_real attempt_fail <<'DRIVER'
 sleep() { :; }
 get_token() { printf 'NEWTOKEN'; }

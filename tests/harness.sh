@@ -205,11 +205,10 @@ _t_banner() {
 _t_summary() {
   echo ""
   echo "=============================================="
-  if [ "$T_SKIP" -gt 0 ]; then
-    echo " 结果：$T_PASS 通过 / $T_FAIL 失败（共 $((T_PASS + T_FAIL)) 项）；跳过 $T_SKIP 项（本机缺工具）"
-  else
-    echo " 结果：$T_PASS 通过 / $T_FAIL 失败（共 $((T_PASS + T_FAIL)) 项）"
-  fi
+  # 行的拼装收在 tools/lib.sh：总入口按同一份格式解析它，两处各写一份必然漂移。
+  # summary_line 不带换行，故下面那行 echo 兼作行尾。
+  summary_line "$T_PASS" "$T_FAIL" "$T_SKIP"
+  echo ""
   echo "=============================================="
   [ "$T_FAIL" -eq 0 ]
 }

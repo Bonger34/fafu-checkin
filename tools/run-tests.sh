@@ -141,24 +141,32 @@ run_batch() {
   for s in $BATCH; do
     d="$WORK/$s"
     cat "$d.out"
-    # 计数只从子进程自己的「结果」行里取（每个用例文件一个子进程，计数各报各的），
-    # 用与打印端同一套 sed 取法。**不能按空格切字段再滤数字**：那一行的第 2 个字段是
-    # 「结果：74」这种「汉字+数字」，滤完会把「通过数」和后面的「总数」粘成一个数。
-    RES=$(grep '^ 结果：' "$d.out" | head -n1)
+    # 计数只从子进程自己的「结果」行里取（每个用例文件一个子进程，计数各报各的）。
+    # 挑行与解析都在 tools/lib.sh（写的一侧是 tests/harness.sh），这里不自己写 sed、
+    # 也不自己认标签与前导空格。
+    RES=$(summary_pick < "$d.out")
     if [ -z "$RES" ]; then
       # 子进程没跑到汇总行（崩了 / 被打断）：不能当成「0 通过 0 失败」，那会被读成通过
       echo "  [FAIL] $s 没产出结果行——这个用例文件没有跑完" >&2
       FAILED=1
       continue
     fi
-    S_PASS=$(printf '%s' "$RES" | sed -n 's/^ 结果：\([0-9][0-9]*\) 通过.*/\1/p')
-    S_FAIL=$(printf '%s' "$RES" | sed -n 's/.*通过 \/ \([0-9][0-9]*\) 失败.*/\1/p')
-    S_SKIP=$(printf '%s' "$RES" | sed -n 's/.*跳过 \([0-9][0-9]*\) 项.*/\1/p')
-    # 兜底：汇总行没解析出「失败数」时，看输出里到底有没有 [FAIL] 行。有就说明
-    # 这个用例文件确实有失败——不能因为汇总格式变了就把失败静默记成 0。
-    if [ -z "$S_FAIL" ] && grep -q '\[FAIL\]' "$d.out"; then
-      echo "  [FAIL] $s 的结果行没解析出失败数，但输出里有 [FAIL] 行" >&2
-      FAILED=1
+    IFS='|' read -r S_PASS S_FAIL S_SKIP _T_TOTAL <<EOF
+$(summary_parse "$RES")
+EOF
+    # 兜底：两个计数里任一个没解析出来（汇总行格式变了），就去看输出里到底有没有
+    # [PASS] / [FAIL] 行。有就说明这个用例文件确实跑了、只是没解析出来——不能因为
+    # 格式变了就把它静默记成 0（那是「失败记成通过」与「通过记成失败」两个方向都会错）。
+    # 换行写法（而不是 `if [ … ] && grep …`）是为了让「通过数丢了」这条也走同一处兜底。
+    if [ -z "$S_PASS" ] || [ -z "$S_FAIL" ]; then
+      if grep -q '\[FAIL\]' "$d.out"; then
+        echo "  [FAIL] $s 的结果行没解析出失败数，但输出里有 [FAIL] 行" >&2
+        FAILED=1
+      fi
+      if grep -q '\[PASS\]' "$d.out"; then
+        echo "  [FAIL] $s 的结果行没解析出通过数，但输出里有 [PASS] 行" >&2
+        FAILED=1
+      fi
     fi
     ALL_PASS=$((ALL_PASS + ${S_PASS:-0}))
     ALL_FAIL=$((ALL_FAIL + ${S_FAIL:-0}))
@@ -176,14 +184,10 @@ done
 [ -n "$BATCH" ] && run_batch
 [ "$ALL_FAIL" -eq 0 ] || FAILED=1
 
+# 总入口的退出码：全部用例通过才 0，便于 CI 与 pre-commit 直接判定
+# 合计行用与每个用例文件同一份格式（只是标签是「合计」）：两侧各写一份必然漂移
 echo ""
 echo "=============================================="
-if [ "$ALL_SKIP" -gt 0 ]; then
-  echo " 合计：$ALL_PASS 通过 / $ALL_FAIL 失败（共 $((ALL_PASS + ALL_FAIL)) 项）；跳过 $ALL_SKIP 项（本机缺工具）"
-else
-  echo " 合计：$ALL_PASS 通过 / $ALL_FAIL 失败（共 $((ALL_PASS + ALL_FAIL)) 项）"
-fi
+summary_line -l 合计 "$ALL_PASS" "$ALL_FAIL" "$ALL_SKIP"; echo ""
 echo "=============================================="
-
-# 总入口的退出码：全部用例通过才 0，便于 CI 与 pre-commit 直接判定
 exit $FAILED

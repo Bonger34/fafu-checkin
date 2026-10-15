@@ -16,7 +16,13 @@
 # 事件名 → 期待的输出（tag 后缀）。「tag 格式与按日滚动不变」就钉在这张表上。
 NT_TAGS="sign:sign supp:supp seen:sign leave:leave failsign:failsign failtask:failtask nosign:t2200 late:t2230 miss:miss nopub:nopub warn:warn test:test"
 
-# 工作目录与环境：每个驱动一份干净的，目录名带上驱动名，跑完留在 tests/.work/notify-<驱动>/。
+# 设备命令替身的生成器（am / input / wm / dumpsys）与 device / keepalive 共用一份。
+# source 放文件级而不是用例里：它与 DV_WORK 的取值时机无关，放用例里会让人以为有时序要求
+# （tests/device.sh 也是文件级）。
+. "$T_ROOT/tests/_device-tools.sh"
+
+# 工作目录与环境：每个驱动一份干净的，目录名带上驱动名（并行时留在一份按用例文件分的
+# 工作根下：tests/.work-run/notify.sh/notify-<驱动>/）。
 # 必须按驱动分开：同一条用例里的多个驱动共用一个目录时，后一个会覆盖前一个留下的记录，
 # 断言静默变成空转。
 NT_WORK=""
@@ -464,9 +470,6 @@ nt_case_warn_order() {
   # 前导里的 PATH='./bin:...' 正好命中 dv_tools 写的那些包装器。
   # DV_WORK 必须在 nt_setup 之后取——那之前 NT_WORK 还是上一条用例的目录
   DV_WORK="$NT_WORK"
-  # 设备命令替身的生成器与 device / keepalive 共用一份（见 tests/_device-tools.sh）：
-  # 别指望「别的用例文件已经 source 过它」，并行时每个文件各自一个子进程
-  . "$T_ROOT/tests/_device-tools.sh"
   dv_tools
   nt_run order <<DRIVER
 # 通知与设备命令落进**同一条时间线**：跨进程的先后只有共享一个记录文件才可比

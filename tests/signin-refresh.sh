@@ -162,8 +162,7 @@ DRIVER
   sg_body 1290 0 > "$SG_WORK/ctl/body.page"
   printf 'page:1\npage:0\nsign:0\n' > "$SG_WORK/ctl/api.seq"
   printf 'mWakefulness=Awake\n' > "$SG_WORK/ctl/power.txt"
-  SG_REFRESH_MODE=real
-  export SG_REFRESH_MODE
+  SG_REFRESH_MODE=real   # 前导写入时就展开它，故只要在本函数里设好即可
   sg_run refetch_reason <<'DRIVER'
 printf '0' > ctl/tok.n
 sleep() { :; }        # 采样等待不真等（次数与时序不是这条断言要考的东西）
