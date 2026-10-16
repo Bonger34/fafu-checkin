@@ -146,6 +146,15 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
         </div>
         <input type="text" id="f_cooldown" inputmode="numeric" maxlength="6" placeholder="秒" aria-label="通知冷却（秒）">
       </div>
+
+      <div class="row">
+        <div class="txt">
+          <b>调试日志</b>
+          <small>打开后把分钟级重复的行（每次轮询的时段判定、每次提交的完整现场等）也写进日志，排障时用；关着时日志只留结果与原因。两个档位的文案完全一样，区别只是写不写。</small>
+          <small class="eff" id="h_debug">当前生效值：读取中…</small>
+        </div>
+        <input class="sw" type="checkbox" id="f_debug" aria-label="调试日志">
+      </div>
     </section>
 
     <section class="card">
@@ -164,6 +173,7 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
         <dt>今日保活</dt><dd id="s_ka">—</dd>
         <dt>最近保活</dt><dd id="s_kalast">—</dd>
         <dt>登录状态</dt><dd id="s_token">—</dd>
+        <dt>调试日志</dt><dd id="s_debug">—</dd>
         <dt>模块版本</dt><dd id="s_ver">—</dd>
       </dl>
       <h2>最近日志</h2>
@@ -179,17 +189,18 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
 
   var MODDIR = '/data/adb/modules/fafu-checkin';
   var ENTRY  = MODDIR + '/fafu_checkin.sh';
-  /* 六项配置：写入用登记表里的键名，读取用 webstate 给的小写字段名（同源，故页面不自带默认值）。 */
+  /* 七项配置：写入用登记表里的键名，读取用 webstate 给的小写字段名（同源，故页面不自带默认值）。 */
   var CFG = [
     { key: 'KEEPALIVE',       field: 'keepalive' },
     { key: 'POLL_START',      field: 'poll_start' },
     { key: 'POLL_END',        field: 'poll_end' },
     { key: 'NOTIFY',          field: 'notify' },
     { key: 'NOTIFY_LEAD',     field: 'notify_lead',     min: 0, max: 600 },
-    { key: 'NOTIFY_COOLDOWN', field: 'notify_cooldown', min: 0, max: 86400 }
+    { key: 'NOTIFY_COOLDOWN', field: 'notify_cooldown', min: 0, max: 86400 },
+    { key: 'DEBUG',           field: 'debug' }
   ];
 
-  var eff = {};   /* 上一次从 webstate 读到的六项生效值（空串 = 脚本没给这一项） */
+  var eff = {};   /* 上一次从 webstate 读到的七项生效值（空串 = 脚本没给这一项） */
   var st  = {};   /* webstate 的完整读数 */
   var seq = 0;    /* 回调名后缀：每次调用取一个，避免同名覆盖 */
 
@@ -272,12 +283,14 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
 
   function effSummary() {
     return '保活 ' + onOff(eff.KEEPALIVE) + '、轮询 ' + eff.POLL_START + '~' + eff.POLL_END +
-      '、通知 ' + onOff(eff.NOTIFY) + '、预警 ' + eff.NOTIFY_LEAD + ' 秒、冷却 ' + eff.NOTIFY_COOLDOWN + ' 秒';
+      '、通知 ' + onOff(eff.NOTIFY) + '、预警 ' + eff.NOTIFY_LEAD + ' 秒、冷却 ' + eff.NOTIFY_COOLDOWN +
+      ' 秒、调试日志 ' + onOff(eff.DEBUG);
   }
 
   function renderForm() {
     el('f_keepalive').checked = eff.KEEPALIVE === '1';
     el('f_notify').checked = eff.NOTIFY === '1';
+    el('f_debug').checked = eff.DEBUG === '1';
     el('f_poll_start').value = eff.POLL_START;
     el('f_poll_end').value = eff.POLL_END;
     el('f_lead').value = eff.NOTIFY_LEAD;
@@ -287,6 +300,7 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
     setText('h_notify', hint(eff.NOTIFY === '' ? '' : onOff(eff.NOTIFY)));
     setText('h_lead', hint(eff.NOTIFY_LEAD === '' ? '' : eff.NOTIFY_LEAD + ' 秒'));
     setText('h_cooldown', hint(eff.NOTIFY_COOLDOWN === '' ? '' : eff.NOTIFY_COOLDOWN + ' 秒'));
+    setText('h_debug', hint(eff.DEBUG === '' ? '' : onOff(eff.DEBUG)));
   }
 
   function renderState() {
@@ -302,6 +316,7 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
       ? (st.ka_last + ' · ' + (st.ka_last_result === 'ok' ? '成功' : (st.ka_last_result === 'fail' ? '失败' : '结果未知')))
       : '还没有记录');
     setText('s_token', { ok: '✅ 有效', fail: '⚠️ 已失效或接口不通', none: '未登录（没有可用凭据）' }[st.token_state] || '未知');
+    setText('s_debug', st.debug === '1' ? '🐞 已开启' : (st.debug === '0' ? '已关闭' : '未知'));
     setText('s_ver', st.version || '未知');
     setText('s_log', (st.log && st.log.length) ? st.log.join('\n') : '暂无日志');
   }
@@ -342,7 +357,8 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
       POLL_END: el('f_poll_end').value.trim(),
       NOTIFY: el('f_notify').checked ? '1' : '0',
       NOTIFY_LEAD: el('f_lead').value.trim(),
-      NOTIFY_COOLDOWN: el('f_cooldown').value.trim()
+      NOTIFY_COOLDOWN: el('f_cooldown').value.trim(),
+      DEBUG: el('f_debug').checked ? '1' : '0'
     };
   }
 

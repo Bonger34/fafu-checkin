@@ -11,6 +11,7 @@ CFG_FILE="$MODDIR/fafu-checkin.conf"
 
 # ---- 键登记表（键名、默认值、写入顺序的唯一真源） ----
 # 一行一个键：「键名<空格>默认值」。不在表里的键一律拒绝，不引入自由文本配置项。
+# DEBUG 是日志档位开关：0 = 默认档（只留结果与原因），1 = 调试档（分钟级重复的行也写回来）。
 _cfg_specs() {
   cat <<'SPECS'
 KEEPALIVE 1
@@ -21,6 +22,7 @@ NOTIFY_LEAD 5
 NOTIFY_COOLDOWN 300
 KA_START 07:00
 KA_END 21:25
+DEBUG 0
 SPECS
 }
 
@@ -80,6 +82,9 @@ cfg_notify_lead()     { cfg_effective NOTIFY_LEAD; }
 cfg_notify_cooldown() { cfg_effective NOTIFY_COOLDOWN; }
 cfg_ka_start()        { cfg_effective KA_START; }
 cfg_ka_end()          { cfg_effective KA_END; }
+# 日志档位（0 = 默认档，1 = 调试档）。base 层的写日志出口是本层之前的层，不能调这个
+# 读数函数（层序守卫拦反向引用），故它每次直接读与键同名的生效值变量；这个函数给更后的层用。
+cfg_debug()           { cfg_effective DEBUG; }
 
 # ---- 校验（返回值即结论；校验在写入之前发生） ----
 
@@ -110,7 +115,7 @@ cfg_switch_ok() { # $1=值
 # 单个键值是否可接受（起止类的先后由 cfg_write 与 cfg_load 另行判定）
 cfg_valid() { # $1=键 $2=值
   case "$1" in
-    KEEPALIVE|NOTIFY)                    cfg_switch_ok "$2" ;;
+    KEEPALIVE|NOTIFY|DEBUG)              cfg_switch_ok "$2" ;;
     NOTIFY_LEAD)                         cfg_int_ok "$2" 0 600 ;;
     NOTIFY_COOLDOWN)                     cfg_int_ok "$2" 0 86400 ;;
     POLL_START|POLL_END|KA_START|KA_END) cfg_time_ok "$2" ;;
@@ -126,7 +131,7 @@ cfg_reason() { # $1=键 $2=值
   fi
   cfg_valid "$1" "$2" && return 0
   case "$1" in
-    KEEPALIVE|NOTIFY) printf '只能填 0 或 1（当前 %s）' "$2" ;;
+    KEEPALIVE|NOTIFY|DEBUG) printf '只能填 0 或 1（当前 %s）' "$2" ;;
     NOTIFY_LEAD)      printf '只能填 0–600 的整数秒（当前 %s）' "$2" ;;
     NOTIFY_COOLDOWN)  printf '只能填 0–86400 的整数秒（当前 %s）' "$2" ;;
     *)                printf '只能填 HH:MM 形式的时刻，范围 00:00–23:59（当前 %s）' "$2" ;;

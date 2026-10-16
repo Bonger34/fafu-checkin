@@ -13,9 +13,12 @@
 SK_WORK="$T_WORK_ROOT/skeleton"
 
 # 每个用例自备环境：mock busybox 包装（拨钟与替身） + 一个空的模块目录
+# 夹具配置文件与入口一样由配置层读：写文件 → cfg_load 读成生效值。这里打开调试档，
+# 因为本套件断言的是**完整**的日志行为（少了哪几行是 poll 套件那条档位对照要考的）。
 sk_setup() {
   rm -rf "$SK_WORK"
   mkdir -p "$SK_WORK/mod"
+  printf 'DEBUG=1\n' > "$SK_WORK/mod/fafu-checkin.conf"
   t_bb_wrap "$SK_WORK/bin/bb" >/dev/null
 }
 
@@ -30,6 +33,9 @@ MODDIR='$SK_WORK/mod'
 BB_OVERRIDE='$SK_WORK/bin/bb'
 export MODDIR BB_OVERRIDE
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
+# 与入口同一时序：各层就位之后再加载配置。档位等生效值因此来自夹具文件，
+# 而不是加载时那个默认值——写成常量会让「打开调试档」在断言里永远不生效。
+cfg_load
 ENV
 }
 
@@ -246,6 +252,83 @@ DRIVER
   esac
 }
 
+# ============================================================
+# base 层：统一写日志出口的两档语义
+#
+# 出口是 #24 建的、#25/#26 直接用的地基，故在这一票里把它自己的契约钉住：
+#   log     —— 留在默认档的行：**两种档位都写**（「留在默认档」= 不加任何判定）；
+#   logd    —— 降到调试档的行：只有调试档写，文案与默认档同形（不加级别前缀）；
+#   log_once—— 同一「类别 + 原因键」当日只留首次，重复轮次降级到调试档；
+#              原因变了、或换了类别，各留一条；人主动按的子命令（FAFU_MANUAL=1）一律算首次；
+#              跨日重新计数。
+# 档位切换只走配置文件 + cfg_load（与入口同一条路，没有第二条生效路径）。
+# 行内容一率带 ASCII 标记（[m…]）供计数：本机 grep 匹配中文不稳，中文文案另用
+# 内建匹配的 t_has 断言（那条路不看多字节编码）。
+# ============================================================
+
+sk_case_log_tiers() {
+  local f log
+  sk_setup
+  sk_write_env
+  sk_run tiers <<'DRIVER'
+{
+  # 换档位 = 改配置文件 + cfg_load（入口走的就是这一条）
+  tier() { printf 'DEBUG=%s\n' "$1" > "$T_WORK/mod/fafu-checkin.conf"; cfg_load; }
+
+  # ---- 默认档 ----
+  tier 0
+  log  "结论行 [m_log]"
+  logd "细节行 [m_dbg]"
+  log_once c1 s1 "失败行 [m_once_first]"
+  log_once c1 s1 "失败行 [m_once_repeat]"
+  log_once c1 s2 "失败行 [m_once_reason2]"
+  log_once c2 s1 "失败行 [m_once_cat2]"
+  FAFU_MANUAL=1
+  log_once c1 s1 "失败行 [m_once_manual]"
+  FAFU_MANUAL=0
+  printf 'off_lines=%s\n' "$(grep -c . "$LOG")"
+
+  # ---- 跨日：同一个类别 + 原因键在新的一天又算首次 ----
+  printf '2026-10-02 21:30\n' > ./nextday
+  MOCK_DATE_CTL=./nextday
+  export MOCK_DATE_CTL
+  log_once c1 s1 "失败行 [m_once_nextday]"
+
+  # ---- 调试档：被降级的那几行写回来（重复轮次也写）----
+  tier 1
+  log  "结论行 [m2_log]"
+  logd "细节行 [m2_dbg]"
+  log_once c3 s3 "失败行 [m2_once_first]"
+  log_once c3 s3 "失败行 [m2_once_repeat]"
+  printf 'on_lines=%s\n' "$(grep -c . "$LOG")"
+} > "$T_WORK/tiers.txt"
+DRIVER
+  f="$SK_WORK/tiers.txt"
+  log="$SK_WORK/mod/fafu_checkin.log"
+
+  # 默认档：结论行 + 去重的四个首次；细节行与重复轮次都不写
+  t_eq "默认档：恰好多出这五行（结论行 + 四种首次）" "$(sk_val "$f" off_lines)" "5"
+  t_eq "默认档：结论行照写（关掉调试不等于关掉结果）" "$(grep -c 'm_log' "$log")" "1"
+  t_eq "默认档：降到调试档的那一行不写" "$(grep -c 'm_dbg' "$log")" "0"
+  t_eq "默认档：同一类别与原因键的重复轮次不写" "$(grep -c 'm_once_repeat' "$log")" "0"
+  t_eq "默认档：首次照写" "$(grep -c 'm_once_first' "$log")" "1"
+  t_eq "默认档：同样的失败原因变了再留一条" "$(grep -c 'm_once_reason2' "$log")" "1"
+  t_eq "默认档：两个不同的故障各留各自的首次" "$(grep -c 'm_once_cat2' "$log")" "1"
+  t_eq "默认档：人主动按的子命令不受当日去重限制" "$(grep -c 'm_once_manual' "$log")" "1"
+  t_eq "默认档：跨日后同一个失败又算首次" "$(grep -c 'm_once_nextday' "$log")" "1"
+
+  # 调试档：默认档那两行照写，另外把细节行与重复轮次写回来（+4 行）
+  t_eq "调试档：默认档的行一行不少，另加细节行与重复轮次" "$(sk_val "$f" on_lines)" "10"
+  t_eq "调试档：细节行写回来" "$(grep -c 'm2_dbg' "$log")" "1"
+  t_eq "调试档：重复轮次也写回来" "$(grep -c 'm2_once_repeat' "$log")" "1"
+  t_eq "调试档：结论行照旧" "$(grep -c 'm2_log' "$log")" "1"
+  # 行格式不变：行首时间戳 + 文案，不加任何级别前缀或标记（只有时间戳是新的）
+  t_has_re "两档的行同形：行首时间戳，文案之后不加任何标记" "$log" \
+    '^\[[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\] .*\[m2_dbg\]$'
+  t_eq "降级行与默认档行共用同一个写日志出口（没有第二条路径）" \
+    "$(grep -c '^\[[0-9-]* [0-9:]*\] ' "$log")" "$(grep -c . "$log")"
+}
+
 sk_case_base_rotate() {
   local f
   sk_setup
@@ -306,6 +389,8 @@ sk_case_entry_dispatch() {
   t_has "status：从模块元数据读到版本" "$SK_WORK/status.out" "版本: v"
   t_has "status：默认开关为已启用" "$SK_WORK/status.out" "开关: 🟢 已启用"
   t_has "status：能生成动态描述" "$SK_WORK/status.out" "描述: 🟢 已启用"
+  t_has "status：显示调试日志档位（没有配置文件 = 默认档）" "$SK_WORK/status.out" \
+    "调试日志: 已关闭"
   if [ -f "$d/.fafu_checkin.pid" ]; then
     _t_fail "status 不该启动守护进程（出现了 PID 文件）"
   else
@@ -343,6 +428,46 @@ sk_case_entry_switch_file() {
   t_has "启用态：描述也显示已启用" "$SK_WORK/on.out" "描述: 🟢 已启用"
 }
 
+# 手改配置文件与在页面改效果一致：同一个入口、同一份文件，只改 DEBUG 那一行，
+# 两个可见面（status 与只读状态输出）交出的档位随之改变——档位在装配时读一次，
+# 与其余八个键同语义；非法值（写入口不会收的那个 2）退回默认档而不是静默打开。
+sk_case_entry_debug_tier() {
+  local d rc
+  sk_setup
+  d=$(sk_stage_module "$SK_WORK/entry4")
+
+  ( cd "$d" && BB_OVERRIDE="$SK_WORK/bin/bb" $(t_sh) "./fafu_checkin.sh" status ) \
+    > "$SK_WORK/debug_off.out" 2> "$SK_WORK/debug_off.err"
+  rc=$?
+  t_eq "默认档：status 正常退出" "$rc" 0
+  t_has "默认档：文件里没有 DEBUG 那一行时是「已关闭」" "$SK_WORK/debug_off.out" \
+    "调试日志: 已关闭"
+
+  printf 'DEBUG=1\n' > "$d/fafu-checkin.conf"
+  ( cd "$d" && BB_OVERRIDE="$SK_WORK/bin/bb" $(t_sh) "./fafu_checkin.sh" status ) \
+    > "$SK_WORK/debug_on.out" 2> "$SK_WORK/debug_on.err"
+  rc=$?
+  t_eq "调试档：status 正常退出" "$rc" 0
+  t_has "调试档：同一条命令报「已开启」" "$SK_WORK/debug_on.out" "调试日志: 🐞 已开启"
+
+  # 只读状态输出（页面读的那一条）与 status 同源：同一份文件，两个面必须说同一件事
+  ( cd "$d" && BB_OVERRIDE="$SK_WORK/bin/bb" $(t_sh) "./fafu_checkin.sh" webstate ) \
+    > "$SK_WORK/debug_webstate.out" 2> "$SK_WORK/debug_webstate.err"
+  t_eq "调试档：只读状态输出里的档位字段是 1" \
+    "$(sed -n 's/^debug=//p' "$SK_WORK/debug_webstate.out")" "1"
+
+  printf 'DEBUG=2\n' > "$d/fafu-checkin.conf"
+  ( cd "$d" && BB_OVERRIDE="$SK_WORK/bin/bb" $(t_sh) "./fafu_checkin.sh" status ) \
+    > "$SK_WORK/debug_bad.out" 2> "$SK_WORK/debug_bad.err"
+  rc=$?
+  t_eq "非法档位：status 照常退出 0（坏值不崩）" "$rc" 0
+  t_has "非法档位：退回默认档「已关闭」" "$SK_WORK/debug_bad.out" "调试日志: 已关闭"
+  ( cd "$d" && BB_OVERRIDE="$SK_WORK/bin/bb" $(t_sh) "./fafu_checkin.sh" webstate ) \
+    > "$SK_WORK/debug_bad_ws.out" 2> "$SK_WORK/debug_bad_ws.err"
+  t_eq "非法档位：只读状态输出里也退回 0" \
+    "$(sed -n 's/^debug=//p' "$SK_WORK/debug_bad_ws.out")" "0"
+}
+
 # ============================================================
 # 打包：清单、权限、产物校验
 # ============================================================
@@ -364,6 +489,24 @@ sk_package_static() {
   t_file "页面入口文件在源树里" "$page"
   # 结构断言三：页面文本不含任何外部 URL（判据只有 tools/lib.sh 里一份）
   t_eq "页面文本不含任何外部 URL" "$(ext_url_hits "$page")" ""
+
+  # 「调试日志」开关：控件在不在、是不是既有的开关形状、档位显示位与字段名对不对。
+  # 页面**不自带默认值**（档位一律取自 webstate 的 debug= 字段），故这里只钉控件与字段名，
+  # 值本身由 commands 套件在真入口上断言。
+  t_has "页面：高级区有调试日志开关" "$page" 'id="f_debug"'
+  t_has_re "页面：开关那一行是既有的开关形状（.sw + checkbox）" "$page" \
+    '<input class="sw" type="checkbox" id="f_debug"'
+  t_has "页面：那一行的标题与开关项同形" "$page" '<b>调试日志</b>'
+  t_has "页面：生效值回填位" "$page" 'id="h_debug"'
+  t_has "页面：运行状态区有档位显示位" "$page" 'id="s_debug"'
+  # 页面读的是 webstate 的小写字段名、写的是登记表里的键名；两张表不同源就会静默错位。
+  # 用正则而不是逐字：那一行是**对齐过的**（与上下几项同名同列），空白量不该被写死。
+  t_has_re "页面：登记表里 DEBUG 键对应 webstate 的 debug 字段" "$page" \
+    "key: 'DEBUG',[ ]+field: 'debug'"
+  # 控件接上了线才算数：开关的形状对了但保存不带它、或状态区不读它，都是「看着有、其实没接」
+  t_has "页面：保存时把档位一起提交（读的是那个开关）" "$page" "DEBUG: el('f_debug').checked"
+  t_has "页面：生效值回填读的是 webstate 来的那一项" "$page" "el('f_debug').checked = eff.DEBUG"
+  t_has "页面：运行状态区的档位读 webstate 的 debug 字段" "$page" "setText('s_debug', st.debug"
 }
 
 # 判据自证：ext_url_hits 必须真的会命中，否则「页面零命中」只是恒真的摆设。
@@ -502,8 +645,10 @@ sk_case_package() {
 
 t_case "skeleton · base · 键值读写与 JSON 单字段" sk_case_base_primitives
 t_case "skeleton · base · 时间源可拨钟" sk_case_base_clock
+t_case "skeleton · base · 写日志出口的两档语义" sk_case_log_tiers
 t_case "skeleton · base · 日志轮转" sk_case_base_rotate
 t_case "skeleton · 入口 · 缺层时明确失败" sk_case_entry_missing_layer
 t_case "skeleton · 入口 · 装配与命令分发" sk_case_entry_dispatch
 t_case "skeleton · 入口 · 开关文件往返（旧格式仍可读）" sk_case_entry_switch_file
+t_case "skeleton · 入口 · 调试档位：手改文件与两个可见面" sk_case_entry_debug_tier
 t_case "skeleton · 打包 · 产物含全部层文件与页面入口" sk_case_package

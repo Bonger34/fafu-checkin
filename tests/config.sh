@@ -182,13 +182,14 @@ cf_case_registry() {
   printf 'fn_notify_cooldown=%s\n' "$(cfg_notify_cooldown)"
   printf 'fn_ka_start=%s\n'        "$(cfg_ka_start)"
   printf 'fn_ka_end=%s\n'          "$(cfg_ka_end)"
+  printf 'fn_debug=%s\n'           "$(cfg_debug)"
 } > "$T_WORK/registry.txt"
 DRIVER
 
   d="$CF_WORK/registry.txt"
   t_eq "登记的键与顺序（写入顺序即此）" "$(cf_val "$d" keys)" \
-    "KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN KA_START KA_END "
-  t_eq "登记表共八个键" "$(cf_val "$d" nkeys)" "8"
+    "KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN KA_START KA_END DEBUG "
+  t_eq "登记表共九个键（新增调试日志开关）" "$(cf_val "$d" nkeys)" "9"
   t_eq "未登记的键：生效值为空" "$(cf_val "$d" unk)" "[]"
   t_eq "默认值：KEEPALIVE" "$(cf_val "$d" eff_KEEPALIVE)" "1"
   t_eq "默认值：轮询范围起" "$(cf_val "$d" eff_POLL_START)" "20:00"
@@ -198,7 +199,8 @@ DRIVER
   t_eq "默认值：通知冷却" "$(cf_val "$d" eff_NOTIFY_COOLDOWN)" "300"
   t_eq "默认值：保活时段起（原写死钟点搬家）" "$(cf_val "$d" eff_KA_START)" "07:00"
   t_eq "默认值：保活时段止（原写死钟点搬家）" "$(cf_val "$d" eff_KA_END)" "21:25"
-  for k in KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN KA_START KA_END; do
+  t_eq "默认值：调试日志开关默认关闭（0）" "$(cf_val "$d" eff_DEBUG)" "0"
+  for k in KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN KA_START KA_END DEBUG; do
     t_eq "读取函数 cfg_$(printf '%s' "$k" | tr 'A-Z' 'a-z') 与生效值一致" \
       "$(cf_val "$d" "fn_$(printf '%s' "$k" | tr 'A-Z' 'a-z')")" "$(cf_val "$d" "eff_$k")"
   done
@@ -231,6 +233,7 @@ POLL_END=22:15
 NOTIFY=0
 KA_START=09:00
 NOTIFY_LEAD=0
+DEBUG=1
 CONF
   cf_write_env
   cf_run load <<'DRIVER'
@@ -249,6 +252,9 @@ DRIVER
   t_eq "文件里写了什么就读回什么：通知冷却" "$(cf_val "$d" eff_NOTIFY_COOLDOWN)" "60"
   t_eq "文件里写了什么就读回什么：保活时段起" "$(cf_val "$d" eff_KA_START)" "09:00"
   t_eq "文件里写了什么就读回什么：保活时段止" "$(cf_val "$d" eff_KA_END)" "18:30"
+  # 手改配置文件与在页面改效果一致：写进文件的那一行就是入口（进而各层）读到的生效值，
+  # 没有第二条生效路径。
+  t_eq "文件里写了什么就读回什么：调试日志档位" "$(cf_val "$d" eff_DEBUG)" "1"
 
   # 反向：把文件删掉，同一批键必须回到登记表里的默认值
   rm -f "$CF_WORK/mod/fafu-checkin.conf"
@@ -267,6 +273,7 @@ DRIVER
   t_eq "没有配置文件：通知冷却取默认" "$(cf_val "$d" eff_NOTIFY_COOLDOWN)" "300"
   t_eq "没有配置文件：保活时段起取默认" "$(cf_val "$d" eff_KA_START)" "07:00"
   t_eq "没有配置文件：保活时段止取默认" "$(cf_val "$d" eff_KA_END)" "21:25"
+  t_eq "没有配置文件：调试日志取默认（关闭）" "$(cf_val "$d" eff_DEBUG)" "0"
 }
 
 # ============================================================
@@ -288,6 +295,7 @@ NOTIFY_LEAD=abc
 KA_START=23:00
 KA_END=01:00
 NOPE=1
+DEBUG=2
 CONF
   cf_write_env
   cf_run broken <<'DRIVER'
@@ -303,10 +311,12 @@ DRIVER
   t_eq "坏文件：非法开关退回默认" "$(cf_val "$d" eff_KEEPALIVE)" "1"
   t_eq "坏文件：非法时刻退回默认" "$(cf_val "$d" eff_POLL_START)" "20:00"
   t_eq "坏文件：非法整数退回默认" "$(cf_val "$d" eff_NOTIFY_LEAD)" "5"
+  # 手改出来的非法档位（写入口不会收 2）：退回默认 = 默认档，不静默把调试日志打开
+  t_eq "坏文件：非法档位退回默认（关闭）" "$(cf_val "$d" eff_DEBUG)" "0"
   t_eq "坏文件：未受影响的键保留文件里的值" "$(cf_val "$d" eff_POLL_END)" "22:15"
   t_eq "坏文件：起止颠倒整对退回默认（起）" "$(cf_val "$d" eff_KA_START)" "07:00"
   t_eq "坏文件：起止颠倒整对退回默认（止）" "$(cf_val "$d" eff_KA_END)" "21:25"
-  t_eq "坏文件：表外的键不进入读数（键数不变）" "$(cf_val "$d" nkeys)" "8"
+  t_eq "坏文件：表外的键不进入读数（键数不变）" "$(cf_val "$d" nkeys)" "9"
   t_eq "坏文件：静默退回默认值（没有额外输出）" "$(cf_bytes "$CF_WORK/broken.err")" "0"
 }
 
@@ -325,6 +335,7 @@ cf_case_write_ok() {
 {
   if cfg_write KEEPALIVE=0 POLL_START=06:30 POLL_END=22:15 NOTIFY=0 \
                NOTIFY_LEAD=0 NOTIFY_COOLDOWN=60 KA_START=09:00 KA_END=18:30 \
+               DEBUG=1 \
                > "$T_WORK/echo.txt" 2> "$T_WORK/echo.err"; then rc=0; else rc=1; fi
   printf 'rc=%s\n' "$rc"
   printf 'file=%s\n' "$(cat "$MODDIR/fafu-checkin.conf" | tr '\n' '|')"
@@ -334,9 +345,15 @@ cf_case_write_ok() {
   # 回读生效值：不重新加载也必须是刚写进去的值
   printf 'eff_ka_end=%s\n' "$(cfg_effective KA_END)"
   printf 'eff_notify=%s\n' "$(cfg_effective NOTIFY)"
+  printf 'eff_debug=%s\n'  "$(cfg_effective DEBUG)"
   # 重新加载一次（模拟进程重启）：生效值仍来自文件
   cfg_load
   printf 'reload=%s\n' "$(cfg_effective POLL_START)"
+  printf 'reload_debug=%s\n' "$(cfg_effective DEBUG)"
+  # 档位往回写一次（页面「关掉调试」走的就是这一跳）：生效值与落盘都要跟着回 0
+  cfg_write DEBUG=0 > /dev/null
+  printf 'off_eff=%s\n'  "$(cfg_effective DEBUG)"
+  printf 'off_file=%s\n' "$(grep -m1 '^DEBUG=' "$MODDIR/fafu-checkin.conf" | cut -d= -f2)"
   printf 'tmpleft=%s\n' "$(ls "$MODDIR" | grep -c '\.tmp$')"
 } > "$T_WORK/write.txt"
 DRIVER
@@ -344,16 +361,20 @@ DRIVER
   d="$CF_WORK/write.txt"
   t_eq "写入合法值：返回 0" "$(cf_val "$d" rc)" "0"
   t_eq "写入合法值：整份重写、按登记顺序" "$(cf_val "$d" file)" \
-    "KEEPALIVE=0|POLL_START=06:30|POLL_END=22:15|NOTIFY=0|NOTIFY_LEAD=0|NOTIFY_COOLDOWN=60|KA_START=09:00|KA_END=18:30|"
-  t_eq "写入合法值：文件恰好八行" "$(cf_val "$d" lines)" "8"
+    "KEEPALIVE=0|POLL_START=06:30|POLL_END=22:15|NOTIFY=0|NOTIFY_LEAD=0|NOTIFY_COOLDOWN=60|KA_START=09:00|KA_END=18:30|DEBUG=1|"
+  t_eq "写入合法值：文件恰好九行" "$(cf_val "$d" lines)" "9"
   t_eq "写入合法值：不保留表外的键" "$(cf_val "$d" nope)" "0"
   t_eq "写入合法值：不保留手写注释" "$(cf_val "$d" comment)" "0"
   t_eq "写入合法值：回读生效值（末键）" "$(cf_val "$d" eff_ka_end)" "18:30"
   t_eq "写入合法值：回读生效值（开关）" "$(cf_val "$d" eff_notify)" "0"
+  t_eq "写入合法值：回读生效值（调试日志）" "$(cf_val "$d" eff_debug)" "1"
   t_eq "写入合法值：重新加载后仍读回文件里的值" "$(cf_val "$d" reload)" "06:30"
+  t_eq "写入合法值：重新加载后档位仍是文件里的 1" "$(cf_val "$d" reload_debug)" "1"
+  t_eq "写入档位 0：生效值跟着回默认档" "$(cf_val "$d" off_eff)" "0"
+  t_eq "写入档位 0：落盘也是 0" "$(cf_val "$d" off_file)" "0"
   t_eq "写入合法值：不留临时文件" "$(cf_val "$d" tmpleft)" "0"
   # 回显给调用方（配置页据此确认值真的进去了）
-  t_eq "写入合法值：回显八行键=值" "$(grep -c . "$CF_WORK/echo.txt")" "8"
+  t_eq "写入合法值：回显九行键=值" "$(grep -c . "$CF_WORK/echo.txt")" "9"
   t_has "写入合法值：回显里带上刚写的值" "$CF_WORK/echo.txt" "KA_END=18:30"
   t_eq "写入合法值：没有报错输出" "$(cf_bytes "$CF_WORK/echo.err")" "0"
 }
@@ -375,6 +396,7 @@ NOTIFY_LEAD=0
 NOTIFY_COOLDOWN=60
 KA_START=09:00
 KA_END=18:30
+DEBUG=1
 CONF
   before=$(cat "$d/fafu-checkin.conf")
   cf_write_env
@@ -390,6 +412,7 @@ CONF
   }
   bad badtime  POLL_START=25:00
   bad badswitch KEEPALIVE=2
+  bad baddebug  DEBUG=2
   bad badint   NOTIFY_LEAD=601
   bad unknown  NOPE=1
   bad nosep    POLL_START
@@ -397,6 +420,7 @@ CONF
   printf 'eff_poll=%s\n' "$(cfg_effective POLL_START)"
   printf 'eff_ka=%s\n'   "$(cfg_effective KEEPALIVE)"
   printf 'eff_lead=%s\n' "$(cfg_effective NOTIFY_LEAD)"
+  printf 'eff_debug=%s\n' "$(cfg_effective DEBUG)"
   printf 'tmpleft=%s\n'  "$(ls "$MODDIR" | grep -c '\.tmp$')"
   # 跨午夜的起止组合：单看每个值都合法，组合起来必须被拒
   bad midnight POLL_START=23:00 POLL_END=01:00
@@ -415,16 +439,19 @@ CONF
 DRIVER
 
   d="$CF_WORK/reject.txt"
-  for k in badtime badswitch badint unknown nosep noargs midnight equal past_end; do
+  for k in badtime badswitch baddebug badint unknown nosep noargs midnight equal past_end; do
     t_eq "非法写入：$k 返回非 0" "$(cf_val "$d" "${k}_rc")" "1"
   done
   t_ne "非法写入：时刻不合规给出可读原因" "$(cf_val "$d" badtime_why)" ""
   t_has "非法写入：原因里点明键名" "$d" "POLL_START"
   t_has "非法写入：原因里带上被拒的值" "$d" "25:00"
+  # 档位是开关项：只认 0/1，2 被拒且原因说的是接受范围（不新增第二种校验形状）
+  t_has "非法写入：档位非法值的原因说清只收 0 或 1" "$d" "只能填 0 或 1（当前 2）"
   t_ne "非法写入：未登记的键给出可读原因" "$(cf_val "$d" unknown_why)" ""
   t_eq "非法写入：被拒后生效值仍是旧值（时刻）" "$(cf_val "$d" eff_poll)" "06:30"
   t_eq "非法写入：被拒后生效值仍是旧值（开关）" "$(cf_val "$d" eff_ka)" "0"
   t_eq "非法写入：被拒后生效值仍是旧值（整数）" "$(cf_val "$d" eff_lead)" "0"
+  t_eq "非法写入：被拒后档位仍是文件里的 1" "$(cf_val "$d" eff_debug)" "1"
   t_eq "非法写入：不留临时文件" "$(cf_val "$d" tmpleft)" "0"
   t_eq "跨午夜组合：拒绝且起点不动" "$(cf_val "$d" eff_poll_start)" "06:30"
   t_eq "跨午夜组合：拒绝且终点不动" "$(cf_val "$d" eff_poll_end)" "22:15"
