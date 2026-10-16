@@ -15,8 +15,10 @@ SG_DATE='2026-10-01'   # 夹具日期；拨钟的墙钟与 %s 的 EPOCH 都从�
 
 # 签到与提醒的能力都只有 signin 层定义（能力名 = 函数的唯一真源，改名会在这里报红）
 SG_CAPS="state_text:signin run_once:signin signin_fetch:signin signin_parse:signin signin_decide:signin signin_submit:signin signin_ms_hm:signin signin_remind_due:signin signin_remind_30min:signin signin_remind_deadlines:signin signin_notask_target:signin signin_notask_due:signin signin_remind_notask:signin"
-# 判定链用**调用形状**钉住，不绑函数体里的行号
-SG_CHAIN="out=\$(signin_fetch  signin_parse \"\$resp\"  signin_decide \"\$resp\" \"\$tok\""
+# 判定链用**调用形状**钉住，不绑函数体里的行号。
+# 取任务那一环经两个变量名写回（不是 $( ) 取值）：命令替换会把这一步推进子 shell，而失败行的
+# 当日去重状态是主 shell 的变量——子 shell 里记下的「今晚这条已经写过」出不了子 shell。
+SG_CHAIN="signin_fetch \"\$(get_token)\"  signin_parse \"\$resp\"  signin_decide \"\$resp\" \"\$tok\""
 
 # ---- 时钟：把 EPOCH 拨到当日第 $1 分钟 ----
 # 零点用真实 busybox 取（绕开 mock），之后每次只改偏移。

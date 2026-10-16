@@ -949,6 +949,110 @@ DRIVER
   t_eq "统计文件：省略 token 参数时状态层仍按值取用它" "$(ka_val "$d" reuse)" "1"
 }
 
+# ============================================================
+# 九、保活失败行的当日去重（默认档）
+#
+# 一晚上同一条失败每 15 分钟重复一次；默认档在当日只留首次、原因（状态码 / 错误原文 /
+# 失败档位）变了再留一条，重复轮次只在调试档可见。
+# 去重状态**只在内存**：换一个进程（= 守护进程重启）最多重复一行；跨日重新计数
+# （「今天」的来源就是夹具的拨钟文件，故跨日只要改写它）。
+# 断言只看日志文件名下有哪些行、各几行，以及默认档那一行是否仍带着完整诊断。
+# ============================================================
+
+ka_case_fail_dedup() {
+  local d
+  ka_setup dedup
+  ka_env
+  # 第一个进程：默认档下的六次计数（同一种失败 → 换原因 → 换档位 → 跨日）
+  ka_run dedup <<'DRIVER'
+# 档位只走夹具配置文件 + cfg_load（与入口同一条路，没有第二条生效路径）
+tier() { printf 'DEBUG=%s\n' "$1" > mod/fafu-checkin.conf; cfg_load; }
+# 失败行的行数（ASCII 片段计数：本机 grep 匹配中文不稳）
+nf() { LC_ALL=C grep -acF -e '调用失败 rc=' mod/fafu_checkin.log 2>/dev/null; }
+tier 0
+LD='./ld1'
+ka_tokens ld1 2_C0DE
+printf '1\n' > ctl/rc
+printf 'curl: (7) Failed to connect\n' > ctl/err
+printf 'mWakefulness=Asleep\n' > dev/power.txt
+KA_LAST_REFRESH=$(now_s)                 # 先处在刷新冷却里：这一档不触发刷新
+# ① 同一种失败连续三轮 → 默认档只留首次
+keepalive_ping; keepalive_ping; keepalive_ping
+printf 'same=%s\n' "$(nf)"
+# ② 错误原文变了 → 原因变了，再留一条
+printf 'curl: (28) Connection timed out\n' > ctl/err
+keepalive_ping; keepalive_ping
+printf 'err=%s\n' "$(nf)"
+# ③ 状态码那一档变了（调用通了、服务端说没登录）→ 再留一条
+printf '0\n' > ctl/rc
+printf '{"code":1,"message":"not login"}\n' > ctl/body
+keepalive_ping
+printf 'code=%s\n' "$(nf)"
+# ④ 失败档位变了（熄屏 + 冷却已过 → 尝试静默刷新）→ 各算一个原因
+printf '7\n' > ctl/rc
+printf 'curl: (7) Failed to connect\n' > ctl/err
+KA_LAST_REFRESH=0
+keepalive_ping
+printf 'tier2=%s\n' "$(nf)"
+# ⑤ 亮屏延后那一档：同样第一次写、第二次不写
+printf 'mWakefulness=Awake\n' > dev/power.txt
+keepalive_ping
+printf 'tier1_first=%s\n' "$(nf)"
+keepalive_ping
+printf 'tier1_repeat=%s\n' "$(nf)"
+# 默认档那一条的原文（逐字断言用）：第一条失败行整行留一份
+LC_ALL=C grep -aF -e '调用失败 rc=' mod/fafu_checkin.log | head -n 1 > ctl/off.line
+# ⑥ 跨日：同样的失败在新的一天重新算首次
+printf '%s 07:00\n' '2026-10-02' > ctl/date
+keepalive_ping
+printf 'nextday=%s\n' "$(nf)"
+DRIVER
+
+  # 第二个进程（= 守护进程重启）：状态只在内存里，故首次那一条会重写一遍——
+  # 「最多重复一行」；同一进程内不会再多写。
+  ka_run dedup_restart <<'DRIVER'
+tier() { printf 'DEBUG=%s\n' "$1" > mod/fafu-checkin.conf; cfg_load; }
+nf() { LC_ALL=C grep -acF -e '调用失败 rc=' mod/fafu_checkin.log 2>/dev/null; }
+printf 'before=%s\n' "$(nf)"
+tier 0
+LD='./ld1'
+ka_tokens ld1 2_C0DE
+printf '1\n' > ctl/rc
+printf 'curl: (7) Failed to connect\n' > ctl/err
+printf 'mWakefulness=Awake\n' > dev/power.txt
+keepalive_ping; keepalive_ping; keepalive_ping
+printf 'restart=%s\n' "$(nf)"
+# ⑦ 调试档：被降级的重复轮次逐条写回来（一条都没被吞掉）
+tier 1
+keepalive_ping; keepalive_ping
+printf 'debug=%s\n' "$(nf)"
+DRIVER
+
+  d="$KA_WORK/dedup.out"
+  t_eq "同一种失败连续三轮：默认档只有首次那一条" "$(ka_val "$d" same)" "1"
+  t_eq "错误原文变了：再留一条（连续两轮同因仍只写一条）" "$(ka_val "$d" err)" "2"
+  t_eq "状态码那一档变了：再留一条" "$(ka_val "$d" code)" "3"
+  t_eq "失败档位换了（熄屏 + 冷却已过 → 尝试静默刷新）：再留一条" "$(ka_val "$d" tier2)" "4"
+  t_eq "亮屏延后那一档：第一次写" "$(ka_val "$d" tier1_first)" "5"
+  t_eq "亮屏延后那一档：紧接着再失败一次不写（同一档同一原因）" \
+    "$(ka_val "$d" tier1_repeat)" "5"
+  t_eq "跨日重新计数：第二天的同一种失败又算首次" "$(ka_val "$d" nextday)" "6"
+
+  # 默认档那一行仍带着接口那次的完整诊断（rc + 屏幕状态 + api 层那一行事实 + 动作）：
+  # 去重只影响「写不写」，不影响「写什么」。
+  t_has "默认档的失败行仍带完整诊断（rc + net rc + err 原文 + 耗时）" "$KA_WORK/ctl/off.line" \
+    "调用失败 rc=1 screen=off net rc=1 http=- err=curl: (7) Failed to connect 耗时=12ms"
+  t_has "默认档的失败行仍带统计与所采取的动作" "$KA_WORK/ctl/off.line" \
+    "(今日 0 成功 / 1 失败) — 刷新冷却中，稍后再试"
+
+  # 换一个进程（守护进程重启）：去重状态不落盘，故首次那一条最多再写一遍
+  t_eq "重启前：上一个进程留下六条" "$(ka_val "$KA_WORK/dedup_restart.out" before)" "6"
+  t_eq "守护进程重启后最多重复一行（状态只在内存里）" \
+    "$(ka_val "$KA_WORK/dedup_restart.out" restart)" "7"
+  t_eq "换到调试档：重复轮次逐条可见（两次都写回来）" \
+    "$(ka_val "$KA_WORK/dedup_restart.out" debug)" "9"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "keepalive · 窗口边界（06:59 / 07:00 / 21:25 / 21:30）" ka_case_window
@@ -960,3 +1064,4 @@ t_case "keepalive · 结构边界（静态）" ka_case_boundary
 t_case "keepalive · 保活失败行（连接层 / 登录态两档可区分）" ka_case_fail_line
 t_case "keepalive · 节流未到期那一轮不写保活日志（真实入口）" ka_case_throttle_log
 t_case "keepalive · token 打码（默认档打码 / 调试档明文）" ka_case_token_mask
+t_case "keepalive · 失败行当日去重（原因变了再留、跨日重计、重启最多重复一行）" ka_case_fail_dedup
