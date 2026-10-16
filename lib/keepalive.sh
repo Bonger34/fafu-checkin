@@ -92,9 +92,9 @@ refresh_token() { # $1=旧token；$2=允许唤醒重试(1=是,0=否，默认1)�
     [ "${2:-1}" != "0" ] && t=$(refresh_wake "$1")
   fi
   if [ -n "$t" ] && [ "$t" != "$1" ]; then
-    log "刷新成功: $1 → $t 触发原因=$reason"
+    log "刷新成功: $(tok "$1") → $(tok "$t") 触发原因=$reason"
   else
-    log "刷新未获得新 token（超时，仍为 $1） 触发原因=$reason"
+    log "刷新未获得新 token（超时，仍为 $(tok "$1")） 触发原因=$reason"
     t="$1"   # 收尾与返回都按「没有新 token」处理
   fi
   refresh_finish
@@ -108,7 +108,7 @@ refresh_token() { # $1=旧token；$2=允许唤醒重试(1=是,0=否，默认1)�
 
 # KA_LAST_REFRESH 跨轮生效：keepalive_ping 由入口主循环直接调用（不在 $( ) 里），
 # 1800 秒刷新冷却因此真的挡得住后续轮次——别按「只在本轮有效」去改它。
-ka_stat() { # $1=记号 ✅/❌/⚠️ $2=token $3=说明 $4=补充（无补充传空串）
+ka_stat() { # $1=记号 ✅/❌/⚠️ $2=token 的**显示形状**（调用点先经 tok 打码） $3=说明 $4=补充（无补充传空串）
   printf '保活: %s %s %s (今日 %s 成功 / %s 失败)%s' \
     "$1" "$2" "$3" "$(ka_ok_count)" "$(ka_fail_count)" "$4"
 }
@@ -129,7 +129,7 @@ keepalive_ping() {
   resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$tok"); rc=$?
   if [ $rc -eq 0 ] && echo "$resp" | "$BB" grep -q '"records"'; then
     ka_note ok "$tok"
-    log "$(ka_stat ✅ "$tok" "token 有效" "")"
+    log "$(ka_stat ✅ "$(tok "$tok")" "token 有效" "")"
     return 0
   fi
   # 调用未成功：可能 token 已失效，也可能只是网络异常。两种都在同一行里留下证据
@@ -137,21 +137,21 @@ keepalive_ping() {
   ka_note fail "$tok"
   # 屏幕亮着时延后刷新：避免白天出现无解释的页面弹出，留待熄屏（静默刷新）或签到时段处理
   if screen_is_on; then
-    log "$(ka_stat ❌ "$tok" "$(_ka_fail_desc "$rc" on)" " — 屏幕亮着，延后（熄屏或签到时段自动刷新）")"
+    log "$(ka_stat ❌ "$(tok "$tok")" "$(_ka_fail_desc "$rc" on)" " — 屏幕亮着，延后（熄屏或签到时段自动刷新）")"
     return 0
   fi
   now_ts=$(now_s)
   if [ $((now_ts - KA_LAST_REFRESH)) -lt 1800 ]; then
-    log "$(ka_stat ❌ "$tok" "$(_ka_fail_desc "$rc" off)" " — 刷新冷却中，稍后再试")"
+    log "$(ka_stat ❌ "$(tok "$tok")" "$(_ka_fail_desc "$rc" off)" " — 刷新冷却中，稍后再试")"
     return 0
   fi
   KA_LAST_REFRESH=$now_ts
-  log "$(ka_stat ⚠️ "$tok" "$(_ka_fail_desc "$rc" off)" " — 尝试静默刷新")"
+  log "$(ka_stat ⚠️ "$(tok "$tok")" "$(_ka_fail_desc "$rc" off)" " — 尝试静默刷新")"
   newt=$(refresh_token "$tok" 0 "保活")
   if [ -n "$newt" ] && [ "$newt" != "$tok" ]; then
-    log "保活: ✅ 静默刷新成功 $tok → $newt"
+    log "保活: ✅ 静默刷新成功 $(tok "$tok") → $(tok "$newt")"
   else
-    log "保活: ❌ 静默刷新未成功（可能网络不可用），token 仍为 $tok"
+    log "保活: ❌ 静默刷新未成功（可能网络不可用），token 仍为 $(tok "$tok")"
   fi
   return 0
 }

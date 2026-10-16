@@ -1069,8 +1069,128 @@ DRIVER
   d="$CD_WORK/mod/fafu_checkin.log"
   t_has "手动刷新：那一行说明触发原因是「手动命令」" "$d" \
     "刷新 token（静默优先） 触发原因=手动命令"
+  # 这一行里的 token 默认档是打码形状：夹具的 token 没有 2_ 前缀（故前缀那一段不出现），
+  # 不足 4 位的 OLD 整串打码、NEWTOKEN 只留尾 4 位（OKEN）。行的其余部分逐字不变。
   t_has "手动刷新：刷新成功那一行同样带触发原因（不是空文案）" "$d" \
-    "刷新成功: OLD → NEWTOKEN 触发原因=手动命令"
+    "刷新成功: **** → ****OKEN 触发原因=手动命令"
+}
+
+# ============================================================
+# 十二、token 打码：默认档的显示里不出现明文
+#
+# 打码只作用于**显示**：日志与 status 输出默认档是打码形状（保留前缀与尾 4 位）、
+# 调试档是明文。接口调用与状态文件里的 token 一个字节都不动——那两处由保活套件与
+# api 套件各自守着自己的形态（Authorization 头、保活统计文件）。
+#
+# 两条缝都是既有的：status 走**真实入口**（ws_setup 预置模块副本 + ws_run 跑子命令），
+# 手动子命令走驱动 + 真实处理函数（cd_run_real），只顶掉 token 来源、设备动作与网络出口。
+# ============================================================
+
+cd_case_status_token_masked() {
+  local f
+  ws_setup
+  ws_switch enabled
+  ws_sign "$WS_DATE" 21:30 normal
+  ws_log "[$WS_DATE 21:20:00] 占位一行"
+
+  # 默认档：有效 / 失效两处打印点都是打码形状
+  printf 'NOTIFY=0\nDEBUG=0\n' > "$WS_DIR/fafu-checkin.conf"
+  ws_run st_off status
+  f="$CD_WORK/ws_st_off.out"
+  t_has "status 默认档：有效那一行打码（保留前缀与尾 4 位）" "$f" "token: 有效 2_****cdef"
+  t_hasnt "status 默认档：输出里没有凭证明文" "$f" "$WS_TOKEN"
+
+  printf '1' > "$WS_DIR/ctl/rc"
+  ws_run st_off_fail status
+  f="$CD_WORK/ws_st_off_fail.out"
+  t_has "status 默认档：失效那一行同样打码" "$f" "token: 失效或网络异常 2_****cdef"
+  t_hasnt "status 默认档：失效那一行也没有明文" "$f" "$WS_TOKEN"
+
+  # 调试档：同样的两行显示明文（使用者自己在排障）
+  printf '0' > "$WS_DIR/ctl/rc"
+  printf 'NOTIFY=0\nDEBUG=1\n' > "$WS_DIR/fafu-checkin.conf"
+  ws_run st_on status
+  f="$CD_WORK/ws_st_on.out"
+  t_has "status 调试档：有效那一行显示明文" "$f" "token: 有效 $WS_TOKEN"
+  t_hasnt "status 调试档：没有打码形状" "$f" "2_****"
+
+  printf '1' > "$WS_DIR/ctl/rc"
+  ws_run st_on_fail status
+  f="$CD_WORK/ws_st_on_fail.out"
+  t_has "status 调试档：失效那一行也显示明文" "$f" "token: 失效或网络异常 $WS_TOKEN"
+
+  # 取不到凭据：那一行本来就不含 token（助手对空输入不产出任何东西，文案逐字不变）
+  WS_LD='./ctl/empty'
+  printf 'NOTIFY=0\nDEBUG=0\n' > "$WS_DIR/fafu-checkin.conf"
+  ws_run st_none status
+  f="$CD_WORK/ws_st_none.out"
+  t_has "status：取不到凭据时那一行逐字不变" "$f" "token: 未找到（应用未安装或未登录过）"
+  WS_LD=''
+}
+
+# 命令层手动子命令的 token 打印点：手动保活的有效 / 无效两行 + 手动刷新成功那一行
+# （手动刷新还会走到保活层那一行，故默认档窗口里共四处）。档位只经配置文件 + cfg_load
+# （与入口同一条路）；两档各留一份日志窗口（每一轮先清空日志），默认档「一处明文都没有」
+# 才不会被调试档的行稀释。
+cd_case_manual_token_masked() {
+  local off on
+  cd_setup
+  cd_write_env real
+  cd_run_real manual_mask <<'DRIVER'
+tier() { printf 'DEBUG=%s\n' "$1" > mod/fafu-checkin.conf; cfg_load; }
+OLDT='2_ABCDEF0123456789ABCDEF0123456789'
+NEWT='2_FEDCBA9876543210FEDCBA9876543210'
+screen_is_on() { return 0; }      # 亮屏：不唤醒也不改屏幕状态（设备动作归 device 套件）
+open_page() { :; }
+close_page() { :; }
+sleep() { :; }
+# 手动保活只要一个固定 token；手动刷新要「第一次旧、采样时新」，故用开关切两种来源
+# （计数落在文件上：取值在 $( ) 子 shell 里发生，变量赋值出不来）。
+get_token() {
+  if [ "${KA_FIX:-1}" = "1" ]; then printf '%s' "$OLDT"; return 0; fi
+  n=$(cat ./tok.n 2>/dev/null); n=$(( ${n:-0} + 1 )); printf '%s' "$n" > ./tok.n
+  if [ "$n" -le 1 ]; then printf '%s' "$OLDT"; else printf '%s' "$NEWT"; fi
+}
+
+# 一轮：有效保活 → 无效保活 → 手动刷新成功，日志只留这一轮
+one() { # $1=档位
+  tier "$1"
+  : > mod/fafu_checkin.log
+  KA_FIX=1
+  http_post() { printf '{"records":[]}'; return 0; }
+  cmd_keepalive
+  http_post() { return 1; }
+  cmd_keepalive
+  KA_FIX=0
+  printf '0' > ./tok.n
+  http_post() { printf '{"records":[]}'; return 0; }
+  cmd_refresh
+}
+
+one 0; cp mod/fafu_checkin.log "$T_WORK/manual.off.log"
+one 1; cp mod/fafu_checkin.log "$T_WORK/manual.on.log"
+DRIVER
+  off="$CD_WORK/manual.off.log"
+  on="$CD_WORK/manual.on.log"
+
+  t_has "手动保活 默认档：有效那一行打码（保留前缀与尾 4 位）" "$off" "token 有效: 2_****6789"
+  t_has "手动保活 默认档：无效那一行打码" "$off" \
+    "调用未成功（token 失效或网络异常），token=2_****6789"
+  t_has "手动刷新 默认档：刷新成功那一行打码" "$off" "✅ 刷新成功: 2_****3210"
+  t_hasnt "命令层默认档：整份日志里没有旧 token 的明文" "$off" "2_ABCDEF0123456789ABCDEF0123456789"
+  t_hasnt "命令层默认档：整份日志里没有新 token 的明文" "$off" "2_FEDCBA9876543210FEDCBA9876543210"
+  # 四处：手动保活两处 + 手动刷新那一处（命令层）+ 刷新流程自己那一处（保活层，
+  # 手动刷新会走到它）。默认档下这四行全都以打码形状出现——一条明文都不许有。
+  t_eq "命令层默认档：含 token 的行全都是打码形状（四处，一处不漏）" \
+    "$(grep -cF -e '2_****' "$off")" "4"
+
+  t_has "手动保活 调试档：有效那一行显示明文" "$on" \
+    "token 有效: 2_ABCDEF0123456789ABCDEF0123456789"
+  t_has "手动保活 调试档：无效那一行显示明文" "$on" \
+    "调用未成功（token 失效或网络异常），token=2_ABCDEF0123456789ABCDEF0123456789"
+  t_has "手动刷新 调试档：刷新成功那一行显示明文" "$on" \
+    "✅ 刷新成功: 2_FEDCBA9876543210FEDCBA9876543210"
+  t_hasnt "命令层调试档：没有打码形状（排障看的是明文）" "$on" "2_****"
 }
 
 t_case "commands · 表驱动分发与退出码" cd_case_dispatch
@@ -1100,3 +1220,5 @@ t_case "commands · setconfig 拒非法值且旧值不变" cd_case_setconfig_rej
 t_case "commands · setconfig 重写后只留登记键" cd_case_setconfig_rewrite
 t_case "commands · setconfig 不落未校验的内容" cd_case_setconfig_injection
 t_case "commands · 手动刷新那一行说明触发原因" cd_case_refresh_reason
+t_case "commands · status 的 token 默认档打码 / 调试档明文" cd_case_status_token_masked
+t_case "commands · 手动子命令的 token 默认档打码 / 调试档明文" cd_case_manual_token_masked
