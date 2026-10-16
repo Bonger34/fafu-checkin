@@ -342,6 +342,12 @@ sk_case_base_rotate() {
   printf 'after=%s\n' "$(wc -l < "$LOG" | tr -dc '0-9')"
   printf 'last=%s\n'  "$(tail -n 1 "$LOG")"
   printf 'tmpleft=%s\n' "$(ls "$MODDIR" | grep -c '\.tmp$')"
+  # 第二遍切到**默认档**（日志出口是懒解析的，改生效值变量即刻生效）：轮转记录属于
+  # 「留在默认档」的行，档位不该影响它——误把它一起降级时这条会报红。
+  DEBUG=0
+  "$BB" awk 'BEGIN { for (i = 0; i < 9000; i++) print "2026-01-01 00:00:00 填充填充填充填充填充填充填充填充填充填充填充填充" }' > "$LOG"
+  rotate_log
+  printf 'offrot=%s\n' "$(grep -c '日志已轮转' "$LOG")"
 } > "$T_WORK/rot.txt"
 DRIVER
 
@@ -349,6 +355,7 @@ DRIVER
   t_eq "轮转前：日志确实超过阈值" "$(sk_val "$f" before)" "9000"
   t_eq "轮转后：保留最近 1000 行 + 一条轮转记录" "$(sk_val "$f" after)" "1001"
   t_has "轮转后追加一条记录" "$f" "日志已轮转（保留最近 1000 行）"
+  t_eq "默认档下轮转记录照写（它留在默认档，与档位无关）" "$(sk_val "$f" offrot)" "1"
   t_eq "轮转不留临时文件" "$(sk_val "$f" tmpleft)" "0"
 }
 

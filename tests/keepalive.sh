@@ -108,6 +108,11 @@ export BB_OVERRIDE MOCK_DATE_CTL MOCK_DEVICE_DIR MOCK_RANDOM_CTL
 export MODDIR LD_DIR PL SU_MODE
 export KA_DATE KA_EPOCH KA_NOW_S
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
+# 夹具档位：本套件断言的是**完整**的日志行为（保活心跳、关页收尾都是这层的对外契约），
+# 故夹具把调试档打开——档位本身与降噪由 poll 套件那条真入口对照守着。
+# 位置必须在层加载**之后**：配置层在加载时就把默认值代入（DEBUG=0），写早了会被覆盖。
+# 本前导不加载配置文件（那是 ka_th_setup 那条真入口的事），故直接把生效值变量设上。
+DEBUG=1
 
 # 拔钟：墙钟由 mock 承接（窗口判定读它），%s 由这里的 EPOCH 替身承接（节流 / 冷却读它）
 ka_at() {
@@ -487,6 +492,8 @@ DRIVER
   t_eq "④ 冷却中给出可读的原因（那一行仍记了失败）" "$(ka_log "$KA_WORK/ctl/ka.log" '失败')" "4"
   # ③ 的静默刷新已把状态文件里的 token 换成新的（2_BEEF），故 ④ 这一轮读到的是它。
   # 失败行的三段（rc + 屏幕状态 / api 层的诊断行 / 所采取的动作）在这一行里逐字钉住。
+  # token 是明文：本套件的夹具在调试档（ka_env）——打码只改这一个字段，行的其余部分与
+  # 升级前逐字相同；默认档下的打码形状归 ka_case_token_mask。
   t_has "④ 冷却中的日志文案（rc + api 层那一行 + 屏幕状态与动作）" "$KA_WORK/ctl/ka.log" \
     "保活: ❌ 2_BEEF 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 3 失败) — 刷新冷却中，稍后再试"
 }
@@ -516,6 +523,8 @@ DRIVER
   d="$KA_WORK/stat.out"
   # 日志里的中文文案不能直接 grep（见 ka_log 的说明）：先用 ASCII 标记把「保活」那两行
   # 抓成小窗口，再对窗口逐字比对——文案是使用者可见的对外契约，必须逐字。
+  # 本套件的夹具在**调试档**（ka_env 里那一条）：心跳只在这一档写，而这一档的 token 是明文。
+  # 默认档下的打码形状不在这里验——它在那边根本没有心跳行，形状归 ka_case_token_mask。
   ka_near "$KA_WORK/ctl/ka.log" "保活" 5
   t_has "保活成功的日志文案（含今日成功/失败数）" "$KA_WORK/ctl/ka.log" \
     "保活: ✅ 2_C0DE token 有效 (今日 1 成功 / 0 失败)"
@@ -655,7 +664,8 @@ ka_tokens ld2 2_DEAD
 keepalive_ping
 DRIVER
   ka_near "$KA_WORK/ctl/net.line" "2_C0DE" 2
-  # 网络类那一行：rc 与 api 层那一行（连接层形态）原样并列，屏幕状态与动作各就各位
+  # 网络类那一行：rc 与 api 层那一行（连接层形态）原样并列，屏幕状态与动作各就各位。
+  # token 是明文（夹具在调试档）；打码形状（同一行的 2_****C0DE 形态）归 ka_case_token_mask。
   t_has "网络类失败行（连接层：net rc + 报错原文 + 屏幕状态 + 动作）" "$KA_WORK/ctl/net.line" \
     "保活: ❌ 2_C0DE 调用失败 rc=7 screen=off net rc=7 http=- err=curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused 耗时=12ms (今日 0 成功 / 1 失败) — 刷新冷却中，稍后再试"
   t_hasnt "网络类那一行不伪造状态码" "$KA_WORK/ctl/net.line" "http=200"
@@ -770,6 +780,175 @@ ka_case_throttle_log() {
     "$(LC_ALL=C grep -acF -e '2_C0DE' "$KA_WORK/mod/fafu_checkin.log" 2>/dev/null)" "2"
 }
 
+# ============================================================
+# 八、token 打码：可见度只由 DEBUG 一个开关决定
+#
+# 断言不看打码函数本身，只看**打印出来的行**：默认档日志里出现过 token 的行全是打码形状、
+# 明文一处没有；同一时间线在调试档逐字显示明文；两个不同的 token 打码后仍分得清「换过了」；
+# 短到留不住尾 4 位时整串打码（前缀与尾部一个片段都不留）；保活统计文件里的明文与格式
+# 保持不动（它是运行时状态，按值取用）。
+#
+# 一条时间线把保活层的打印点各走一遍：心跳 → 亮屏延后 → 冷却中 → 尝试静默刷新 →
+# 静默刷新成功 → 静默刷新未成功 → 刷新成功 → 刷新未获得新 token。
+# 档位切换只走夹具配置文件 + cfg_load（与入口同一条路，没有第二条生效路径）。
+# 日志按档位各留一份：断言因此不会被上一档的行稀释。
+# ============================================================
+
+ka_case_token_mask() {
+  local d off on short edge
+  ka_setup mask
+  ka_env
+  ka_run mask <<'DRIVER'
+# 档位：写夹具配置文件 + cfg_load，与入口同一时序
+tier() { printf 'DEBUG=%s\n' "$1" > mod/fafu-checkin.conf; cfg_load; }
+
+# 一条时间线把保活层的八处打印点都走到（同一处要分两档结果时各走一遍）。
+# 屏幕状态、冷却基准、token 来源都是驱动侧可控的事实。
+timeline() {
+  rm -f mod/fafu_keepalive.status      # 计数从 0 起，两档的行才逐字可比
+  printf 'mWakefulness=Awake\n' > dev/power.txt
+  printf '0\n' > ctl/rc
+  printf '{"records":[]}\n' > ctl/body
+  sleep() { :; }
+  LD='./a'
+  ka_tokens a 2_AAAA1111
+
+  # ① 心跳：token 有效
+  keepalive_ping
+
+  # ② 调用失败 + 亮屏：延后，不刷新
+  printf '1\n' > ctl/rc
+  : > ctl/body
+  keepalive_ping
+
+  # ③ 调用失败 + 熄屏 + 冷却未过：这一轮不再刷新
+  printf 'mWakefulness=Asleep\n' > dev/power.txt
+  KA_LAST_REFRESH=$(now_s)
+  keepalive_ping
+
+  # ④ 冷却已过：刷新段在采样时读到新 token → 静默刷新成功
+  # 采样点换成含新 token 的那份（同 tests 里刷新三段那条用例的手法：LD 只能在采样里切）
+  KA_LAST_REFRESH=0
+  ka_tokens b 2_AAAA1111 2_BBBB2222
+  sleep() {
+    n=$(cat ctl/sleeps 2>/dev/null); n=$(( ${n:-0} + 1 )); printf '%s\n' "$n" > ctl/sleeps
+    LD='./b'
+  }
+  keepalive_ping
+
+  # ⑤ 采样点始终只有旧 token：静默刷新拿不到新的
+  KA_LAST_REFRESH=0
+  LD='./a'
+  sleep() { :; }
+  keepalive_ping
+
+  # ⑥ 一次完整刷新的两档结果（直接驱动 refresh_token，旧 token 由参数给）
+  LD='./b'
+  refresh_token 2_AAAA1111 1 保活 >/dev/null     # 采样立刻读到新 token → 刷新成功
+  LD='./a'
+  refresh_token 2_AAAA1111 0 保活 >/dev/null     # 采样始终是旧 token → 未获得新 token
+
+  # ⑦ 短到留不住尾 4 位：整串打码（2_ABC 长度 3 位；2_ABCD 扣掉前缀后恰好 4 位）
+  LD='./e'
+  ka_tokens e
+  refresh_token 2_ABC 0 保活 >/dev/null
+  refresh_token 2_ABCD 0 保活 >/dev/null
+}
+
+# ---- 默认档：同一时间线 ----
+tier 0
+: > mod/fafu_checkin.log
+timeline
+cp mod/fafu_checkin.log ctl/off.log
+
+# ---- 调试档：同一时间线逐字再来一遍 ----
+tier 1
+: > mod/fafu_checkin.log
+timeline
+cp mod/fafu_checkin.log ctl/on.log
+
+# ---- 短 token：默认档各留一段窗口（「一个片段都不留」的断言不能被别的行稀释）----
+tier 0
+printf 'mWakefulness=Asleep\n' > dev/power.txt
+sleep() { :; }
+LD='./e'
+ka_tokens e
+: > mod/fafu_checkin.log
+refresh_token 2_ABC 0 保活 >/dev/null      # 扣掉前缀后 3 位：留不住尾 4 位 → 整串打码
+cp mod/fafu_checkin.log ctl/short.log
+: > mod/fafu_checkin.log
+refresh_token 2_ABCD 0 保活 >/dev/null     # 扣掉前缀后恰好 4 位：前缀与尾 4 位都留得住
+cp mod/fafu_checkin.log ctl/edge.log
+
+# 统计文件里的明文原样保留：省略 token 参数时状态层仍按**值**取用它
+ka_note ok
+printf 'reuse=%s\n' "$(grep -c 'token=2_AAAA1111' mod/fafu_keepalive.status)"
+DRIVER
+  d="$KA_WORK/mask.out"
+  off="$KA_WORK/ctl/off.log"
+  on="$KA_WORK/ctl/on.log"
+  short="$KA_WORK/ctl/short.log"
+
+  # ---- 默认档：留在默认档的七行都是打码形状 ----
+  t_has "默认档：亮屏延后那一行打码（保留前缀与尾 4 位）" "$off" \
+    "保活: ❌ 2_****1111 调用失败 rc=1 screen=on net rc=1 http=- 耗时=12ms (今日 1 成功 / 1 失败) — 屏幕亮着，延后（熄屏或签到时段自动刷新）"
+  t_has "默认档：冷却中那一行打码" "$off" \
+    "保活: ❌ 2_****1111 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 2 失败) — 刷新冷却中，稍后再试"
+  t_has "默认档：尝试静默刷新那一行打码" "$off" \
+    "保活: ⚠️ 2_****1111 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 3 失败) — 尝试静默刷新"
+  t_has "默认档：静默刷新成功那一行两侧都打码，且分得清「换过了」" "$off" \
+    "保活: ✅ 静默刷新成功 2_****1111 → 2_****2222"
+  t_has "默认档：静默刷新未成功那一行打码" "$off" \
+    "保活: ❌ 静默刷新未成功（可能网络不可用），token 仍为 2_****1111"
+  t_has "默认档：刷新成功那一行两侧都打码" "$off" \
+    "刷新成功: 2_****1111 → 2_****2222 触发原因=保活"
+  t_has "默认档：刷新未获得新 token 那一行打码" "$off" \
+    "刷新未获得新 token（超时，仍为 2_****1111） 触发原因=保活"
+  t_hasnt "默认档：日志里没有旧 token 的明文" "$off" "2_AAAA1111"
+  t_hasnt "默认档：日志里没有新 token 的明文" "$off" "2_BBBB2222"
+  # 「一处不漏」：出现过 token 的行数与打码形状的行数相等
+  t_ne "默认档：确实有出现过 token 的行（下面那条不变量才有意义）" "$(ka_log "$off" '2_')" "0"
+  t_eq "默认档：出现过 token 的行全都是打码形状（一处不漏）" \
+    "$(ka_log "$off" '2_')" "$(ka_log "$off" '2_****')"
+
+  # ---- 调试档：同样的行显示明文，且一行不少 ----
+  t_has "调试档：心跳那一行显示明文" "$on" \
+    "保活: ✅ 2_AAAA1111 token 有效 (今日 1 成功 / 0 失败)"
+  t_has "调试档：亮屏延后那一行显示明文（与默认档同形，只是 token 明文）" "$on" \
+    "保活: ❌ 2_AAAA1111 调用失败 rc=1 screen=on net rc=1 http=- 耗时=12ms (今日 1 成功 / 1 失败) — 屏幕亮着，延后（熄屏或签到时段自动刷新）"
+  t_has "调试档：尝试静默刷新那一行显示明文" "$on" \
+    "保活: ⚠️ 2_AAAA1111 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 3 失败) — 尝试静默刷新"
+  t_has "调试档：静默刷新成功那一行两侧都是明文" "$on" \
+    "保活: ✅ 静默刷新成功 2_AAAA1111 → 2_BBBB2222"
+  t_has "调试档：静默刷新未成功那一行显示明文" "$on" \
+    "保活: ❌ 静默刷新未成功（可能网络不可用），token 仍为 2_AAAA1111"
+  t_has "调试档：刷新成功那一行两侧都是明文" "$on" \
+    "刷新成功: 2_AAAA1111 → 2_BBBB2222 触发原因=保活"
+  t_has "调试档：刷新未获得新 token 那一行显示明文" "$on" \
+    "刷新未获得新 token（超时，仍为 2_AAAA1111） 触发原因=保活"
+  t_hasnt "调试档：没有打码形状（排障时看的就是明文）" "$on" "2_****"
+  # 防空转 + 一行不少：这条时间线在调试档该写下 13 行含 token 的行（八处打印点，
+  # 其中几处在时间线里各走到两次）。少了任何一处都会在这里露出来。
+  t_eq "调试档：含 token 的行一行不少（十三行）" "$(ka_log "$on" '2_')" "13"
+
+  # ---- 短 token：扣掉前缀后不足 4 位 → 整串打码，一个片段都不留 ----
+  short="$KA_WORK/ctl/short.log"
+  t_has "短 token：留不住尾 4 位时整串打码" "$short" \
+    "刷新未获得新 token（超时，仍为 ****） 触发原因=保活"
+  t_hasnt "短 token：不泄露任何片段（连 2_ 前缀都不出现）" "$short" "2_"
+  t_hasnt "短 token：正文也不泄露半个片段" "$short" "ABC"
+
+  # 边界：扣掉前缀后恰好 4 位——尾 4 位就是正文本身，前缀与它都留得住
+  edge="$KA_WORK/ctl/edge.log"
+  t_has "边界（扣掉前缀恰好 4 位）：前缀与尾 4 位都留得住" "$edge" \
+    "刷新未获得新 token（超时，仍为 2_****ABCD） 触发原因=保活"
+
+  # ---- 保活统计文件：明文与格式原样保留（打码只作用于显示）----
+  t_has "统计文件：token 仍是明文" "$KA_WORK/mod/fafu_keepalive.status" "token=2_AAAA1111"
+  t_hasnt "统计文件：没有被打码串写坏" "$KA_WORK/mod/fafu_keepalive.status" "****"
+  t_eq "统计文件：省略 token 参数时状态层仍按值取用它" "$(ka_val "$d" reuse)" "1"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "keepalive · 窗口边界（06:59 / 07:00 / 21:25 / 21:30）" ka_case_window
@@ -780,3 +959,4 @@ t_case "keepalive · 15 分钟节流（拨钟）" ka_case_throttle
 t_case "keepalive · 结构边界（静态）" ka_case_boundary
 t_case "keepalive · 保活失败行（连接层 / 登录态两档可区分）" ka_case_fail_line
 t_case "keepalive · 节流未到期那一轮不写保活日志（真实入口）" ka_case_throttle_log
+t_case "keepalive · token 打码（默认档打码 / 调试档明文）" ka_case_token_mask

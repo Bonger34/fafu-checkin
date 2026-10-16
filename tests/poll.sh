@@ -12,6 +12,11 @@
 POLL_WORK=""
 POLL_DATE='2026-10-01'
 
+# 设备命令替身的生成器（am / input / wm / dumpsys）与 device / keepalive / notify 共用一份：
+# 档位对照那条跑真实的关页与屏幕判定，必须让 PATH 上有这四个同名程序（它们不是 busybox
+# applet，只在 /system/bin 下）。source 放文件级：与工作目录的取值时机无关。
+. "$T_ROOT/tests/_device-tools.sh"
+
 # 每个用例一份独立工作目录：模块副本 + mock 工具链 + 控制目录
 poll_setup() { # $1=用例名
   local name
@@ -22,6 +27,7 @@ poll_setup() { # $1=用例名
   POLL_LD_DIR=''
   POLL_CURL_BIN=''
   POLL_SU_MODE=''
+  POLL_SU_BIN=''
   POLL_TIMEOUT=''
   POLL_WORK="$T_WORK_ROOT/poll-$name"
   rm -rf "$POLL_WORK"
@@ -116,10 +122,13 @@ poll_start() {
     export PATH="$POLL_WORK/bin:$PATH" BB_OVERRIDE='./bin/bb' \
       MOCK_DATE_CTL='./ctl/date' MOCK_WGET_DIR='./ctl' MOCK_DEVICE_DIR='./ctl' \
       MOCK_RANDOM_CTL='./ctl/rand' FAFU_DAEMON=1 SU_MODE=''
-    # 三处按需注入（默认空 = 与前面几条用例完全一致）：token 目录、网络工具、降权写法。
-    # 端到端那条用例要真实 run_once / keepalive_ping / notify，故只有它会给出这三样。
-    LD_DIR="${POLL_LD_DIR:-}" CURL_BIN="${POLL_CURL_BIN:-}" FAFU_SU_MODE="${POLL_SU_MODE:-}"
-    export LD_DIR CURL_BIN FAFU_SU_MODE
+    # 四处按需注入（默认空 = 与前面几条用例完全一致）：token 目录、网络工具、降权写法、
+    # 降权程序路径。端到端那条用例要真实 run_once / keepalive_ping / notify，故它给出前三样；
+    # 档位那条还要让降权探测真的成一次，因此必须给 SU_BIN —— su 是 busybox 的内建 applet，
+    # PATH 上的同名文件拦不到它，探测会落到 PATH 上那个真的 su 上（本机上是 MSYS 的）。
+    LD_DIR="${POLL_LD_DIR:-}" CURL_BIN="${POLL_CURL_BIN:-}" FAFU_SU_MODE="${POLL_SU_MODE:-}" \
+      SU_BIN="${POLL_SU_BIN:-}"
+    export LD_DIR CURL_BIN FAFU_SU_MODE SU_BIN
     if [ -n "$bb" ]; then
       # 默认 240 秒是挂死保险（防夹具没注入进去、主循环空转），不是断言的一部分：
       # 多轮用例在并行压满时会慢好几倍；单独需要更长的用例自己设 POLL_TIMEOUT
@@ -567,6 +576,10 @@ E2E_SU
   chmod +x "$POLL_WORK/bin/curl" "$POLL_WORK/bin/su" "$POLL_WORK/bin/curl.real" 2>/dev/null
 }
 
+# $1=refresh：缺省 stub = 顶掉 refresh_token（端到端那条只考签到链路上的六类日志，而真实
+#   采样循环要读几十遍 token 目录，留着只会让它撞上墙钟上限）；
+#   real = 不顶替，刷新三段跑真实实现——档位那条用例要靠它产出「页面关闭检查」与保活的
+#   刷新 / 收尾几行，那几行的档位归属正是它要验的。
 poll_e2e_inject() {
   cat >> "$POLL_WORK/mod/lib/commands.sh" <<INJECT
 
@@ -587,10 +600,10 @@ _now() {
     *) "\$BB" date "\$@" ;;
   esac
 }
-# 休眠：只把主循环那一跳（60 / 240 秒）当作一轮并拨钟；采样（3 秒）与提交短重试（15 秒）
-# 属于轮内等待，拨钟会把时间线搅乱，故直接返回。
+# 休眠：只把主循环那一跳（60 / 240 秒）当作一轮并拨钟；轮内等待（3 秒采样 / 5 秒预警 /
+# 15 秒短重试）不拨钟，转交 poll_wait_hook。
 sleep() {
-  case "\${1:-}" in 60|240) ;; *) return 0 ;; esac
+  case "\${1:-}" in 60|240) ;; *) poll_wait_hook "\${1:-}"; return 0 ;; esac
   printf '%s\n' "\${1:-}" >> ctl/sleeps
   E2E_ROUND=\$((E2E_ROUND + 1))
   _r=\$(sed -n "\$((E2E_ROUND + 1))p" ctl/rounds 2>/dev/null)
@@ -600,10 +613,15 @@ sleep() {
   printf '%s\n' "\$3" > ctl/su.mode
   return 0
 }
-# 刷新流程：它的时序（三段、提前关页）由 keepalive 套件用真实实现覆盖；在签到链路上
-# 它每次查询异常都会触发，而真实的采样循环要读几十遍 token 目录——那条路径与本票的
-# 六类日志无关，留着只会让这条用例撞上墙钟上限。替身只记「发生过刷新」、不产出新 token。
-refresh_token() { printf 'refresh\n' >> ctl/refresh; printf '%s' "\${E2E_NEWTOKEN:-}"; }
+# 轮内等待期间发生的事：缺省什么都不做。档位那条用例把它换成「应用数据就绪 + token
+# 换新」——真实时间线上这两件事本来就是等出来的，这里只是把既有装置挂到等待点上，
+# 不引入新的注入点。
+poll_wait_hook() { return 0; }
+INJECT
+  [ "${1:-stub}" = "real" ] || cat >> "$POLL_WORK/mod/lib/commands.sh" <<'INJECT'
+
+# 刷新流程的替身（见 poll_e2e_inject 的说明）：只记「发生过刷新」、不产出新 token。
+refresh_token() { printf 'refresh\n' >> ctl/refresh; printf '%s' "${E2E_NEWTOKEN:-}"; }
 INJECT
 }
 
@@ -707,61 +725,118 @@ poll_case_e2e_logs() {
 # ============================================================
 # 九、档位对照：同一条时间线跑两遍（默认档 / 调试档）
 #
-# 唯一变量是夹具配置里的 DEBUG，时间线与网络事实逐字同一份：
-#   ① 19:00 查询成功，但任务 19:20 才开始 → 签到层判「不在签到时段」（本票降级的那一行）
-#   ② 19:20 查询成功且在窗口内 → 提交成功（签到结果行：两档都必须看得见）
-#   ③ 19:21 当日已解决 → 不再查询，主循环收尾。
-# 断言只读日志正文：默认档少了哪几行、调试档又都在、被降级那一行的文案逐字不变。
+# 唯一变量是夹具配置里的 DEBUG，时间线与网络事实逐字同一份。这条时间线刻意把
+# **降到调试档的那七类行**全串起来（本票的验收面），同时把「留在默认档的行」按类别
+# 铺进同一份日志：
+#   ① 启动：应用数据目录一开始不可读 → 等一轮就绪；入口探一次降权写法（可用那一行）
+#   ② 19:00 查询成功而任务 19:20 才开始 → 「不在签到时段」；保活心跳一次
+#   ③ 19:20 查询成功且在窗口内 → 四次提交尝试全被拒 → 刷新（真实三段：开页、采样拿到
+#      新 token、提前关页 + 收尾关页）→ 失败汇总行；保活心跳再一次
+#   ④ 19:21 再查询 → 提交成功（签到结果行：两档都必须看得见）
+#   ⑤ 次日 19:30 服务端说已签到 → 时间核对行 + 已签到结果行（两档都必须看得见）
+# 断言只读日志正文与接口层的三个旁路文件：默认档少了哪几类行、调试档又都在、被降级
+# 那些行的文案逐字不变，以及**两档之差恰好是那七类行**——最后这条同时证明别的行
+# （结果与原因）没有被顺手误降级。
 # ============================================================
 
 POLL_TIER_WORK="$T_WORK_ROOT/poll-tier"
-POLL_TIER_DATE='2026-10-01'
+POLL_TIER_DATE="$POLL_E2E_D1"
+POLL_TIER_DATE2="$POLL_E2E_D2"
+# 清不掉的残留活动记录（与 tests/device.sh 同一份夹具）：关页两次都清不掉，于是 device
+# 的两条行（页面移除未彻底 / 页面关闭检查）都会留下。
+POLL_TIER_REC='* ActivityRecord{aa11 t123 u0 cn.edu.fafu.iportal/xxx t42}'
 
 # 夹具：模块副本 + 拨钟时间线 + 按调用序号喂事实的网络替身（与端到端那条同源）。
 # 时间线、档位之外的东西两遍完全一样——配置里只有 DEBUG 不同。
 poll_tier_setup() { # $1=档位 0|1
-  local task0
+  local task0 task1
   POLL_WORK="$POLL_TIER_WORK/run-$1"
   rm -rf "$POLL_WORK"
-  mkdir -p "$POLL_WORK/ctl" "$POLL_WORK/bin" "$POLL_WORK/ld"
+  mkdir -p "$POLL_WORK/ctl" "$POLL_WORK/bin" "$POLL_WORK/ld.ready"
   t_stage_module "$POLL_WORK/mod" >/dev/null
   t_bb_wrap "$POLL_WORK/bin/bb" >/dev/null
+  # 设备命令替身（am / input / wm / dumpsys）排在 PATH 最前：关页与屏幕判定跑真实
+  # device 层实现，注入点仍是既有的 MOCK_DEVICE_DIR。
+  DV_WORK="$POLL_WORK" dv_tools
   : > "$POLL_WORK/ctl/sleeps"
   : > "$POLL_WORK/ctl/calls"
-  : > "$POLL_WORK/ctl/refresh"
-  : > "$POLL_WORK/ctl/su.calls"
   printf '0\n' > "$POLL_WORK/ctl/rc"
   printf '1\n' > "$POLL_WORK/ctl/rand"                      # 签名随机数的替身序号
-  printf 'j\000"token":"2_C0DE"\000j' > "$POLL_WORK/ld/000001.ldb"   # 真实 get_token 的来源
+  # 屏幕熄屏：保活失败那一档才走静默刷新，刷新收尾写的是「屏幕原为关闭，已恢复熄屏」
+  printf 'mWakefulness=Asleep\n' > "$POLL_WORK/ctl/power.txt"
+  printf '%s\n' "$POLL_TIER_REC" > "$POLL_WORK/ctl/activity.txt"
+  # token 来源：一开始只有旧的那一份（真实 get_token 读 ld/），新的是刷新时由轮内等待
+  # 替身写进去的——「中途才换 token」只能这样表达。
+  printf 'j\000"token":"2_C0DE"\000j' > "$POLL_WORK/ld.ready/000001.ldb"
   poll_e2e_epoch
-  POLL_LD_DIR='./ld'
+  POLL_LD_DIR='./ld'            # 一开始这个目录**还不存在**：_sg_wait_ld 因此真的走一遍
   POLL_CURL_BIN='./bin/curl'
-  POLL_SU_MODE='./bin/su - shell -c'
-  POLL_TIMEOUT=240
-  poll_config 'KEEPALIVE=0
+  POLL_SU_MODE=''              # 不继承探测结果：入口真的探一次（那条「可用」行）
+  POLL_SU_BIN='./bin/su'       # 探测必须落到替身上（su 是 busybox 内建 applet，PATH 拦不到）
+  # 四轮 + 一次真实刷新三段 + 十几次网络调用：并发压满时能把默认上限用光，故这条自己给足
+  POLL_TIMEOUT=600
+  # 保活全天开：心跳行每轮都会写一行（降级后默认档一条都不该有）
+  poll_config 'KEEPALIVE=1
+KA_START=00:00
+KA_END=23:59
 POLL_START=19:00
 POLL_END=22:15' "$1"
-  # 时间线：首行是启动时刻，其后每行是上一轮休眠之后拨到的时刻（第三列是降权档）
+  # 时间线：首行是启动时刻，其后每行是上一轮休眠之后拨到的时刻（第三列是降权档，
+  # 本用例的降权替身不认它，留着是为了与端到端那条共用同一种三列形状）
   printf '%s\n' \
     "$POLL_TIER_DATE 19:00 ok" \
     "$POLL_TIER_DATE 19:20 ok" \
-    "$POLL_TIER_DATE 19:21 ok" > "$POLL_WORK/ctl/rounds"
+    "$POLL_TIER_DATE 19:21 ok" \
+    "$POLL_TIER_DATE2 19:30 ok" > "$POLL_WORK/ctl/rounds"
   printf '%s 19:00\n' "$POLL_TIER_DATE" > "$POLL_WORK/ctl/date"
-  task0=$(poll_e2e_task 0 1160 1260 "$POLL_E2E_E1")          # 任务 19:20 开始、21:00 补签截止
-  poll_e2e_fact 1 0 200 "$task0" "" "$POLL_E2E_HDR"          # ① 查询：还没到开始时刻
-  poll_e2e_fact 2 0 200 "$task0" "" "$POLL_E2E_HDR"          # ② 查询：窗口内
-  poll_e2e_fact 3 0 200 '{"code":0,"msg":"success"}' "" "$POLL_E2E_HDR"   # ③ 提交成功
+  # 网络事实按调用序号给（次序与主循环里的真实调用次序逐条对应）
+  task0=$(poll_e2e_task 0 1160 1260 "$POLL_E2E_E1")   # 日 1：任务 19:20 开始、21:00 补签截止
+  task1=$(poll_e2e_task 1 1160 1260 "$POLL_E2E_E2" 1140)  # 日 2：服务端说已签到（19:00 签的）
+  poll_e2e_fact 1 0 200 "$task0" "" "$POLL_E2E_HDR"      # ① 查询：还没到开始时刻
+  poll_e2e_fact 2 0 200 '{"records":[]}' "" "$POLL_E2E_HDR"   # 保活：成功（心跳）
+  poll_e2e_fact 3 0 200 "$task0" "" "$POLL_E2E_HDR"      # ② 查询：窗口内 → 提交
+  poll_e2e_fact 4 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"   # 提交尝试 1：被拒
+  poll_e2e_fact 5 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"   # 刷新后重试：仍被拒
+  poll_e2e_fact 6 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"   # 短重试 1
+  poll_e2e_fact 7 0 400 "$POLL_E2E_REJECT" "" "$POLL_E2E_HDR"   # 短重试 2
+  poll_e2e_fact 8 0 200 '{"records":[]}' "" "$POLL_E2E_HDR"   # 保活：成功（心跳）
+  poll_e2e_fact 9 0 200 "$task0" "" "$POLL_E2E_HDR"      # ③ 查询：窗口内 → 提交
+  poll_e2e_fact 10 0 200 '{"code":0,"msg":"success"}' "" "$POLL_E2E_HDR"   # 提交成功
+  poll_e2e_fact 11 0 200 "$task1" "" "$POLL_E2E_HDR"     # ④ 次日查询：服务端说已签到
+  poll_e2e_fact 12 0 200 '{"records":[]}' "" "$POLL_E2E_HDR"   # 次日保活：成功（心跳）
   printf '0' > "$POLL_WORK/ctl/curl.n"
   poll_e2e_tools
-  poll_e2e_inject
-  # 降权替身换成「静默成功」的：通知链路不是这条用例要考的东西，而探不到 su 会留下
-  # 「找不到 su」、探到了又发不出去会留下「通知发送失败」——都会让两档日志多出无关的行。
-  # 它只应答探测（输出 2000 = 降权到 shell），发送时什么也不做。
-  cat > "$POLL_WORK/bin/su" <<'QUIET_SU'
-#!/bin/sh
-echo 2000
-QUIET_SU
+  poll_e2e_inject real     # 刷新三段跑真实实现（页面关闭检查与保活收尾行由它产出）
+  # 降权替身换成这条用例要的形状：探测（id -u）答 2000 → 留下「可用」那一行；
+  # 发送一律失败 → 留下通知层的异常行（签到主流程不受影响）。
+  # 起头必须是 `#!<真实 busybox> sh`（同 tests/notify.sh 的替身）：本机没有 /bin/sh，
+  # 解释器找不到时这个文件会静默变成 no-op，探测随之报「降权不可用」。
+  cat > "$POLL_WORK/bin/su" <<TIER_SU
+#!$(t_find_busybox) sh
+# 由 tests/poll.sh 的 poll_tier_setup 生成：降权替身（探测通过、发送失败）
+case "\$*" in
+  *'id -u'*) echo 2000; exit 0 ;;
+esac
+echo 'su: permission denied' >&2
+exit 1
+TIER_SU
   chmod +x "$POLL_WORK/bin/su" 2>/dev/null || true
+  # 轮内等待时的两件事（真实时间线上它们本来就是等出来的）：
+  #   第 1 次等待 —— 应用数据目录就绪（ld.ready → ld）
+  #   第 2 次等待 —— 刷新采样读到换新后的 token（ld/000002.ldb 比 000001 新）
+  cat >> "$POLL_WORK/mod/lib/commands.sh" <<'INJECT'
+
+# ---- 断言注入（只存在于断言的副本里）：轮内等待期间的环境变化 ----
+poll_wait_hook() {
+  _n=$(cat ctl/wait.n 2>/dev/null); _n=$(( ${_n:-0} + 1 )); printf '%s' "$_n" > ctl/wait.n
+  if [ "$_n" -eq 1 ]; then
+    mv ld.ready ld 2>/dev/null
+  elif [ "$_n" -eq 2 ]; then
+    printf 'j\000"token":"2_BEEF"\000j' > ld/000002.ldb
+  fi
+  return 0
+}
+INJECT
 }
 
 poll_tier_run() { # $1=档位 0|1
@@ -769,48 +844,162 @@ poll_tier_run() { # $1=档位 0|1
   poll_start
 }
 
-# 日志里两个**与档位无关的易变字段**，比对两档差集前先归一（否则差集断言会因为跑测机器的
-# 噪声而假红，那不是档位造成的差别）：
+# 日志里某个字面量出现了几行（-F 字面量：文案就是契约，不把文案当正则）。
+poll_tier_lines() { # $1=日志文件 $2=字面量
+  LC_ALL=C grep -acF -e "$2" "$1" 2>/dev/null
+}
+
+# 日志里三个**与档位无关或另由打码规则决定**的易变字段，比对两档差集前先归一（否则差集断言
+# 会因为跑测机器的噪声、或另一条正交规则而假红，那不是「哪些行写不写」造成的差别）：
 #   耗时=  —— api 层记的这一次调用有多久，两次跑不可能同毫秒；
-#   (PID N)—— 守护进程每次启动的进程号（两遍是两个进程）。
+#   (PID N)—— 守护进程每次启动的进程号（两遍是两个进程）；
+#   2_xxxx —— token 的**显示形状**由打码开关按同一档位另算（默认档 2_****C0DE、调试档 2_C0DE），
+#             这里整段归一成 2_X：本函数比的是「哪些行写不写」，token 可见度归打码那套断言。
+# 同时把七类**降到调试档**的行整行去掉：两档之差的全部内容就是它们（逐类点数在下面的
+# 断言里各自钉住，这里只负责证明「去掉它们之后其余行逐字相同」）。
 poll_tier_norm() { # $1=日志文件
-  LC_ALL=C grep -avF -e '不在签到时段' "$1" 2>/dev/null \
-    | sed 's/耗时=[0-9]*[ms][s]*/耗时=X/; s/(PID [0-9]*)/(PID X)/'
+  LC_ALL=C grep -avF -e '应用数据暂不可读' -e '应用数据已就绪' -e '不在签到时段' \
+    -e '提交尝试: try=' -e '页面关闭检查: 残留活动=' -e '通知链路: 降权写法' \
+    -e 'token 有效 (今日' "$1" 2>/dev/null \
+    | sed 's/耗时=[0-9]*[ms][s]*/耗时=X/; s/(PID [0-9]*)/(PID X)/; s/2_[0-9A-Fa-f*]*/2_X/g'
 }
 
 poll_case_debug_tier() {
-  local off on
+  local off on d1 d0 bt1 dl1
   mkdir -p "$POLL_TIER_WORK"
+  # 零点毫秒来自真实 busybox（夹具时间戳相对它算），故期望值不依赖跑断言的机器时区
+  poll_e2e_epoch
+  bt1=$(( POLL_E2E_E1 + 1160 * 60000 )); dl1=$(( POLL_E2E_E1 + 1260 * 60000 ))
 
   # ① 默认档（配置里 DEBUG=0）
   poll_tier_run 0
   off="$POLL_TIER_WORK/off.txt"
   cp "$(poll_e2e_log)" "$off"
-  t_eq "默认档：主循环按计划走完三轮（每轮末尾一次休眠）" "$(poll_slept)" "60|60|60|"
+  d0="$POLL_WORK/mod"
+  t_eq "默认档：主循环按计划走完四轮（每轮末尾一次休眠）" "$(poll_slept)" "60|60|60|60|"
   t_file "默认档：日志非空（主循环真的跑了）" "$off"
+
+  # ---- 降到调试档的七类行：默认档一类都不许出现 ----
+  t_eq "默认档：应用数据暂不可读（重启后的瞬时过程）不写" \
+    "$(poll_tier_lines "$off" '应用数据暂不可读')" "0"
+  t_eq "默认档：应用数据已就绪不写" \
+    "$(poll_tier_lines "$off" '应用数据已就绪')" "0"
   t_eq "默认档：「不在签到时段」一行都不写" \
-    "$(LC_ALL=C grep -acF -e '不在签到时段' "$off")" "0"
-  t_has "默认档：签到结果行照旧在（关掉的只是每分钟重复的细节，不是结论）" "$off" \
+    "$(poll_tier_lines "$off" '不在签到时段')" "0"
+  t_eq "默认档：提交尝试行不写（连同它带的响应体 / 状态码 / 耗时 / 响应头四项）" \
+    "$(poll_tier_lines "$off" '提交尝试: try=')" "0"
+  t_eq "默认档：页面关闭检查行不写" \
+    "$(poll_tier_lines "$off" '页面关闭检查: 残留活动=')" "0"
+  t_eq "默认档：降权探测「可用」那一行不写" \
+    "$(poll_tier_lines "$off" '通知链路: 降权写法')" "0"
+  # 心跳那一行的独有片段是 `token 有效 (今日`：`保活: ✅ 静默刷新成功 …` 也是「留在默认档」
+  # 的行，按 `保活: ✅` 数会把它一起算进去。
+  t_eq "默认档：保活心跳行不写" \
+    "$(poll_tier_lines "$off" 'token 有效 (今日')" "0"
+
+  # ---- 留在默认档：结果与原因一类都不许少 ----
+  t_has "默认档：签到结果行照旧在（关掉的只是每分钟重复的现场行，不是结论）" "$off" \
     "✅ 签到成功 [晚查寝签到]"
-  t_has "默认档：每天一两次的任务变化行也照旧" "$off" \
-    "任务变化: id=→88123 state=→0 begin=→$(( POLL_E2E_E1 + 1160 * 60000 ))"
+  t_has "默认档：服务端说已签到那一档的结果行照旧在" "$off" \
+    "[晚查寝签到] 已签到"
+  t_has "默认档：每日一次的时间核对行照旧（偏诊断也留在默认档）" "$off" \
+    "时间核对: signTime=[$(( POLL_E2E_E2 + 1140 * 60000 ))]"
+  t_has "默认档：任务变化行照旧（本来就只在四元组变化时写）" "$off" \
+    "任务变化: id=→88123 state=→0 begin=→$bt1 截止=→$dl1"
+  t_has "默认档：入口的启动行照旧" "$off" "服务启动"
+  t_has "默认档：入口的停用退出行照旧" "$off" "检测到服务已停用，守护进程退出"
+  t_has "默认档：保活刷新那一行照旧（触发原因也还在）" "$off" \
+    "刷新 token（静默优先） 触发原因=签到提交失败"
+  t_has "默认档：拿到新 token 就提前移除打卡页那一行照旧" "$off" \
+    "已取得新 token，提前移除打卡页（前台交还用户）"
+  # 与 token 打码的交叉面：这一行属于默认档（照写，触发原因也在），但它带的 token 由档位
+  # 决定可见度——打码形状本身归 keepalive 套件，这里只钉 Default 档同一行的 token 是打码的。
+  t_has "默认档：刷新成功那一行照旧，且 token 是打码形状（可见度只由档位决定）" "$off" \
+    "刷新成功: 2_****C0DE → 2_****BEEF 触发原因=签到提交失败"
+  t_has "默认档：保活收尾的屏幕行照旧" "$off" "屏幕原为关闭，已恢复熄屏"
+  t_has "默认档：页面真的残留时那一行照旧" "$off" \
+    "页面移除未彻底(残留1)，保留在后台（不再回桌面）"
+  t_has "默认档：通知链路的异常行照旧" "$off" \
+    "通知发送失败: event=failsign rc=1 err=su: permission denied"
+
+  # ---- 关键边界：提交尝试行降级之后，默认档的失败汇总行仍要带接口那次的完整诊断 ----
+  t_has "默认档：失败汇总行带状态码 + 完整响应体 + 响应头四项" "$off" \
+    "签到失败: rc=1 rid=88123 lng=119.243462 lat=26.088417 try=4 tries=2 http=400 body=$POLL_E2E_REJECT $POLL_E2E_HDR_LINE"
+  t_has_re "默认档：失败汇总行以耗时读数结尾（值自带单位）" "$off" \
+    '^签到失败: rc=1 .*耗时=[0-9]+(ms|s)$'
+
+  # ---- 接口层那三个旁路文件不是日志：最后一次调用的完整事实仍留在那里 ----
+  # 值随「最后一次调用是哪一次」变（这里是次日那次保活心跳），故钉的是**形状**：
+  # 状态码 + 正文 + 响应头四项 + 耗时，四项一项都不能少。
+  t_has_re "默认档：旁路文件里最后一次调用的完整事实（状态码 + 正文 + 响应头四项 + 耗时）" \
+    "$d0/.fafu_api.err" \
+    '^http=[0-9]+ body=.* hdr=\{Date: .*\|Content-Length: .*\|Content-Type: .*\|Server: .*\} 耗时=[0-9]+(ms|s)$'
+  t_has "默认档：响应头原文另有一份落盘（白名单之外的行也在）" "$d0/.fafu_api.hdr" \
+    "Content-Type: application/json;charset=UTF-8"
 
   # ② 调试档（同一份时间线、同一批网络事实，唯一变量是配置里的 DEBUG）
   poll_tier_run 1
   on="$POLL_TIER_WORK/on.txt"
   cp "$(poll_e2e_log)" "$on"
-  t_eq "调试档：同一条时间线的轮次与休眠参数逐字一致" "$(poll_slept)" "60|60|60|"
+  d1="$POLL_WORK/mod"
+  t_eq "调试档：同一条时间线的轮次与休眠参数逐字一致" "$(poll_slept)" "60|60|60|60|"
+  t_eq "调试档：应用数据那两句成对写回（各一行）" \
+    "$(poll_tier_lines "$on" '应用数据暂不可读')|$(poll_tier_lines "$on" '应用数据已就绪')" "1|1"
   t_eq "调试档：「不在签到时段」写回来（恰好一行）" \
-    "$(LC_ALL=C grep -acF -e '不在签到时段' "$on")" "1"
-  t_eq "调试档：文案与升级前逐字一致（只有时间戳是新的）" \
-    "$(LC_ALL=C grep -aF -e '不在签到时段' "$on")" "[晚查寝签到] 不在签到时段"
+    "$(poll_tier_lines "$on" '不在签到时段')" "1"
+  t_eq "调试档：每次提交调用各一行（首次 + 刷新后重试 + 两次短重试 + 次日那次）" \
+    "$(poll_tier_lines "$on" '提交尝试: try=')" "5"
+  t_eq "调试档：页面关闭检查写回来（提前关页 + 收尾关页各一次）" \
+    "$(poll_tier_lines "$on" '页面关闭检查: 残留活动=')" "2"
+  t_eq "调试档：降权探测「可用」那一行写回来（恰好一行）" \
+    "$(poll_tier_lines "$on" '通知链路: 降权写法')" "1"
+  t_eq "调试档：保活心跳写回来（保活节拍到期的每一轮各一行）" \
+    "$(poll_tier_lines "$on" 'token 有效 (今日')" "3"
   t_has "调试档：结论行也还在" "$on" "✅ 签到成功 [晚查寝签到]"
 
-  # ③ 两档之差只有被降级的那一行：行数差 1，去掉它之后其余行逐字相同
-  t_eq "两档行数只差被降级的那一行" \
-    "$(LC_ALL=C grep -ac . "$on")" "$(( $(LC_ALL=C grep -ac . "$off") + 1 ))"
-  t_eq "两档之差只有被降级的那一行（其余行逐字相同）" \
+  # ---- 文案与升级前逐字一致（只有行首时间戳是新的） ----
+  t_eq "调试档：应用数据暂不可读的文案逐字不变" \
+    "$(LC_ALL=C grep -aF -e '应用数据暂不可读' "$on")" \
+    "应用数据暂不可读（重启后就绪前的瞬时状态？），最多等 30 秒"
+  t_eq "调试档：应用数据已就绪的文案逐字不变（等了多久也照旧）" \
+    "$(LC_ALL=C grep -aF -e '应用数据已就绪' "$on")" "应用数据已就绪（等了 3 秒）"
+  t_eq "调试档：「不在签到时段」的文案逐字不变" \
+    "$(LC_ALL=C grep -aF -e '不在签到时段' "$on")" "[晚查寝签到] 不在签到时段"
+  t_eq "调试档：提交尝试行的文案逐字不变（四项事实一项不少）" \
+    "$(LC_ALL=C grep -aF -e '提交尝试: try=1 ' "$on" | head -n 1 | sed 's/ 耗时=.*//')" \
+    "提交尝试: try=1 rid=88123 lng=119.243462 lat=26.088417 http=400 body=$POLL_E2E_REJECT $POLL_E2E_HDR_LINE"
+  t_has_re "调试档：提交尝试行以耗时读数结尾（值自带单位）" "$on" \
+    '^提交尝试: try=1 .*耗时=[0-9]+(ms|s)$'
+  t_eq "调试档：页面关闭检查的文案逐字不变" \
+    "$(LC_ALL=C grep -aF -e '页面关闭检查: 残留活动=' "$on" | head -n 1)" \
+    "页面关闭检查: 残留活动=1"
+  t_has_re "调试档：降权探测行的文案逐字不变（只有写法路径随机器不同）" "$on" \
+    '^通知链路: 降权写法 \[.*\] 可用（id -u = 2000）$'
+  t_has "调试档：保活心跳的文案逐字不变（含今日成功 / 失败数）" "$on" \
+    "保活: ✅ 2_C0DE token 有效 (今日 1 成功 / 0 失败)"
+  # 同一条默认档的行在调试档里 token 是明文：两档只有「写不写」与「token 长什么样」两处差别
+  t_has "调试档：刷新成功那一行的 token 是明文（与默认档同一行）" "$on" \
+    "刷新成功: 2_C0DE → 2_BEEF 触发原因=签到提交失败"
+
+  # ③ 两档之差恰好是那七类行：去掉它们之后其余行逐字相同，行数之差也正好是它们
+  t_eq "两档之差只有被降级的那七类行（其余行逐字相同）" \
     "$(poll_tier_norm "$on")" "$(poll_tier_norm "$off")"
+  t_eq "两档行数之差正是那七类行在调试档里的行数" \
+    "$(( $(LC_ALL=C grep -ac . "$on") - $(LC_ALL=C grep -ac . "$off") ))" \
+    "$(( $(poll_tier_lines "$on" '应用数据暂不可读') \
+        + $(poll_tier_lines "$on" '应用数据已就绪') \
+        + $(poll_tier_lines "$on" '不在签到时段') \
+        + $(poll_tier_lines "$on" '提交尝试: try=') \
+        + $(poll_tier_lines "$on" '页面关闭检查: 残留活动=') \
+        + $(poll_tier_lines "$on" '通知链路: 降权写法') \
+        + $(poll_tier_lines "$on" 'token 有效 (今日') ))"
+  t_eq "旁路文件不受档位影响：最后一次调用的诊断逐字相同（耗时读数归一后）" \
+    "$(sed 's/耗时=[0-9]*[ms][s]*/耗时=X/' "$d1/.fafu_api.err")" \
+    "$(sed 's/耗时=[0-9]*[ms][s]*/耗时=X/' "$d0/.fafu_api.err")"
+  t_eq "旁路文件不受档位影响：响应头原文逐字相同" \
+    "$(cat "$d1/.fafu_api.hdr" 2>/dev/null)" "$(cat "$d0/.fafu_api.hdr" 2>/dev/null)"
+  t_eq "旁路文件不受档位影响：网络工具 stderr 原文逐字相同" \
+    "$(cat "$d1/.fafu_api.raw" 2>/dev/null)" "$(cat "$d0/.fafu_api.raw" 2>/dev/null)"
 }
 
 # ---- 注册（顺序即执行顺序） ----

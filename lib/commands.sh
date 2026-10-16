@@ -123,7 +123,7 @@ cmd_refresh() {
   # 第三参数是触发原因：日志里出现刷新时，读的人得知道是手动命令触发的
   new=$(refresh_token "$old" 1 "手动命令")
   if [ -n "$new" ] && [ "$new" != "$old" ]; then
-    log "✅ 刷新成功: $new"
+    log "✅ 刷新成功: $(tok "$new")"
     resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$new"); rc=$?
     if [ $rc -eq 0 ] && echo "$resp" | "$BB" grep -q '"records"'; then
       log "✅ 新 token 接口验证通过"
@@ -143,9 +143,9 @@ cmd_keepalive() {
   else
     resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$tok"); rc=$?
     if [ $rc -eq 0 ] && echo "$resp" | "$BB" grep -q '"records"'; then
-      log "token 有效: $tok"
+      log "token 有效: $(tok "$tok")"
     else
-      log "调用未成功（token 失效或网络异常），token=$tok"
+      log "调用未成功（token 失效或网络异常），token=$(tok "$tok")"
     fi
   fi
 }
@@ -206,9 +206,9 @@ cmd_status() {
   else
     resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$tok"); rc=$?
     if [ $rc -eq 0 ] && echo "$resp" | "$BB" grep -q '"records"'; then
-      echo "token: 有效 $tok"
+      echo "token: 有效 $(tok "$tok")"
     else
-      echo "token: 失效或网络异常 $tok"
+      echo "token: 失效或网络异常 $(tok "$tok")"
     fi
   fi
   echo "最近日志:"
