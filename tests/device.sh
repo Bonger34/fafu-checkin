@@ -65,6 +65,11 @@ BB_OVERRIDE='$DV_BB'
 MOCK_DEVICE_DIR='$DV_DEV'
 export MODDIR BB_OVERRIDE MOCK_DEVICE_DIR
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
+# 夹具档位：本套件断言的是**完整**的日志行为（关页收尾那一行是 close_page 的对外契约），
+# 故夹具把调试档打开——档位本身与降噪由 poll 套件那条真入口对照守着。
+# 位置必须在层加载**之后**：配置层在加载时就把默认值代入（DEBUG=0），写早了会被覆盖。
+# 本套件不加载配置文件、也不调 cfg_load，故直接把生效值变量设上。
+DEBUG=1
 ENV
 }
 

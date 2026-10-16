@@ -129,7 +129,9 @@ keepalive_ping() {
   resp=$(api "sign_in/student/my/page" "rows=1&pageNum=1" "$tok"); rc=$?
   if [ $rc -eq 0 ] && echo "$resp" | "$BB" grep -q '"records"'; then
     ka_note ok "$tok"
-    log "$(ka_stat ✅ "$(tok "$tok")" "token 有效" "")"
+    # 保活心跳：15 分钟一条、内容不变，而「保活还在跑吗」运行状态里已有今日成功 / 失败次数
+    # 与最近一次结果——按频率 × 信息量的判据降级到调试档；失败那三档留在默认档。
+    logd "$(ka_stat ✅ "$(tok "$tok")" "token 有效" "")"
     return 0
   fi
   # 调用未成功：可能 token 已失效，也可能只是网络异常。两种都在同一行里留下证据

@@ -108,6 +108,11 @@ export BB_OVERRIDE MOCK_DATE_CTL MOCK_DEVICE_DIR MOCK_RANDOM_CTL
 export MODDIR LD_DIR PL SU_MODE
 export KA_DATE KA_EPOCH KA_NOW_S
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
+# 夹具档位：本套件断言的是**完整**的日志行为（保活心跳、关页收尾都是这层的对外契约），
+# 故夹具把调试档打开——档位本身与降噪由 poll 套件那条真入口对照守着。
+# 位置必须在层加载**之后**：配置层在加载时就把默认值代入（DEBUG=0），写早了会被覆盖。
+# 本前导不加载配置文件（那是 ka_th_setup 那条真入口的事），故直接把生效值变量设上。
+DEBUG=1
 
 # 拔钟：墙钟由 mock 承接（窗口判定读它），%s 由这里的 EPOCH 替身承接（节流 / 冷却读它）
 ka_at() {
@@ -487,10 +492,10 @@ DRIVER
   t_eq "④ 冷却中给出可读的原因（那一行仍记了失败）" "$(ka_log "$KA_WORK/ctl/ka.log" '失败')" "4"
   # ③ 的静默刷新已把状态文件里的 token 换成新的（2_BEEF），故 ④ 这一轮读到的是它。
   # 失败行的三段（rc + 屏幕状态 / api 层的诊断行 / 所采取的动作）在这一行里逐字钉住。
-  # 那几处用例的前导不打开调试档，故日志里的 token 是**打码形状**（保留前缀与尾 4 位）：
-  # 打码只改这一个字段，行的其余部分与升级前逐字相同。
+  # token 是明文：本套件的夹具在调试档（ka_env）——打码只改这一个字段，行的其余部分与
+  # 升级前逐字相同；默认档下的打码形状归 ka_case_token_mask。
   t_has "④ 冷却中的日志文案（rc + api 层那一行 + 屏幕状态与动作）" "$KA_WORK/ctl/ka.log" \
-    "保活: ❌ 2_****BEEF 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 3 失败) — 刷新冷却中，稍后再试"
+    "保活: ❌ 2_BEEF 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 3 失败) — 刷新冷却中，稍后再试"
 }
 
 # 保活统计与日志文案（对外契约）：成功 / 失败两条各自逐字断言。
@@ -518,11 +523,13 @@ DRIVER
   d="$KA_WORK/stat.out"
   # 日志里的中文文案不能直接 grep（见 ka_log 的说明）：先用 ASCII 标记把「保活」那两行
   # 抓成小窗口，再对窗口逐字比对——文案是使用者可见的对外契约，必须逐字。
+  # 本套件的夹具在**调试档**（ka_env 里那一条）：心跳只在这一档写，而这一档的 token 是明文。
+  # 默认档下的打码形状不在这里验——它在那边根本没有心跳行，形状归 ka_case_token_mask。
   ka_near "$KA_WORK/ctl/ka.log" "保活" 5
   t_has "保活成功的日志文案（含今日成功/失败数）" "$KA_WORK/ctl/ka.log" \
-    "保活: ✅ 2_****C0DE token 有效 (今日 1 成功 / 0 失败)"
+    "保活: ✅ 2_C0DE token 有效 (今日 1 成功 / 0 失败)"
   t_has "保活失败的日志文案（rc + api 层那一行 + 屏幕状态与动作）" "$KA_WORK/ctl/ka.log" \
-    "保活: ⚠️ 2_****DEAD 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 1 失败) — 尝试静默刷新"
+    "保活: ⚠️ 2_DEAD 调用失败 rc=1 screen=off net rc=1 http=- 耗时=12ms (今日 1 成功 / 1 失败) — 尝试静默刷新"
 }
 
 # ============================================================
@@ -656,15 +663,16 @@ LD='./ld2'
 ka_tokens ld2 2_DEAD
 keepalive_ping
 DRIVER
-  ka_near "$KA_WORK/ctl/net.line" "****C0DE" 2
-  # 网络类那一行：rc 与 api 层那一行（连接层形态）原样并列，屏幕状态与动作各就各位
+  ka_near "$KA_WORK/ctl/net.line" "2_C0DE" 2
+  # 网络类那一行：rc 与 api 层那一行（连接层形态）原样并列，屏幕状态与动作各就各位。
+  # token 是明文（夹具在调试档）；打码形状（同一行的 2_****C0DE 形态）归 ka_case_token_mask。
   t_has "网络类失败行（连接层：net rc + 报错原文 + 屏幕状态 + 动作）" "$KA_WORK/ctl/net.line" \
-    "保活: ❌ 2_****C0DE 调用失败 rc=7 screen=off net rc=7 http=- err=curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused 耗时=12ms (今日 0 成功 / 1 失败) — 刷新冷却中，稍后再试"
+    "保活: ❌ 2_C0DE 调用失败 rc=7 screen=off net rc=7 http=- err=curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused 耗时=12ms (今日 0 成功 / 1 失败) — 刷新冷却中，稍后再试"
   t_hasnt "网络类那一行不伪造状态码" "$KA_WORK/ctl/net.line" "http=200"
-  ka_near "$KA_WORK/ctl/auth.line" "****DEAD" 2
+  ka_near "$KA_WORK/ctl/auth.line" "2_DEAD" 2
   # 登录态那一行：rc=0 与服务端的状态码/正文并列——与上一行一眼分得开
   t_has "登录态失败行（rc=0 + 服务端状态码与正文 + 屏幕状态 + 动作）" "$KA_WORK/ctl/auth.line" \
-    '保活: ❌ 2_****DEAD 调用失败 rc=0 screen=on http=200 body={"code":1,"message":"not login"} 耗时=12ms (今日 0 成功 / 2 失败) — 屏幕亮着，延后（熄屏或签到时段自动刷新）'
+    '保活: ❌ 2_DEAD 调用失败 rc=0 screen=on http=200 body={"code":1,"message":"not login"} 耗时=12ms (今日 0 成功 / 2 失败) — 屏幕亮着，延后（熄屏或签到时段自动刷新）'
   t_hasnt "登录态那一行没有连接层事实（不是网络问题）" "$KA_WORK/ctl/auth.line" "net rc="
   t_eq "两档各占一行，日志里分得清" \
     "$(ka_log "$KA_WORK/mod/fafu_checkin.log" '调用失败')" "2"

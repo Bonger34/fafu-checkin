@@ -6,16 +6,39 @@
 #   sh /sdcard/Download/device-smoke.sh
 #
 # 输出：边跑边写 /sdcard/Download/fafu-smoke-<时间戳>.txt（终端中途被回收也留得下已跑的部分）
-# 配置：M=<模块目录>（默认 /data/adb/modules/fafu-checkin）；WAIT_KA=0 跳过保活等待
+# 配置：M=<模块目录>（默认 /data/adb/modules/fafu-checkin）；WAIT_KA=0 跳过保活等待；
+#       OUT=<证据文件落点>（默认 /sdcard/Download/fafu-smoke-<时间戳>.txt，断言里换成临时目录用）
 # ============================================================
 
 M="${M:-/data/adb/modules/fafu-checkin}"
 E="$M/fafu_checkin.sh"
 LOG="$M/fafu_checkin.log"
-OUT="/sdcard/Download/fafu-smoke-$(date '+%Y%m%d-%H%M%S').txt"
+OUT="${OUT:-/sdcard/Download/fafu-smoke-$(date '+%Y%m%d-%H%M%S').txt}"
 WAIT_KA="${WAIT_KA:-1000}"         # 等下一个保活节拍的上限（秒）：节拍间隔 15 分钟，
                                    # 脚本可能刚好在其后起跑，故留到 17 分钟才算超时
 export M E WAIT_KA OUT
+
+# ---- 冒烟前先把调试档打开（这份脚本的几条观察点只在调试档里写得出来） ----
+# 依赖调试档的观察点：降权探测「可用」那一行（第 1 节）与保活心跳（第 5 节数节拍）。
+# 两条边界：
+#   ① 档位是模块的在册配置键，写入只经 `setconfig`（唯一写入闸门），不直接改配置文件；
+#   ② 退出前恢复成进脚本时的样子——留着调试档开着会让使用者的日志一直涨，而那是脚本造成的。
+#      恢复挂在退出 trap 上，提前失败（用法报错、中途 bad 之后退出）也走同一条路。
+# 旧版模块的 webstate 里没有 debug= 字段：读不到就整段跳过，不猜也不改。
+DBG_BEFORE=""
+dbg_restore() {
+  [ "$DBG_BEFORE" = "1" ] && return 0        # 本来就是调试档：不必改回去
+  [ -n "$DBG_BEFORE" ] || return 0           # 读不出原档位（旧版模块）：什么都不做
+  sh "$E" setconfig "DEBUG=$DBG_BEFORE" >/dev/null 2>&1
+  return 0
+}
+DBG_BEFORE=$(sh "$E" webstate 2>/dev/null | sed -n 's/^debug=//p' | head -n 1)
+if [ -n "$DBG_BEFORE" ]; then
+  trap 'dbg_restore' EXIT INT TERM HUP
+  # 原本就是调试档时不必写一次（写同样的值是空操作，但会白跑一遍写入闸门）
+  [ "$DBG_BEFORE" = "1" ] || sh "$E" setconfig DEBUG=1 >/dev/null 2>&1
+fi
+export DBG_BEFORE
 
 # 报告正文：单独一段，由外层用 `sh -c` 跑并把 stdout 边跑边 tee 进证据文件。
 # 结论（失败项数）走 $OUT.rc 旁路文件：管道之后 $? 是 tee 的，拿不到本段的退出码。
@@ -102,6 +125,7 @@ fi
 
 sect "0 · 前置：模块目录与层文件"
 say "模块目录: $M"
+say "调试档: 本次冒烟为开（退出时恢复为 ${DBG_BEFORE:-未改}）"
 say "版本: $(sed -n 's/^version=//p' "$M/module.prop" 2>/dev/null)"
 say "--- 目录内容"
 ls -l "$M" 2>&1 | sed 's/^/    /'
@@ -169,6 +193,9 @@ for k in service sign_state sign_time ka_ok ka_fail ka_last ka_last_result token
 done
 has "$WS_OUT" "service=" "webstate：有服务开关"
 has "$WS_OUT" "poll_start=" "webstate：有轮询范围（配置生效值）"
+# status 里的 token 是本次比对的原像。**必须在调试档下取**：默认档下 status 自己就把
+# token 打了码，拿打码串去比就永远不会命中，这条检查会静默变成空转——本脚本开头已经把
+# 调试档打开，这一节的两次 status / webstate 因此都读到明文（顺序不能调换）。
 TOK_FULL=$(sed -n 's/^token: //p' "$STATUS_OUT" 2>/dev/null)
 case "$TOK_FULL" in
   ""|*"未找到"*) : ;;
@@ -282,12 +309,17 @@ sect "6 · setconfig 往返（写入闸门；不改变任何配置值）"
 # 「改配置」本身不适合由冒烟脚本代劳（它会真的改变模块行为），所以这里只走一次
 # **无副作用的往返**：把当前生效值原样交给写入闸门 → 断言它接受、并回显同一套值。
 # 校验先于落盘这条链因此也被真机走了一遍；失败时给出可读原因（这正是页面要显示的东西）。
+# 档位键（DEBUG）也在册，故一并进清单：它现在生效的就是 1（本脚本开头打开的那一档）。
 WS_KEYS=""
 for k in KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN; do
   v=$(printf '%s\n' "$WS_OUT" | sed -n "s/^$(printf '%s' "$k" | tr 'A-Z' 'a-z')=//p")
   [ -n "$v" ] || v=$(printf '%s\n' "$(sh "$E" webstate 2>/dev/null)" | sed -n "s/^$(printf '%s' "$k" | tr 'A-Z' 'a-z')=//p")
   WS_KEYS="$WS_KEYS $k=$v"
 done
+# 档位键单列：旧版模块的 webstate 里没有 debug= 字段，读不到就不进清单——塞一个空值进去
+# 会被闸门按「未登记的配置键」拒掉，那会把「拿新脚本冒烟旧模块」误判成失败。
+DBG_NOW=$(printf '%s\n' "$WS_OUT" | sed -n 's/^debug=//p')
+[ -n "$DBG_NOW" ] && WS_KEYS="$WS_KEYS DEBUG=$DBG_NOW"
 if [ -n "$(printf '%s' "$WS_KEYS" | tr -d ' ')" ]; then
   run setconfig $WS_KEYS
   SET_OUT="$OUT_LAST"
