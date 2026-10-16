@@ -146,6 +146,82 @@ DRIVER
 }
 
 # ============================================================
+# 六·七、查询失败的当日去重（默认档）
+#
+# 一晚上拿不到任务时，同一条失败每 60 / 240 秒会重复一次；默认档只在**原因**变化时再留一条。
+# 原因 = rc + 这一次调用为什么失败（状态码 / 正文 / 报错原文）+ 本层那份正文；
+# 响应头里的 Date 与耗时是「这一次调用的读数」而不是原因（服务端的钟每分钟都在走，
+# 算进原因键就等于每条都算新原因，去重失效）。
+# 断言只看日志文件名下有哪些行、各几行，以及默认档那一行是否仍带着完整诊断。
+# ============================================================
+
+sg_case_fetch_dedup() {
+  local d
+  sg_setup fetch-dedup
+  sg_at 1200                                   # 20:00：查询失败与窗口判定无关
+  sg_body_long > "$SG_WORK/ctl/long.body"
+  sg_run fetch_dedup <<'DRIVER'
+tier() { printf 'DEBUG=%s\n' "$1" > mod/fafu-checkin.conf; cfg_load; }
+n1() { grep -c '查询异常:' mod/fafu_checkin.log; }
+n2() { grep -c '获取任务失败:' mod/fafu_checkin.log; }
+# 一轮 = 一次完整检查里的两次查询都失败（刷新 token 后重试仍失败）。
+# 响应头里的 Date 每轮都不同：它是这一次调用的读数，不是原因。
+round() {
+  printf 'Date: %s\nContent-Length: 53\n' "$1" > ctl/hdr.cur
+  http_post() {
+    _api_note 0 200 "$(cat ctl/long.body)" "" ctl/hdr.cur "" ""
+    printf '%s' "$(cat ctl/long.body)"
+    return 0
+  }
+  run_once
+}
+tier 0
+round 'Mon, 13 Oct 2025 21:30:00 GMT'; printf 'rc=%s\n' "$?"
+round 'Mon, 13 Oct 2025 21:31:00 GMT'
+round 'Mon, 13 Oct 2025 21:32:00 GMT'
+printf 'same=%s\n' "$(n1)"
+printf 'same_retry=%s\n' "$(n2)"
+LC_ALL=C grep -aF -e '查询异常:' mod/fafu_checkin.log | head -n 1 > ctl/off.line
+# 服务端那一次报错的原文变了 → 原因变了，再留一条
+printf '%s\n' '{"timestamp":1759500000000,"status":500,"message":"另一个错"}' > ctl/long.body
+round 'Mon, 13 Oct 2025 21:33:00 GMT'
+printf 'body=%s\n' "$(n1)"
+# 人主动按的子命令不受当日去重限制（真入口那条由 poll 套件验，这里验标记的语义）
+FAFU_MANUAL=1
+round 'Mon, 13 Oct 2025 21:34:00 GMT'
+printf 'manual=%s\n' "$(n1)"
+printf 'manual_retry=%s\n' "$(n2)"
+FAFU_MANUAL=0
+# 调试档：被降级的重复轮次逐条写回来（一条都没被吞掉）
+tier 1
+round 'Mon, 13 Oct 2025 21:35:00 GMT'
+round 'Mon, 13 Oct 2025 21:36:00 GMT'
+printf 'debug=%s\n' "$(n1)"
+printf 'debug_retry=%s\n' "$(n2)"
+DRIVER
+  d="$SG_WORK/fetch_dedup.out"
+  t_eq "每一轮都返回 2（取不到任务）" "$(sg_val "$d" rc)" "2"
+  t_eq "同一种失败连续三轮：默认档只有首次那一条（响应头 Date 每轮不同，不算原因变化）" \
+    "$(sg_val "$d" same)" "1"
+  t_eq "同一条失败的两个失败点共用一个原因键：刷新后重试那一条不重复留" \
+    "$(sg_val "$d" same_retry)" "0"
+  t_eq "错误原文变了：默认档再留一条" "$(sg_val "$d" body)" "2"
+  t_eq "人主动按的子命令不受当日去重限制" "$(sg_val "$d" manual)" "3"
+  t_eq "人主动按的那一次把两个失败点都留下（不受当日去重限制）" \
+    "$(sg_val "$d" manual_retry)" "1"
+  t_eq "调试档：重复轮次逐条可见（两轮各一条写回来）" "$(sg_val "$d" debug)" "5"
+  t_eq "调试档：同一条失败的两个失败点也逐条可见" "$(sg_val "$d" debug_retry)" "3"
+
+  # 默认档那一行仍带着接口那次的完整诊断：状态码 + 完整正文 + 响应头 + 耗时 + 查询参数。
+  # 去重只影响「写不写」，不影响「写什么」。
+  t_has "默认档：失败行带状态码与完整正文" "$SG_WORK/ctl/off.line" \
+    "查询异常: rc=0 http=200 body={\"timestamp\":1759500000000,\"status\":400"
+  t_has "默认档：失败行带响应头那一整段（Date 也在）" "$SG_WORK/ctl/off.line" \
+    "hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT|Content-Length: 53}"
+  t_has "默认档：失败行以耗时读数收尾" "$SG_WORK/ctl/off.line" "耗时=0s params=rows=3&pageNum=1"
+}
+
+# ============================================================
 # 七、结构边界（静态）：四个函数各归其位、判定链与主循环的两条分支都还在
 #
 # 判据只用**能力名**与**调用形状**，不绑行号、也不绑局部变量名。
@@ -204,5 +280,6 @@ sg_case_boundary() {
 
 # ---- 注册（顺序即执行顺序）----
 t_case "signin-query · 查询失败：参数与完整正文" sg_case_fetch_fail
+t_case "signin-query · 查询失败当日去重（原因变了再留、手动命令不受限）" sg_case_fetch_dedup
 t_case "signin-query · 任务变化：四元组变了才记一行（含跨日）" sg_case_task_change
 t_case "signin-query · 判定链与主循环分支（静态）" sg_case_boundary

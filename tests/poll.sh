@@ -1002,10 +1002,193 @@ poll_case_debug_tier() {
     "$(cat "$d1/.fafu_api.raw" 2>/dev/null)" "$(cat "$d0/.fafu_api.raw" 2>/dev/null)"
 }
 
+# ============================================================
+# 十、失败行的当日去重（真入口的守护主循环）
+#
+# 这一条跑的是真实入口 + 真实判定链，只顶掉三处环境事实：时间（拨钟文件）、休眠（按计划
+# 拨钟的替身）、网络（一个「永远连不上」的 curl 替身）。于是「同一种失败连续多轮」与
+# 「跨日重新计数」都落在真实的主循环节拍上——这是唯一能同时控制时间线与读整份日志的地方。
+# 去重状态只在内存里：换一个进程（守护进程重启）最多重复一行；模块目录里不新增任何
+# 运行时文件（状态既没落盘、也没进状态层）。
+# ============================================================
+
+# 这一组用例共用的夹具：模块副本 + 拨钟 + 「永远连不上」的网络替身。
+# 观察面复用端到端那条（poll_e2e_inject 的 _now 拨钟映射与按计划拨钟的 sleep 替身、
+# refresh_token 替身），只把网络事实换成一份逐字固定的失败。
+poll_fail_setup() { # $1=用例名 $2=档位 0|1
+  local name tier
+  name="$1"; tier="${2:-0}"
+  POLL_WORK="$T_WORK_ROOT/poll-fail-$name"
+  rm -rf "$POLL_WORK"
+  t_stage_module "$POLL_WORK/mod" >/dev/null
+  mkdir -p "$POLL_WORK/ctl" "$POLL_WORK/bin" "$POLL_WORK/ld"
+  t_bb_wrap "$POLL_WORK/bin/bb" >/dev/null
+  : > "$POLL_WORK/ctl/sleeps"
+  : > "$POLL_WORK/ctl/env.seen"
+  printf '1\n' > "$POLL_WORK/ctl/rand"                    # 签名随机数的替身序号
+  # token 来源：真实 get_token 读它（应用未安装在本机，故给一份最小的本地存储）
+  printf 'j\000"token":"2_C0DE"\000j' > "$POLL_WORK/ld/000001.ldb"
+  poll_e2e_epoch
+  POLL_LD_DIR='./ld'
+  POLL_CURL_BIN='./bin/curl'
+  POLL_SU_MODE=''                # 不继承降权探测结果：通知在本组用例里整个关掉
+  POLL_SU_BIN=''
+  POLL_TIMEOUT=300
+  poll_config 'KEEPALIVE=0
+NOTIFY=0
+POLL_START=19:00
+POLL_END=22:15' "$tier"
+  # 网络替身：每一次调用都以同样的方式失败（真实 api 层照常把这一次的事实落成一行诊断）。
+  # 顺带把「子进程看到的手动标记」记下来：FAFU_MANUAL 只该在派发它的那个进程里生效，
+  # 导出的话会被子进程继承（enable 派生出的守护进程就是这样一个子进程）。
+  cat > "$POLL_WORK/bin/curl" <<'FAIL_CURL'
+#!/bin/sh
+for _a in "$@"; do
+  [ "$_a" = "--version" ] && { echo "curl 8.0.0"; exit 0; }
+done
+printf '%s\n' "${FAFU_MANUAL:-0}" >> ctl/env.seen
+echo 'curl: (7) Failed to connect to stuhtapi.fafu.edu.cn port 80: Connection refused' >&2
+exit 7
+FAIL_CURL
+  chmod +x "$POLL_WORK/bin/curl" 2>/dev/null
+  poll_e2e_inject                 # _now / sleep / refresh_token 三处替身（刷新用默认桩）
+}
+
+# 跑一次手动子命令（真入口 + 同一套夹具环境）。手动命令是**另一个进程**，故它只是
+# 「人主动按的那一次」——它自己的失败要在日志里留下记录。
+poll_cmd() { # $1…=子命令与参数
+  local bb
+  bb=$(t_find_busybox)
+  (
+    cd "$POLL_WORK" || exit 1
+    export PATH="$POLL_WORK/bin:$PATH" BB_OVERRIDE='./bin/bb' \
+      MOCK_DATE_CTL='./ctl/date' MOCK_WGET_DIR='./ctl' MOCK_DEVICE_DIR='./ctl' \
+      MOCK_RANDOM_CTL='./ctl/rand' SU_MODE=''
+    LD_DIR="${POLL_LD_DIR:-}" CURL_BIN="${POLL_CURL_BIN:-}"
+    export LD_DIR CURL_BIN
+    if [ -n "$bb" ]; then "$bb" timeout 120 $(t_sh) './mod/fafu_checkin.sh' "$@"
+    else $(t_sh) './mod/fafu_checkin.sh' "$@"; fi
+  ) > "$POLL_WORK/cmd.out" 2>&1
+}
+
+# 日志里某个字面量出现的行数（-F 字面量：文案即契约，不把文案当正则）
+poll_fail_lines() { # $1=字面量
+  poll_tier_lines "$(poll_e2e_log)" "$1"
+}
+
+# 上面那条的「限定在某一天」：两次 -F 字面量筛选。读的是**原始日志**（log.txt 已经去过
+# 行首时间戳，而这一条筛的就是时间戳）；中文文案不写进正则（本机 grep 的多字节匹配不稳）
+poll_fail_day_lines() { # $1=日期 $2=字面量
+  LC_ALL=C grep -aF -e "$2" "$POLL_WORK/mod/fafu_checkin.log" 2>/dev/null \
+    | LC_ALL=C grep -acF -e "[$1 " 2>/dev/null
+}
+
+# 模块目录里**不在这份清单里**的东西：运行时文件的名字是 state / api 两层与模块自身的
+# 对外契约（见 docs 的文件说明），多出来的就是「去重状态落盘」这类新状态。
+# 注意：清单只用来判「多了什么」，不判「少了什么」——少了哪一份由上面各套断言负责。
+POLL_MOD_FILES='fafu_checkin.sh module.prop lib fafu-checkin.conf fafu-checkin.state
+fafu_checkin.log fafu_checkin.status fafu_keepalive.status .fafu_checkin.pid
+.fafu_checkin_done .fafu_task_seen .fafu_task_snap
+.fafu_notify_fail .fafu_notify_nosign .fafu_notify_late .fafu_notify_miss .fafu_notify_last
+.fafu_api.err .fafu_api.hdr .fafu_api.raw'
+
+poll_mod_stray() {
+  local f out
+  out=""
+  for f in "$POLL_WORK"/mod/* "$POLL_WORK"/mod/.[!.]*; do
+    [ -e "$f" ] || continue
+    case " $(printf '%s' "$POLL_MOD_FILES" | tr '\n' ' ') " in
+      *" ${f##*/} "*) ;;
+      *) out="$out ${f##*/}" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+poll_case_fail_dedup() {
+  local log
+  poll_fail_setup dedup 0
+  # 时间线：第一天连着三轮同一种失败，第四轮跨到第二天（同样的失败）
+  printf '%s\n' \
+    "$POLL_E2E_D1 19:00 fail" \
+    "$POLL_E2E_D1 19:04 fail" \
+    "$POLL_E2E_D1 19:05 fail" \
+    "$POLL_E2E_D2 19:00 fail" > "$POLL_WORK/ctl/rounds"
+  printf '%s 19:00\n' "$POLL_E2E_D1" > "$POLL_WORK/ctl/date"
+  poll_start
+
+  # 防空转：主循环真的按计划走完四轮（失败档每轮都是 4 分钟后重试）
+  t_eq "主循环按计划走完四轮（失败档每轮 4 分钟后重试）" \
+    "$(poll_slept)" "240|240|240|240|"
+  log=$(poll_e2e_log)
+  t_file "日志非空" "$log"
+
+  # ---- 同一种失败连续多轮：默认档只有首次那一条 ----
+  t_eq "第一天连着三轮同一种失败：默认档只有首次那一条" \
+    "$(poll_fail_day_lines "$POLL_E2E_D1" '查询异常:')" "1"
+  t_eq "两天的同一种失败各留一条（一共两条，不是每轮一条）" \
+    "$(poll_fail_lines '查询异常:')" "2"
+  # 同一条失败的两个失败点（查询失败 → 刷新后重试仍失败）共用一个原因键：
+  # 默认档只留先到的那一条，诊断里已经有 rc 与完整正文。
+  t_eq "同一条失败的两个失败点不重复留（刷新后重试那一条被折叠）" \
+    "$(poll_fail_lines '获取任务失败:')" "0"
+
+  # ---- 跨日重新计数：第二天的同一种失败又算首次 ----
+  t_eq "跨日重新计数：第二天的同一种失败再留一条" \
+    "$(poll_fail_day_lines "$POLL_E2E_D2" '查询异常:')" "1"
+
+  # ---- 去重状态不落盘：守护进程重启后最多重复一行 ----
+  # 换一个进程（同一个模块目录、同一份日志）：内存里的去重状态从空开始，
+  # 故首次那一条最多再写一遍——多写就说明状态以别的形式留下来了。
+  printf '%s\n' "$POLL_E2E_D1 19:00 fail" "$POLL_E2E_D1 19:04 fail" > "$POLL_WORK/ctl/rounds"
+  printf '%s 19:00\n' "$POLL_E2E_D1" > "$POLL_WORK/ctl/date"
+  printf 'enabled\n' > "$POLL_WORK/mod/fafu-checkin.state"    # 上一轮收尾时被置成停用
+  poll_start
+  t_eq "重启后最多重复一行（状态只在内存里）" \
+    "$(poll_fail_lines '查询异常:')" "3"
+  t_eq "重启那一个进程里也只多出一条（它的第二轮不再写）" \
+    "$(poll_fail_day_lines "$POLL_E2E_D1" '查询异常:')" "2"
+
+  # ---- 去重状态不落盘：模块目录里没有新增任何运行时文件 ----
+  t_eq "运行时文件没有新增（去重状态没落盘、也没进状态层）" "$(poll_mod_stray)" ""
+}
+
+poll_case_manual_cmd() {
+  local log
+  poll_fail_setup manual 0
+  printf '%s\n' \
+    "$POLL_E2E_D1 19:00 fail" \
+    "$POLL_E2E_D1 19:04 fail" \
+    "$POLL_E2E_D1 19:05 fail" > "$POLL_WORK/ctl/rounds"
+  printf '%s 19:00\n' "$POLL_E2E_D1" > "$POLL_WORK/ctl/date"
+  poll_start
+  log=$(poll_e2e_log)
+  t_eq "守护进程连着失败三轮：默认档只有首次那一条" "$(poll_fail_lines '查询异常:')" "1"
+
+  # 人主动按的子命令：不受当日去重限制——「我刚按了一下，现在是什么结果」必须留在日志里。
+  # 手动那一次把**两个失败点都留下**（守护进程那一轮只留了先到的那一条），
+  # 故这一条同时钉住了「分发路径真的置上了 FAFU_MANUAL」。
+  poll_cmd once
+  poll_cmd once
+  t_eq "手动命令触发的失败不受当日去重限制（两次各留一份）" \
+    "$(poll_fail_lines '查询异常:')" "3"
+  t_eq "手动那两次把刷新后重试那一条也留下" \
+    "$(poll_fail_lines '获取任务失败:')" "2"
+
+  # 手动标记只在本进程内生效：导出的话会被它派生出的进程（enable 起的守护进程）继承，
+  # 那个进程会整天不去重。网络工具是手动命令的子进程，它看到的就是真值。
+  t_ne "网络替身确实被调过（下面那条不变量才有意义）" \
+    "$(LC_ALL=C grep -ac . "$POLL_WORK/ctl/env.seen" 2>/dev/null)" "0"
+  t_eq "手动标记没有被子进程继承（子进程看到的都是 0）" \
+    "$(LC_ALL=C grep -ac '^1$' "$POLL_WORK/ctl/env.seen" 2>/dev/null)" "0"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "poll · 六类排障日志在真实调用次序下都出现（端到端）" poll_case_e2e_logs
 t_case "poll · 档位对照：默认档降噪、调试档写回（真入口）" poll_case_debug_tier
+t_case "poll · 失败行当日去重（真入口：连续多轮 / 跨日 / 重启 / 不落盘）" poll_case_fail_dedup
+t_case "poll · 手动命令的失败不受当日去重限制（真入口）" poll_case_manual_cmd
 t_case "poll · 轮询范围（拨钟逐时点）" poll_case_window
 t_case "poll · 当日已解决即停轮询（四类）" poll_case_resolved
 t_case "poll · 提交失败继续重试到范围止" poll_case_retry

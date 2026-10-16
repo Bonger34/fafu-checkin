@@ -311,6 +311,54 @@ DRIVER
   t_eq "信息不完整：日志文案不变" "$(sg_log)" "暂无有效任务（信息不完整）"
 }
 
+# 「未检测到应用数据」与「暂无有效任务（信息不完整）」两档的原因键是**固定档**：
+# 这两档没有更细的原因可分（缺哪个字段、目录为什么不在，处置都是「过一会儿再来」），
+# 故同一种失败当晚只留首次、跨日重新计数，重复轮次只在调试档可见。
+sg_case_fixed_reason_dedup() {
+  local d
+  sg_setup fixed-dedup
+  sg_at 1290
+  # 信息不完整那一档的响应体：接口在返回、只是必需字段没齐
+  printf '{"records":[{"name":"晚查寝签到","signInStudent":{"signState":0}}]}\n' > "$SG_WORK/ctl/body.page"
+  sg_run fixed_dedup <<'DRIVER'
+tier() { printf 'DEBUG=%s\n' "$1" > mod/fafu-checkin.conf; cfg_load; }
+n1() { grep -c '未检测到应用数据' mod/fafu_checkin.log; }
+n2() { grep -c '暂无有效任务' mod/fafu_checkin.log; }
+mkdir -p ./appdata
+SLEEP_OVERRIDE=:
+export SLEEP_OVERRIDE
+tier 0
+# ① 应用数据目录一直不可读：三轮都返回 2
+LD=./mod/definitely-not-there
+run_once; run_once; run_once; printf 'rc=%s\n' "$?"
+printf 'nold_same=%s\n' "$(n1)"
+# 跨日重新计数
+printf '%s\n' '2026-10-02 21:30' > ctl/date
+SG_NOW_S=$((SG_EPOCH + 86400 + 1290 * 60)); export SG_NOW_S
+run_once
+printf 'nold_nextday=%s\n' "$(n1)"
+# ② 任务信息不完整：同样三轮
+LD=./appdata
+printf 'page:0\n' > ctl/api.seq
+printf '0' > ctl/seq.n
+run_once; run_once; run_once; printf 'rc2=%s\n' "$?"
+printf 'task_same=%s\n' "$(n2)"
+# 调试档：重复轮次逐条可见
+tier 1
+run_once; run_once
+printf 'task_debug=%s\n' "$(n2)"
+DRIVER
+  d="$SG_WORK/fixed_dedup.out"
+  t_eq "应用数据读不到：仍返回 2（有界，不会挂住）" "$(sg_val "$d" rc)" "2"
+  t_eq "未检测到应用数据：连续三轮同一种失败，默认档只有首次那一条" \
+    "$(sg_val "$d" nold_same)" "1"
+  t_eq "未检测到应用数据：跨日重新计数" "$(sg_val "$d" nold_nextday)" "2"
+  t_eq "任务信息不完整：仍返回 1（可重试）" "$(sg_val "$d" rc2)" "1"
+  t_eq "暂无有效任务：连续三轮同一种失败，默认档只有首次那一条" \
+    "$(sg_val "$d" task_same)" "1"
+  t_eq "暂无有效任务：调试档里三轮逐条可见" "$(sg_val "$d" task_debug)" "3"
+}
+
 # 解析这一步的输出契约：字段由 signin_parse 写进调用方声明的 local，判定再按参数收下。
 # 写成四个函数时最容易在这里出问题——写回目标与被写回的局部同名时 eval 会写给自己，
 # 判定于是拿到空字段、一路走错分支。这条端到端钉住「字段确实传出去了」。
@@ -562,6 +610,67 @@ DRIVER
   t_eq "当日仅首次通知：第二轮因落过标记被判成已发过" "$(sg_val "$d" skipped)" "1"
 }
 
+# 提交失败汇总行的当日去重：一晚上提交失败会每 60 / 240 秒重复一条几乎相同的汇总行，
+# 默认档只在**原因**变化时再留一条；重复轮次只在调试档可见。
+# 原因 = rc + 这一次调用为什么失败（状态码 / 服务端正文）；发出去的参数与试了几次由失败本身
+# 决定，同一晚不会各自漂移，故只在文案里、不进原因键。
+# 人主动按的子命令（入口的分发路径会置 FAFU_MANUAL）一律算当日首次——「我刚按了一下」必须留痕。
+sg_case_submit_failed_dedup() {
+  local d
+  sg_setup submit-dedup
+  sg_at 1291                       # 21:31：主窗口内，每一轮都会走到提交
+  sg_body 1290 0 > "$SG_WORK/ctl/body.page"
+  printf '%s\n' "$SG_SIGN_FAIL" > "$SG_WORK/ctl/body.sign"
+  printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/hdr"
+  sg_run submit_dedup <<'DRIVER'
+tier() { printf 'DEBUG=%s\n' "$1" > mod/fafu-checkin.conf; cfg_load; }
+nf() { grep -c '签到失败:' mod/fafu_checkin.log; }
+# 一轮：一次成功查询 + 提交全被拒（序列是「这一个驱动内的第 N 次调用」，故每轮复位）
+round() {
+  printf 'page:0\nsign:0\n' > ctl/api.seq
+  printf '0' > ctl/seq.n
+  run_once
+}
+tier 0
+round; printf 'rc=%s\n' "$?"
+round; round
+printf 'same=%s\n' "$(nf)"
+LC_ALL=C grep -aF -e '签到失败:' mod/fafu_checkin.log | head -n 1 > ctl/off.line
+# 服务端那一次报错的原文变了 → 原因变了，再留一条
+printf '%s\n' '{"timestamp":1759500000000,"status":500,"msg":"另一个错"}' > ctl/body.sign
+round
+printf 'body=%s\n' "$(nf)"
+# 状态码变了（同样被拒）→ 再留一条
+printf '503\n' > ctl/http
+round
+printf 'code=%s\n' "$(nf)"
+# 人主动按的子命令：同一天、同一个原因，也必须留下这一条
+FAFU_MANUAL=1
+round
+printf 'manual=%s\n' "$(nf)"
+FAFU_MANUAL=0
+# 调试档：重复轮次逐条写回来（一条都没被吞掉）
+tier 1
+round; round
+printf 'debug=%s\n' "$(nf)"
+DRIVER
+  d="$SG_WORK/submit_dedup.out"
+  t_eq "每一轮都提交失败（返回 1，下一分钟再来）" "$(sg_val "$d" rc)" "1"
+  t_eq "同一种失败连续三轮：默认档只有首次那一条" "$(sg_val "$d" same)" "1"
+  t_eq "服务端错误原文变了：默认档再留一条" "$(sg_val "$d" body)" "2"
+  t_eq "状态码变了：默认档再留一条" "$(sg_val "$d" code)" "3"
+  t_eq "人主动按的子命令不受当日去重限制" "$(sg_val "$d" manual)" "4"
+  t_eq "调试档：重复轮次逐条可见（两轮各写一条）" "$(sg_val "$d" debug)" "6"
+
+  # 默认档那一行仍带着接口那次的完整诊断：rc + 发出去的参数 + 状态码 + 完整正文
+  # + 响应头四项 + 耗时。去重只影响「写不写」，不影响「写什么」。
+  t_has "默认档：失败行带 rc 与发出去的参数" "$SG_WORK/ctl/off.line" \
+    "签到失败: rc=0 rid=88123 lng=119.243462 lat=26.088417 try=3 tries=2"
+  t_has "默认档：失败行带状态码与完整正文" "$SG_WORK/ctl/off.line" "http=200 body=$SG_SIGN_FAIL"
+  t_has "默认档：失败行带响应头四项" "$SG_WORK/ctl/off.line" "$SG_HDR_LINE"
+  t_has "默认档：失败行以耗时读数收尾" "$SG_WORK/ctl/off.line" "耗时=0s"
+}
+
 # ---- 注册（顺序即执行顺序）----
 t_case "signin-submit · 时钟与夹具自证" sg_case_clock
 t_case "signin-submit · 三档返回码（成功 / 可重试 / 任务异常）" sg_case_codes
@@ -571,6 +680,7 @@ t_case "signin-submit · 分支：已请假（记录 + 通知）" sg_case_branch
 t_case "signin-submit · 分支：窗口内提交（normal）" sg_case_branch_window
 t_case "signin-submit · 分支：不在时段（可重试）" sg_case_branch_outside
 t_case "signin-submit · 任务信息不完整（可重试）" sg_case_parse_incomplete
+t_case "signin-submit · 固定原因的两档也当日去重（含跨日）" sg_case_fixed_reason_dedup
 t_case "signin-submit · 解析写回调用方字段（端到端）" sg_case_parse_outputs
 t_case "signin-submit · 截止字段回退 endTime" sg_case_parse_fallback
 t_case "signin-submit · 坐标缺失回退内置坐标" sg_case_coords_fallback
@@ -578,4 +688,5 @@ t_case "signin-submit · 坐标取值优先级（signInStudent ＞ 顶层 ＞ �
 t_case "signin-submit · token 一路传到提交（端到端）" sg_case_token_chain
 t_case "signin-submit · 提交：补签（supplement）" sg_case_submit_supplement
 t_case "signin-submit · 提交失败：尝试行与汇总行" sg_case_submit_failed
+t_case "signin-submit · 提交失败汇总行的当日去重（原因变了再留、手动命令不受限）" sg_case_submit_failed_dedup
 t_case "signin-submit · 提交失败当日仅首次通知（跨轮）" sg_case_submit_failed_once

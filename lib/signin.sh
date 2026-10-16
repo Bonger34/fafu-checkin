@@ -59,51 +59,64 @@ SG_QUERY='rows=3&pageNum=1'
 # 查询失败那一行：rc + api 层落下的那行事实（原样转交，本层不自己拼 http= / body=）
 # + 查询参数 + 本层才拿得到的正文 —— 于是「调用失败」与「应答了却没有任务列表」分得开：
 # 后一档的正文（响应里没有 records）只有本层手里有，故自己压平带上。
+
+# 当日去重（base 的 log_once）：原因键 = rc + 这一次调用为什么失败 + 本层那份正文。
+# **事件名不进原因键**：查询失败与「刷新后重试仍失败」在原因相同时是同一条失败的两个
+# 失败点，默认档只留先到的那一条（rc 与正文都在里面）；原因真的变了才会再写一条。
 _sg_fetch_fail() { # $1=事件名 $2=rc $3=响应体
-  local line
-  line="$1: rc=$2 $(_api_err1 "$API_ERRLOG") params=$SG_QUERY"
+  local fact line extra
+  fact=$(_api_err1 "$API_ERRLOG")
+  extra=""
+  line="$1: rc=$2 $fact params=$SG_QUERY"
   case "$2" in
-    0) line="$line $(_api_field resp "$3")" ;;
+    0) extra=$(_api_field resp "$3"); line="$line $extra" ;;
   esac
-  log "$line"
+  log_once fetch "rc=$2 $(_api_cause) $extra" "$line"
 }
 
-# 取任务：输出**两行**（第 1 行本次使用的 token、第 2 行响应体）。token 必须一起交出去：
-# 查询异常时本函数会刷新它，随后提交要用刷新后的那一个，单独再取一次是另一条时间线。
-# 无应用数据返回 2；查询异常时刷新 token 后重试一次，仍失败则通知并返回 2。
-signin_fetch() { # $1=token → stdout=<token>\n<响应体>；返回码见文件头
-  local tok resp rc newt fail
+# 取任务：$1=token；两行结果经 $2（本次使用的 token）与 $3（响应体）写回调用方声明的变量
+# （与 signin_parse 同一手法：调用方先 local 好名字再传进来）。无应用数据返回 2；
+# 查询异常时刷新 token 后重试一次，仍失败则通知并返回 2。
+
+# **不经 stdout 交结果**：调用方一旦用 $( ) 取值，这一步就整个落进子 shell，而失败行的
+# 当日去重状态（base 的 _LOG_SEEN）是主 shell 的变量——子 shell 里记下的「今晚这条已经
+# 写过」出不了子 shell，同一晚的失败会每轮重写一条，去重等于没做（见 base 的 log_once）。
+
+# 层内局部名一律 _sg_ 前缀：与写回目标同名时 eval 会写给自己（同 signin_parse 那个坑）。
+signin_fetch() { # $1=token $2=token 输出变量名 $3=响应体输出变量名；返回码见文件头
+  local _sg_tok _sg_resp rc newt fail
   fail=0
-  tok="$1"
+  _sg_tok="$1"
   if [ ! -d "$LD" ]; then
     _sg_wait_ld || {
       # 文案说清「会重试」：写成「未安装或未登录」会把瞬时状态说成永久故障，排查时反而误导。
-      log "未检测到应用数据（未安装、未登录，或重启后就绪前的瞬时状态）——稍后自动重试"
+      # 这一档没有更细的原因可分（缺什么字段都一样要重试），故原因键用固定档。
+      log_once nold fixed "未检测到应用数据（未安装、未登录，或重启后就绪前的瞬时状态）——稍后自动重试"
       return 2
     }
   fi
   # 判据写成「先取出布尔值再判」：`! echo ... | grep -q ...` 在这条 busybox ash 链路上会判反。
-  resp=$(api "sign_in/student/my/page" "rows=3&pageNum=1" "$tok"); rc=$?
-  case "$resp" in
+  _sg_resp=$(api "sign_in/student/my/page" "rows=3&pageNum=1" "$_sg_tok"); rc=$?
+  case "$_sg_resp" in
     *'"records"'*) fail=0 ;;
     *) fail=1 ;;
   esac
   if [ "$fail" = "1" ] || [ "$rc" != "0" ]; then
     # 这两种失败修法不同、而一天只有一次现场：各自都要留全。
-    _sg_fetch_fail "查询异常" "$rc" "$resp"
-    newt=$(refresh_token "$tok" 1 "签到查询失败"); [ -n "$newt" ] && tok="$newt"
-    resp=$(api "sign_in/student/my/page" "rows=3&pageNum=1" "$tok"); rc=$?
-    case "$resp" in
+    _sg_fetch_fail "查询异常" "$rc" "$_sg_resp"
+    newt=$(refresh_token "$_sg_tok" 1 "签到查询失败"); [ -n "$newt" ] && _sg_tok="$newt"
+    _sg_resp=$(api "sign_in/student/my/page" "rows=3&pageNum=1" "$_sg_tok"); rc=$?
+    case "$_sg_resp" in
       *'"records"'*) fail=0 ;;
       *) fail=1 ;;
     esac
     if [ "$fail" = "1" ] || [ "$rc" != "0" ]; then
-      _sg_fetch_fail "获取任务失败" "$rc" "$resp"
+      _sg_fetch_fail "获取任务失败" "$rc" "$_sg_resp"
       notify_once failtask
       return 2
     fi
   fi
-  printf '%s\n%s' "$tok" "$resp"
+  eval "$2=\$_sg_tok"; eval "$3=\$_sg_resp"
 }
 
 # 日志行上并排「服务端认为现在几点」（响应头里的 Date）的那一小段，由 api 层的只读
@@ -140,7 +153,9 @@ signin_parse() { # $1=响应体 $2..$7=输出变量名；信息不完整返回 1
   _sg_dline=$(json_first "$1" supplementEndTime)
   [ -n "$_sg_dline" ] || _sg_dline=$(json_first "$1" endTime)
   if [ -z "$_sg_rid" ] || [ -z "$_sg_state" ] || [ -z "$_sg_bt" ] || [ -z "$_sg_dline" ]; then
-    log "暂无有效任务（信息不完整）"; return 1
+    # 当日去重（base 的 log_once）：这一档没有更细的原因可分（缺哪个字段都一样要重试），
+    # 故原因键用固定档；同一个原因当晚只留首次。
+    log_once notask fixed "暂无有效任务（信息不完整）"; return 1
   fi
   eval "$2=\$_sg_rid"; eval "$3=\$(json_first \"\$1\" name)"
   eval "$4=\$_sg_state"; eval "$5=\$_sg_bt"; eval "$6=\$_sg_dline"
@@ -282,9 +297,12 @@ signin_submit() {
   fi
   # 末尾那行汇总把「发出去的参数」「试了几次」一次记全；服务端原文原样转交 api 层那一行。
   # 字段名 `try=` / `tries=` 是对外契约（日志的读法），故与内部变量名不同名。
+  # 当日去重（base 的 log_once）：原因键 = rc + 这一次调用为什么失败（见 _api_cause）。
+
+  # 发出去的参数与试了几次只在文案里、不进原因键：它们由失败本身决定，同一晚不会各自漂移。
   faildiag=$(_api_err1 "$API_ERRLOG")
   submit_facts="rid=$rid lng=$lng lat=$lat try=$attempt tries=$retries"
-  log "签到失败: rc=$rc $submit_facts $faildiag"
+  log_once submit "rc=$rc $(_api_cause)" "签到失败: rc=$rc $submit_facts $faildiag"
   notify_once failsign
   return 1
 }
@@ -390,13 +408,12 @@ signin_remind_notask() { # $1=当前时刻 HH:MM
 }
 
 # 一次完整检查（主循环与 once 子命令都调它）：取任务 → 解析字段 → 判定该做什么。
-# signin_fetch 交回两行（token + 响应体）：token 必须一路传到提交，否则提交会带着空 token 发出去。
+# 取任务**在主 shell 里**跑、结果经 tok / resp 写回（见 signin_fetch）：命令替换会把这一步
+# 推进子 shell，失败行的当日去重状态就留不住了。
 run_once() {
-  local out rc tok resp rid name state bt dline et now_ms
-  out=$(signin_fetch "$(get_token)"); rc=$?
+  local rc tok resp rid name state bt dline et now_ms
+  signin_fetch "$(get_token)" tok resp; rc=$?
   [ $rc -eq 0 ] || return $rc
-  tok=$(printf '%s\n' "$out" | "$BB" head -n 1)
-  resp=$(printf '%s\n' "$out" | "$BB" tail -n 1)
   signin_parse "$resp" rid name state bt dline et || return $?
   _sg_task_note "$rid" "$state" "$bt" "$dline"
   task_seen_mark    # 真的拿到了任务：兜底提醒据此不再打扰（任务没发布是另一回事）

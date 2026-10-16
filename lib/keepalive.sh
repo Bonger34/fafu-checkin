@@ -123,6 +123,13 @@ _ka_fail_desc() { # $1=api 返回码 $2=屏幕状态（on / off）
   return 0
 }
 
+# 失败行的原因键（当日去重的判据，只参与比较、不进日志文案）：rc + 这一次调用为什么失败
+# （_api_cause：状态码 / 正文 / 报错原文）+ **失败档位**。三档（延后 / 冷却中 / 静默刷新）
+# 是三种不同的处置，各算一个原因；档位或失败原因真的变了才会在默认档再写一条。
+_ka_fail_reason() { # $1=api 返回码 $2=失败档位（defer-on / cooldown / refresh）
+  printf 'rc=%s tier=%s %s' "$1" "$2" "$(_api_cause)"
+}
+
 keepalive_ping() {
   tok=$(get_token)
   [ -n "$tok" ] || return 0
@@ -137,18 +144,22 @@ keepalive_ping() {
   # 调用未成功：可能 token 已失效，也可能只是网络异常。两种都在同一行里留下证据
   # （rc 取自 api 的返回码，随后原样接上 api 层那一行诊断），事后才分得清是哪一种。
   ka_note fail "$tok"
+  # 保活失败三档走当日去重（base 的 log_once）：同一种失败当晚只留首次，档位或原因变了再留一条。
   # 屏幕亮着时延后刷新：避免白天出现无解释的页面弹出，留待熄屏（静默刷新）或签到时段处理
   if screen_is_on; then
-    log "$(ka_stat ❌ "$(tok "$tok")" "$(_ka_fail_desc "$rc" on)" " — 屏幕亮着，延后（熄屏或签到时段自动刷新）")"
+    log_once ka "$(_ka_fail_reason "$rc" defer-on)" \
+      "$(ka_stat ❌ "$(tok "$tok")" "$(_ka_fail_desc "$rc" on)" " — 屏幕亮着，延后（熄屏或签到时段自动刷新）")"
     return 0
   fi
   now_ts=$(now_s)
   if [ $((now_ts - KA_LAST_REFRESH)) -lt 1800 ]; then
-    log "$(ka_stat ❌ "$(tok "$tok")" "$(_ka_fail_desc "$rc" off)" " — 刷新冷却中，稍后再试")"
+    log_once ka "$(_ka_fail_reason "$rc" cooldown)" \
+      "$(ka_stat ❌ "$(tok "$tok")" "$(_ka_fail_desc "$rc" off)" " — 刷新冷却中，稍后再试")"
     return 0
   fi
   KA_LAST_REFRESH=$now_ts
-  log "$(ka_stat ⚠️ "$(tok "$tok")" "$(_ka_fail_desc "$rc" off)" " — 尝试静默刷新")"
+  log_once ka "$(_ka_fail_reason "$rc" refresh)" \
+    "$(ka_stat ⚠️ "$(tok "$tok")" "$(_ka_fail_desc "$rc" off)" " — 尝试静默刷新")"
   newt=$(refresh_token "$tok" 0 "保活")
   if [ -n "$newt" ] && [ "$newt" != "$tok" ]; then
     log "保活: ✅ 静默刷新成功 $(tok "$tok") → $(tok "$newt")"

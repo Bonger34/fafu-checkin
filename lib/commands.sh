@@ -108,6 +108,12 @@ cmd_dispatch_rc() {
   [ $# -eq 0 ] || shift
   cmd_specs | while read -r name handler probe desc; do
     if [ -n "$name" ] && [ "$name" = "$want" ]; then
+      # 人主动按的子命令：它触发的失败一律算「当日首次」（base 的 _log_repeat 认这个标记），
+      # 不受当日去重限制——「我刚按了一下，现在是什么结果」必须留在日志里。
+      # 赋值必须落在这个子 shell 里（处理函数就在管道右侧），写到 cmd_dispatch 那层看不到。
+
+      # 不 export：导出了会被 enable 派生出的守护进程继承，那个进程会整天不去重。
+      FAFU_MANUAL=1
       { "$handler" "$@"; echo "$CD_SENTINEL$?"; }
       exit 0
     fi
