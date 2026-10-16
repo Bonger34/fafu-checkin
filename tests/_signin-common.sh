@@ -73,6 +73,13 @@ sg_body_seen() { # $1=任务开始偏移 $2=signTime 偏移
   sg_body "$1" 1 ",\"signTime\":$(( SG_EPOCH * 1000 + ${2:-0} * 60000 ))"
 }
 
+# 给夹具正文塞一段「回显了日志形状的字样」：正文里出现 ` hdr={` 与 ` 耗时=` 时，展示行
+# （任务变化 / 时间核对）并上的仍必须是**真的**那一段响应头——用管道接在 sg_body* 之后：
+# `sg_body 1290 0 | sg_poison > ctl/body.page`。两处判据是同一个（api 层按末尾锚定取段）。
+sg_poison() {
+  sed 's/}]}$/,"demo":"echo hdr={fake} 耗时=9s"}]}/'
+}
+
 # 一串 x（$1=字节数）：借随附 busybox 的 awk 生成，不依赖本机有没有 seq / yes
 sg_pad() {
   local bb

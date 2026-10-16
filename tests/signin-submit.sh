@@ -138,7 +138,9 @@ sg_case_branch_seen() {
   local d w
   sg_setup seen
   sg_at 1290                                            # 21:30
-  sg_body_seen 1290 1230 > "$SG_WORK/ctl/body.page"      # signTime = 20:30
+  # 正文里回显了日志形状的字样（sg_poison）：核对行末尾并上的必须是**真的**那一段响应头
+  # ——它带着 Date，是「服务端认为现在几点」的唯一落点，被正文里的字样顶掉就成了假话
+  sg_body_seen 1290 1230 | sg_poison > "$SG_WORK/ctl/body.page"   # signTime = 20:30
   printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/hdr"       # 这一次服务端给了响应头四项
   printf 'page:0\n' > "$SG_WORK/ctl/api.seq"
   sg_run br_seen <<'DRIVER'

@@ -78,10 +78,11 @@ _sg_fetch_fail() { # $1=事件名 $2=rc $3=响应体
 # （与 signin_parse 同一手法：调用方先 local 好名字再传进来）。无应用数据返回 2；
 # 查询异常时刷新 token 后重试一次，仍失败则通知并返回 2。
 
-# **不经 stdout 交结果**：调用方一旦用 $( ) 取值，这一步就整个落进子 shell，而失败行的
-# 当日去重状态（base 的 _LOG_SEEN）是主 shell 的变量——子 shell 里记下的「今晚这条已经
-# 写过」出不了子 shell，同一晚的失败会每轮重写一条，去重等于没做（见 base 的 log_once）。
+# **不要用 $( ) 取它的结果**（照 run_once 那样先 local 好两个名字再传进来）：命令替换会把
+# 这一步整个推进子 shell，而失败行的当日去重状态（base 的 _LOG_SEEN）是主 shell 的变量——
+# 子 shell 里记下的「今晚这条已经写过」出不了子 shell，同一晚的失败会每轮重写一条。
 
+# 包进 $( ) 的后果是去重**静默**失效：日志看着正常，只是没变短（见 base 的 log_once）。
 # 层内局部名一律 _sg_ 前缀：与写回目标同名时 eval 会写给自己（同 signin_parse 那个坑）。
 signin_fetch() { # $1=token $2=token 输出变量名 $3=响应体输出变量名；返回码见文件头
   local _sg_tok _sg_resp rc newt fail
