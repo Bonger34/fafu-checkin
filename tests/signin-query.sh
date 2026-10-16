@@ -83,8 +83,8 @@ sg_case_task_change() {
   sg_at 1200                                       # 20:00：任务还没开始，每轮都停在「不在签到时段」
   bt=$(( SG_EPOCH * 1000 + 1290 * 60000 ))
   dline=$(( SG_EPOCH * 1000 + 1380 * 60000 ))
-  sg_body 1290 0 > "$SG_WORK/ctl/body.page"        # 未签
-  sg_body 1290 1 > "$SG_WORK/ctl/body.seen"        # 同一个任务的签到状态改成 1
+  sg_body 1290 0 | sg_poison > "$SG_WORK/ctl/body.page"   # 未签；正文里回显了日志形状的字样
+  sg_body 1290 1 | sg_poison > "$SG_WORK/ctl/body.seen"   # 同一个任务的签到状态改成 1
   printf '%s\n' "$SG_HDR_RAW" > "$SG_WORK/ctl/hdr" # 这一次服务端给了响应头四项
   printf 'page:0\npage:0\nseen:0\n' > "$SG_WORK/ctl/api.seq"
   sg_run task_change <<'DRIVER'

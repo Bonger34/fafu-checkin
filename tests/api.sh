@@ -938,11 +938,11 @@ ap_case_boundary() {
 }
 
 # ============================================================
-# 十四、失败原因键：两段读数按段序锚在**末尾**截
+# 十四、诊断行末尾两段读数：判据按段序锚在**末尾**
 #
-# 原因键 = 诊断行里剔掉 `hdr={…}` 与 `耗时=…` 之后的稳定部分。这两段由 _api_note 排在
-# 末尾（正文与 err= 在中间），故截断要从**最后一次**出现处起：正文里恰好出现
-# ` hdr={` 时，剪掉的仍应是那两段真读数，正文不该在中间被截掉一截。
+# 末尾两段（`hdr={…}` 紧接 `耗时=…`）各有一个消费者：原因键要它前面那部分（`_api_cause`），
+# 展示行要它自己（`_api_hdrs`，并排到「任务变化」/「时间核对」上）。两者必须共用同一个
+# 判据：正文里恰好出现 ` hdr={` / ` 耗时=` 时，认出来的仍是那两段真读数。
 # ============================================================
 
 ap_case_cause_anchor() {
@@ -959,19 +959,35 @@ printf '%s' '{"message":"echo hdr={fake} 耗时=9s","status":400}' > curl_body
 printf '400\n' > curl_code
 http_post "http://host/x" "AUTH" >/dev/null
 printf 'cause=[%s]\n' "$(_api_cause)"
+printf 'hdrs=[%s]\n' "$(_api_hdrs)"
 cat "$API_ERRLOG" > anchor.line
 # ② 没有响应头可剪（这次没吐），正文里那个 ` hdr={` 后面也没有收尾的 `}`：
-# 它不是一段读数，整段正文都该留在原因键里
+# 它不是一段读数，既不该截进原因键，也不该当成响应头段交出去
 : > curl_hdr
 printf '%s' 'echo hdr={partial without closing brace' > curl_body
 http_post "http://host/x" "AUTH" >/dev/null
 printf 'cause2=[%s]\n' "$(_api_cause)"
+printf 'hdrs2=[%s]\n' "$(_api_hdrs)"
+# ③ 正文里那个 ` hdr={…}` 是闭合的，但**后面还有别的内容**：末尾那一段不是 hdr=，
+# 判据看的是「尾巴确实收在 `}`」，不是「后面某处出现过 `}`」
+printf '%s' '{"m":"hdr={x}"} trailing' > curl_body
+http_post "http://host/x" "AUTH" >/dev/null
+printf 'cause3=[%s]\n' "$(_api_cause)"
+printf 'hdrs3=[%s]\n' "$(_api_hdrs)"
 DRIVER
   d="$AP_WORK/cause_anchor.out"
   t_eq "正文里含 hdr={ 与 耗时= 时：原因键保留整段正文（锚在末尾那两段）" \
     "$(ap_val "$d" cause)" '[http=400 body={"message":"echo hdr={fake} 耗时=9s","status":400}]'
+  t_eq "同一行：并给展示行的是真的那一段响应头（不是正文里的同名字样）" \
+    "$(ap_val "$d" hdrs)" "[hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT}]"
   t_eq "没有响应头时：正文里的 hdr={ 不算一段读数（后面没有收尾的 }）" \
     "$(ap_val "$d" cause2)" "[http=400 body=echo hdr={partial without closing brace]"
+  t_eq "没有响应头时：展示行那一段也是空（不拿正文里的字样充数）" \
+    "$(ap_val "$d" hdrs2)" "[]"
+  t_eq "正文里的 hdr={…} 闭合了但后面还有别的内容：仍不算末尾那一段" \
+    "$(ap_val "$d" cause3)" '[http=400 body={"m":"hdr={x}"} trailing]'
+  t_eq "同理：展示行那一段为空（判据是「尾巴收在 }」，不是「出现过 }」）" \
+    "$(ap_val "$d" hdrs3)" "[]"
   # 日志行本身一个字都不少：去重只影响写不写，不影响写什么
   t_has "诊断行仍带着响应头与耗时两段读数" "$AP_WORK/anchor.line" \
     'body={"message":"echo hdr={fake} 耗时=9s","status":400} hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT} 耗时='
@@ -991,5 +1007,5 @@ t_case "api · 连接层失败（原始报错与退出码，不伪造状态码�
 t_case "api · wget 兜底路径的同一行事实（拿到什么写什么）" ap_case_wget_line
 t_case "api · 单行协议（值压平 / 每次调用只有一行）" ap_case_line_protocol
 t_case "api · 上层驱动拿真实诊断行（_api_note 接缝）" ap_case_note_seam
-t_case "api · 失败原因键锚在末尾两段读数（正文含同名字样也不截错）" ap_case_cause_anchor
+t_case "api · 末尾两段读数的判据（原因键与响应头段都锚在末尾）" ap_case_cause_anchor
 t_case "api · 单一网络入口与既有调用点" ap_case_boundary
