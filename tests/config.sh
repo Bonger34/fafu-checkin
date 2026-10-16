@@ -507,6 +507,11 @@ DRIVER
   t_hasnt "notify 层不再自己兜冷却默认值" "$T_ROOT/lib/notify.sh" 'NOTIFY_COOLDOWN="${NOTIFY_COOLDOWN:-'
   t_has "notify 层经配置层取冷却值" "$T_ROOT/lib/notify.sh" 'cfg_notify_cooldown'
   t_has "keepalive 层经配置层取时段" "$T_ROOT/lib/keepalive.sh" 'cfg_ka_start'
+  # 同一口径覆盖日志档位：base 层不能调配置层的读数函数（反向引用），只能读登记表落好的
+  # 同名变量——但**不许**顺带再兜一次默认值（那样默认值就有两份了）。两条一起看：读的是
+  # 那个变量，且没有第二份默认值；缺了前者，后者会因为「压根没读」而恒真。
+  t_has "base 层的档位判据读的是配置层落好的同名变量" "$T_ROOT/lib/base.sh" '$DEBUG'
+  t_hasnt "base 层不再自己兜 DEBUG 默认值（默认值只在登记表里）" "$T_ROOT/lib/base.sh" 'DEBUG:-'
 }
 
 # ============================================================

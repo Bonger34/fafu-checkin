@@ -937,6 +937,46 @@ ap_case_boundary() {
   t_eq "开机/按钮/安装/卸载脚本都不发请求" "[$owners]" "[]"
 }
 
+# ============================================================
+# 十四、失败原因键：两段读数按段序锚在**末尾**截
+#
+# 原因键 = 诊断行里剔掉 `hdr={…}` 与 `耗时=…` 之后的稳定部分。这两段由 _api_note 排在
+# 末尾（正文与 err= 在中间），故截断要从**最后一次**出现处起：正文里恰好出现
+# ` hdr={` 时，剪掉的仍应是那两段真读数，正文不该在中间被截掉一截。
+# ============================================================
+
+ap_case_cause_anchor() {
+  local d
+  ap_setup
+  ap_write_env
+  ap_run cause_anchor <<'DRIVER'
+rm -f mod/.fafu_no_curl
+CURL_BIN='./bin/curl'
+printf '0\n' > curl_rc
+# ① 正文里同时含 ` hdr={` 与 ` 耗时=`：真读数排在它们之后
+printf 'HTTP/1.1 400 Bad Request\nDate: Mon, 13 Oct 2025 21:30:00 GMT\n' > curl_hdr
+printf '%s' '{"message":"echo hdr={fake} 耗时=9s","status":400}' > curl_body
+printf '400\n' > curl_code
+http_post "http://host/x" "AUTH" >/dev/null
+printf 'cause=[%s]\n' "$(_api_cause)"
+cat "$API_ERRLOG" > anchor.line
+# ② 没有响应头可剪（这次没吐），正文里那个 ` hdr={` 后面也没有收尾的 `}`：
+# 它不是一段读数，整段正文都该留在原因键里
+: > curl_hdr
+printf '%s' 'echo hdr={partial without closing brace' > curl_body
+http_post "http://host/x" "AUTH" >/dev/null
+printf 'cause2=[%s]\n' "$(_api_cause)"
+DRIVER
+  d="$AP_WORK/cause_anchor.out"
+  t_eq "正文里含 hdr={ 与 耗时= 时：原因键保留整段正文（锚在末尾那两段）" \
+    "$(ap_val "$d" cause)" '[http=400 body={"message":"echo hdr={fake} 耗时=9s","status":400}]'
+  t_eq "没有响应头时：正文里的 hdr={ 不算一段读数（后面没有收尾的 }）" \
+    "$(ap_val "$d" cause2)" "[http=400 body=echo hdr={partial without closing brace]"
+  # 日志行本身一个字都不少：去重只影响写不写，不影响写什么
+  t_has "诊断行仍带着响应头与耗时两段读数" "$AP_WORK/anchor.line" \
+    'body={"message":"echo hdr={fake} 耗时=9s","status":400} hdr={Date: Mon, 13 Oct 2025 21:30:00 GMT} 耗时='
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "api · token 提取（按修改时间取最新）" ap_case_token
@@ -951,4 +991,5 @@ t_case "api · 连接层失败（原始报错与退出码，不伪造状态码�
 t_case "api · wget 兜底路径的同一行事实（拿到什么写什么）" ap_case_wget_line
 t_case "api · 单行协议（值压平 / 每次调用只有一行）" ap_case_line_protocol
 t_case "api · 上层驱动拿真实诊断行（_api_note 接缝）" ap_case_note_seam
+t_case "api · 失败原因键锚在末尾两段读数（正文含同名字样也不截错）" ap_case_cause_anchor
 t_case "api · 单一网络入口与既有调用点" ap_case_boundary

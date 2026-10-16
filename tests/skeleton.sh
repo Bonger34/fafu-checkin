@@ -510,10 +510,15 @@ sk_package_static() {
   # 用正则而不是逐字：那一行是**对齐过的**（与上下几项同名同列），空白量不该被写死。
   t_has_re "页面：登记表里 DEBUG 键对应 webstate 的 debug 字段" "$page" \
     "key: 'DEBUG',[ ]+field: 'debug'"
-  # 控件接上了线才算数：开关的形状对了但保存不带它、或状态区不读它，都是「看着有、其实没接」
-  t_has "页面：保存时把档位一起提交（读的是那个开关）" "$page" "DEBUG: el('f_debug').checked"
-  t_has "页面：生效值回填读的是 webstate 来的那一项" "$page" "el('f_debug').checked = eff.DEBUG"
-  t_has "页面：运行状态区的档位读 webstate 的 debug 字段" "$page" "setText('s_debug', st.debug"
+  # 控件接上了线才算数：开关的形状对了但保存不带它、或状态区不读它，都是「看着有、其实没接」。
+  # 三条都只**锚关系**（键名 / 控件 id / webstate 的字段名在同一行里共现），不抄那一行的写法：
+  # 换个取值写法或换个局部名不该制造假红灯，而关系真的断了（id 改了、接线没了）必须报红。
+  t_has_re "页面：保存时把 DEBUG 档位取自开关 f_debug" "$page" \
+    "^[[:space:]]*DEBUG:.*f_debug"
+  t_has_re "页面：生效值回填写进 f_debug（值来自 webstate 的 DEBUG 项）" "$page" \
+    "f_debug.*DEBUG"
+  t_has_re "页面：运行状态区的 s_debug 读 webstate 的 debug 字段" "$page" \
+    "s_debug.*\.debug"
 }
 
 # 判据自证：ext_url_hits 必须真的会命中，否则「页面零命中」只是恒真的摆设。
