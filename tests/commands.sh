@@ -655,7 +655,7 @@ cd_case_webstate_fields() {
   t_eq "最近一次保活时间：原样来自状态层" "$(cd_val "$f" ka_last)" "$WS_DATE 21:30:14"
   t_eq "最近一次保活结果" "$(cd_val "$f" ka_last_result)" "fail"
   t_eq "登录状态有效：只报有效性" "$(cd_val "$f" token_state)" "ok"
-  t_eq "版本号来自模块元数据" "$(cd_val "$f" version)" "v1.3.0"
+  t_eq "版本号来自模块元数据" "$(cd_val "$f" version)" "v1.3.1"
   # 配置项生效值：页面显示的六项就取自这里，故「没写配置文件」时必须给出默认值，
   # 而不是空值——页面拿不到值时只能自带一份默认值表，那必然会与配置层漂移。
   t_eq "配置生效值：保活开关取默认" "$(cd_val "$f" keepalive)" "1"
