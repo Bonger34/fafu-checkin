@@ -85,8 +85,11 @@ signin_remind_notask() { printf '%s\n' "$1" >> ./ctl/notask; }
 INJECT
 }
 
-# 生效的配置文件（键=值；未提到的键由配置层取默认值）
-poll_config() { printf '%s\n' "$1" > "$POLL_WORK/mod/fafu-checkin.conf"; }
+# 生效的配置文件（键=值；未提到的键由配置层取默认值）。
+# 第二参是档位（缺省 1 = 调试档）：本套件跑真实入口、断言钉的是日志文案，测的本来就是
+# 完整行为；档位对照那条用例显式要 0（默认档）。写入仍然只有这一个出口——档位与其余键
+# 走同一条路（写进夹具文件，再由入口的 cfg_load 读成生效值），没有第二条生效路径。
+poll_config() { printf '%s\nDEBUG=%s\n' "$1" "${2:-1}" > "$POLL_WORK/mod/fafu-checkin.conf"; }
 
 # 计划：每行一个 HH:MM。第 1 行是起始时刻，第 N+1 行是第 N 次 sleep 之后的时刻。
 # 计划用完 = 该收工了（sleep 替身把服务置为停用，主循环下一轮开头退出）。
@@ -701,9 +704,119 @@ poll_case_e2e_logs() {
     "date=$POLL_E2E_D2"
 }
 
+# ============================================================
+# 九、档位对照：同一条时间线跑两遍（默认档 / 调试档）
+#
+# 唯一变量是夹具配置里的 DEBUG，时间线与网络事实逐字同一份：
+#   ① 19:00 查询成功，但任务 19:20 才开始 → 签到层判「不在签到时段」（本票降级的那一行）
+#   ② 19:20 查询成功且在窗口内 → 提交成功（签到结果行：两档都必须看得见）
+#   ③ 19:21 当日已解决 → 不再查询，主循环收尾。
+# 断言只读日志正文：默认档少了哪几行、调试档又都在、被降级那一行的文案逐字不变。
+# ============================================================
+
+POLL_TIER_WORK="$T_WORK_ROOT/poll-tier"
+POLL_TIER_DATE='2026-10-01'
+
+# 夹具：模块副本 + 拨钟时间线 + 按调用序号喂事实的网络替身（与端到端那条同源）。
+# 时间线、档位之外的东西两遍完全一样——配置里只有 DEBUG 不同。
+poll_tier_setup() { # $1=档位 0|1
+  local task0
+  POLL_WORK="$POLL_TIER_WORK/run-$1"
+  rm -rf "$POLL_WORK"
+  mkdir -p "$POLL_WORK/ctl" "$POLL_WORK/bin" "$POLL_WORK/ld"
+  t_stage_module "$POLL_WORK/mod" >/dev/null
+  t_bb_wrap "$POLL_WORK/bin/bb" >/dev/null
+  : > "$POLL_WORK/ctl/sleeps"
+  : > "$POLL_WORK/ctl/calls"
+  : > "$POLL_WORK/ctl/refresh"
+  : > "$POLL_WORK/ctl/su.calls"
+  printf '0\n' > "$POLL_WORK/ctl/rc"
+  printf '1\n' > "$POLL_WORK/ctl/rand"                      # 签名随机数的替身序号
+  printf 'j\000"token":"2_C0DE"\000j' > "$POLL_WORK/ld/000001.ldb"   # 真实 get_token 的来源
+  poll_e2e_epoch
+  POLL_LD_DIR='./ld'
+  POLL_CURL_BIN='./bin/curl'
+  POLL_SU_MODE='./bin/su - shell -c'
+  POLL_TIMEOUT=240
+  poll_config 'KEEPALIVE=0
+POLL_START=19:00
+POLL_END=22:15' "$1"
+  # 时间线：首行是启动时刻，其后每行是上一轮休眠之后拨到的时刻（第三列是降权档）
+  printf '%s\n' \
+    "$POLL_TIER_DATE 19:00 ok" \
+    "$POLL_TIER_DATE 19:20 ok" \
+    "$POLL_TIER_DATE 19:21 ok" > "$POLL_WORK/ctl/rounds"
+  printf '%s 19:00\n' "$POLL_TIER_DATE" > "$POLL_WORK/ctl/date"
+  task0=$(poll_e2e_task 0 1160 1260 "$POLL_E2E_E1")          # 任务 19:20 开始、21:00 补签截止
+  poll_e2e_fact 1 0 200 "$task0" "" "$POLL_E2E_HDR"          # ① 查询：还没到开始时刻
+  poll_e2e_fact 2 0 200 "$task0" "" "$POLL_E2E_HDR"          # ② 查询：窗口内
+  poll_e2e_fact 3 0 200 '{"code":0,"msg":"success"}' "" "$POLL_E2E_HDR"   # ③ 提交成功
+  printf '0' > "$POLL_WORK/ctl/curl.n"
+  poll_e2e_tools
+  poll_e2e_inject
+  # 降权替身换成「静默成功」的：通知链路不是这条用例要考的东西，而探不到 su 会留下
+  # 「找不到 su」、探到了又发不出去会留下「通知发送失败」——都会让两档日志多出无关的行。
+  # 它只应答探测（输出 2000 = 降权到 shell），发送时什么也不做。
+  cat > "$POLL_WORK/bin/su" <<'QUIET_SU'
+#!/bin/sh
+echo 2000
+QUIET_SU
+  chmod +x "$POLL_WORK/bin/su" 2>/dev/null || true
+}
+
+poll_tier_run() { # $1=档位 0|1
+  poll_tier_setup "$1"
+  poll_start
+}
+
+# 日志里两个**与档位无关的易变字段**，比对两档差集前先归一（否则差集断言会因为跑测机器的
+# 噪声而假红，那不是档位造成的差别）：
+#   耗时=  —— api 层记的这一次调用有多久，两次跑不可能同毫秒；
+#   (PID N)—— 守护进程每次启动的进程号（两遍是两个进程）。
+poll_tier_norm() { # $1=日志文件
+  LC_ALL=C grep -avF -e '不在签到时段' "$1" 2>/dev/null \
+    | sed 's/耗时=[0-9]*[ms][s]*/耗时=X/; s/(PID [0-9]*)/(PID X)/'
+}
+
+poll_case_debug_tier() {
+  local off on
+  mkdir -p "$POLL_TIER_WORK"
+
+  # ① 默认档（配置里 DEBUG=0）
+  poll_tier_run 0
+  off="$POLL_TIER_WORK/off.txt"
+  cp "$(poll_e2e_log)" "$off"
+  t_eq "默认档：主循环按计划走完三轮（每轮末尾一次休眠）" "$(poll_slept)" "60|60|60|"
+  t_file "默认档：日志非空（主循环真的跑了）" "$off"
+  t_eq "默认档：「不在签到时段」一行都不写" \
+    "$(LC_ALL=C grep -acF -e '不在签到时段' "$off")" "0"
+  t_has "默认档：签到结果行照旧在（关掉的只是每分钟重复的细节，不是结论）" "$off" \
+    "✅ 签到成功 [晚查寝签到]"
+  t_has "默认档：每天一两次的任务变化行也照旧" "$off" \
+    "任务变化: id=→88123 state=→0 begin=→$(( POLL_E2E_E1 + 1160 * 60000 ))"
+
+  # ② 调试档（同一份时间线、同一批网络事实，唯一变量是配置里的 DEBUG）
+  poll_tier_run 1
+  on="$POLL_TIER_WORK/on.txt"
+  cp "$(poll_e2e_log)" "$on"
+  t_eq "调试档：同一条时间线的轮次与休眠参数逐字一致" "$(poll_slept)" "60|60|60|"
+  t_eq "调试档：「不在签到时段」写回来（恰好一行）" \
+    "$(LC_ALL=C grep -acF -e '不在签到时段' "$on")" "1"
+  t_eq "调试档：文案与升级前逐字一致（只有时间戳是新的）" \
+    "$(LC_ALL=C grep -aF -e '不在签到时段' "$on")" "[晚查寝签到] 不在签到时段"
+  t_has "调试档：结论行也还在" "$on" "✅ 签到成功 [晚查寝签到]"
+
+  # ③ 两档之差只有被降级的那一行：行数差 1，去掉它之后其余行逐字相同
+  t_eq "两档行数只差被降级的那一行" \
+    "$(LC_ALL=C grep -ac . "$on")" "$(( $(LC_ALL=C grep -ac . "$off") + 1 ))"
+  t_eq "两档之差只有被降级的那一行（其余行逐字相同）" \
+    "$(poll_tier_norm "$on")" "$(poll_tier_norm "$off")"
+}
+
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "poll · 六类排障日志在真实调用次序下都出现（端到端）" poll_case_e2e_logs
+t_case "poll · 档位对照：默认档降噪、调试档写回（真入口）" poll_case_debug_tier
 t_case "poll · 轮询范围（拨钟逐时点）" poll_case_window
 t_case "poll · 当日已解决即停轮询（四类）" poll_case_resolved
 t_case "poll · 提交失败继续重试到范围止" poll_case_retry

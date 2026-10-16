@@ -137,6 +137,44 @@ C
   lo_has "反向引用：说明失败原因" '层序检查失败'
 }
 
+# 单行函数体：`foo() { bar; }` 把函数体整条写在**定义行**上。扫描器若在定义行上清空缓冲，
+# 这条调用方向就整条漏判——于是「守卫能报出违规」这件事本身没有任何断言守着，下次再漏判
+# 也不会变红，而不变量就变成靠盲区成立。故这里既钉单行反向引用必须报违规，也用一份
+# 合法方向的单行样本证明判据不是恒红。
+lo_case_oneline_body() {
+  lo_fixture
+  lo_layer a.sh <<'A'
+early() { late; }
+A
+  lo_layer b.sh <<'B'
+late() {
+  echo x
+}
+B
+  lo_layer c.sh <<'C'
+cmd_run() {
+  early
+}
+C
+  lo_run
+  t_ne "单行函数体：反向引用必须失败（退出码非 0）" "$LO_RC" 0
+  lo_has "单行函数体：报出调用者与所在层" 'early@a.sh'
+  lo_has "单行函数体：报出被调用者与它所属的更后层" 'late（定义于更后的 b.sh）'
+
+  # 对照：同一份样本翻成合法方向（更后层调更早层）必须通过——否则上面的红可能是恒红
+  lo_layer a.sh <<'A'
+early() {
+  echo x
+}
+A
+  lo_layer b.sh <<'B'
+state_save() { early; }
+B
+  lo_run
+  t_eq "单行函数体：合法方向照旧通过（判据不是恒红）" "$LO_RC" 0
+  lo_hasnt "单行函数体：合法方向没有违规" '违规'
+}
+
 lo_case_dynamic_dispatch() {
   lo_fixture
   # 动态分派：命令名写在变量里、或处理函数名来自命令表 —— 静态判不出，必须放过。
@@ -279,6 +317,7 @@ lo_case_repo_manifest() {
 
 t_case "layer · 合法层序通过" lo_case_valid_order
 t_case "layer · 反向引用样本必须失败" lo_case_reverse_reference_fails
+t_case "layer · 单行函数体也必须参与扫描" lo_case_oneline_body
 t_case "layer · 动态分派走白名单" lo_case_dynamic_dispatch
 t_case "layer · 白名单缺失时明确失败" lo_case_whitelist_missing
 t_case "layer · 坏清单（缺文件 / 重复 / 空）" lo_case_same_file_and_missing

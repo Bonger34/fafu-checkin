@@ -558,9 +558,10 @@ WS_DIR="$CD_WORK/webstate"
 WS_DATE='2026-10-03'                              # 拨好的墙钟日期（夹具里的「今天」）
 WS_TOKEN='2_0123456789abcdef0123456789abcdef'     # 假 leveldb 里的凭证明文（只用于负向断言）
 
-# 夹具：模块副本 + 控制目录（时钟 / 网络替身 / 假 leveldb）+ 一份关掉通知的配置。
-# 关通知是有意的：装配阶段的降权探测会因它直接返回，用例既不等 su 超时，也不受
-# 「本机有没有 su」影响，日志里也不会多出与 webstate 无关的一行。
+# 夹具：模块副本 + 控制目录（时钟 / 网络替身 / 假 leveldb）+ 一份关掉通知、打开调试档的配置。
+# 两处都不是默认值：关通知是有意的——装配阶段的降权探测会因它直接返回，用例既不等 su 超时，
+# 也不受「本机有没有 su」影响，日志里也不会多出与 webstate 无关的一行；调试档也是夹具写下的，
+# 于是这几条断言同时是「文件真的被读进来了」的证据（档位默认关，见 config 套件）。
 ws_setup() {
   cd_setup
   t_stage_module "$WS_DIR" >/dev/null
@@ -569,7 +570,7 @@ ws_setup() {
   printf '"token":"%s"' "$WS_TOKEN" > "$WS_DIR/ctl/ld/000001.log"
   printf '{"records":[{"id":1}]}' > "$WS_DIR/ctl/body"
   printf '0' > "$WS_DIR/ctl/rc"
-  printf 'NOTIFY=0\n' > "$WS_DIR/fafu-checkin.conf"
+  printf 'NOTIFY=0\nDEBUG=1\n' > "$WS_DIR/fafu-checkin.conf"
   # 网络出口的替身：按控制文件应答，一个请求都不发出去
   cat >> "$WS_DIR/lib/api.sh" <<'OVR'
 
@@ -628,7 +629,7 @@ ws_run() { # $1=名字（输出文件的后缀） [$2=子命令，默认 webstat
 
 # 输出里出现的键名（去重排序）：字段齐全与键名逐字一致都靠它
 ws_keys() { grep -o '^[a-z_]*' "$1" | sort -u | tr '\n' ' '; }
-WS_KEYS="ka_fail ka_last ka_last_result ka_ok keepalive log notify notify_cooldown notify_lead poll_end poll_start service sign_state sign_time token_state version "
+WS_KEYS="debug ka_fail ka_last ka_last_result ka_ok keepalive log notify notify_cooldown notify_lead poll_end poll_start service sign_state sign_time token_state version "
 
 # 输出里「既不是 键=值、也不是空行」的行数。空行要排除：分发路径会给任何以换行收尾的
 # 输出补一个空行（status 子命令同样如此），那不是命令自己吐出来的东西。
@@ -666,6 +667,8 @@ cd_case_webstate_fields() {
   t_eq "配置生效值：通知开关读的是夹具写下的 0（不是默认值）" "$(cd_val "$f" notify)" "0"
   t_eq "配置生效值：预警提前量取默认" "$(cd_val "$f" notify_lead)" "5"
   t_eq "配置生效值：通知冷却取默认" "$(cd_val "$f" notify_cooldown)" "300"
+  # 与 NOTIFY 同理：夹具写下了 DEBUG=1，页面据此显示档位（默认关闭由 config 套件钉住）
+  t_eq "配置生效值：调试日志档位读的是夹具写下的 1" "$(cd_val "$f" debug)" "1"
   t_eq "字段齐全且键名逐字一致" "$(ws_keys "$f")" "$WS_KEYS"
   t_eq "每行都是 键=值（没有别的输出混进来）" "$(ws_stray "$f")" "0"
   t_eq "多出来的只有分发路径补的那个空行" "$(grep -c '^$' "$f")" "1"
@@ -694,7 +697,7 @@ cd_case_webstate_fields() {
 cd_case_webstate_config() {
   local f
   ws_setup
-  printf 'KEEPALIVE=0\nPOLL_START=19:30\nPOLL_END=22:15\nNOTIFY=1\nNOTIFY_LEAD=12\nNOTIFY_COOLDOWN=600\n' \
+  printf 'KEEPALIVE=0\nPOLL_START=19:30\nPOLL_END=22:15\nNOTIFY=1\nNOTIFY_LEAD=12\nNOTIFY_COOLDOWN=600\nDEBUG=0\n' \
     > "$WS_DIR/fafu-checkin.conf"
   ws_log "[$WS_DATE 21:20:00] 占位一行"
   ws_run cfg
@@ -706,14 +709,17 @@ cd_case_webstate_config() {
   t_eq "配置生效值：通知开关读配置文件" "$(cd_val "$f" notify)" "1"
   t_eq "配置生效值：预警提前量读配置文件" "$(cd_val "$f" notify_lead)" "12"
   t_eq "配置生效值：通知冷却读配置文件" "$(cd_val "$f" notify_cooldown)" "600"
+  # 默认档也必须给出 0（不是空值）：页面按这个字段显示「已关闭 / 已开启」
+  t_eq "配置生效值：调试日志档位读配置文件（关闭）" "$(cd_val "$f" debug)" "0"
   t_eq "配置生效值：键集合仍然逐字一致" "$(ws_keys "$f")" "$WS_KEYS"
 
   # 手改坏的文件不该改变页面看到的东西：非法值按配置层的口径退回默认值
-  printf 'POLL_START=25:00\n' > "$WS_DIR/fafu-checkin.conf"
+  printf 'POLL_START=25:00\nDEBUG=2\n' > "$WS_DIR/fafu-checkin.conf"
   ws_run cfg_bad
   f="$CD_WORK/ws_cfg_bad.out"
   t_eq "坏配置文件：保活开关退回默认" "$(cd_val "$f" keepalive)" "1"
   t_eq "坏配置文件：非法时刻退回默认" "$(cd_val "$f" poll_start)" "20:00"
+  t_eq "坏配置文件：非法档位退回默认（关闭）" "$(cd_val "$f" debug)" "0"
   t_eq "坏配置文件：返回码仍为 0" "$(cat "$CD_WORK/ws_cfg_bad.rc")" "0"
 }
 
@@ -722,26 +728,40 @@ cd_case_webstate_config() {
 # 页面的「最近日志」第一条却在说通知链路，读的人会以为这次操作动了通知。
 # 判据是两个外部可见的事实：日志文件逐字节未变、降权替身一次都没被调用；
 # 同一份夹具里再跑一条表里标 1 的命令（notify）作对照——它必须探到并写信，否则是假绿。
+# 「日志逐字节未变」在**两种档位下**都要成立：只读就是只读，与档位无关。
 cd_case_readonly_no_probe() {
   local f
   ws_setup
   ws_su_stub
-  printf 'NOTIFY=1\n' > "$WS_DIR/fafu-checkin.conf"   # 探不探只由命令表决定，与通知开关无关
+  printf 'NOTIFY=1\nDEBUG=1\n' > "$WS_DIR/fafu-checkin.conf"   # 探不探只由命令表决定，与通知开关无关
   ws_log "[$WS_DATE 21:20:00] 既有的一行"
   cp "$WS_DIR/fafu_checkin.log" "$CD_WORK/noprobe.before"
 
   ws_run noprobe_webstate webstate
   f="$CD_WORK/ws_noprobe_webstate.out"
   t_eq "只读：webstate 一次都没调过 su" "$(grep -c . "$WS_DIR/bin/su.calls")" "0"
-  t_eq "只读：webstate 没往日志里添行" \
+  t_eq "只读：webstate 没往日志里添行（调试档）" \
     "$(cat "$WS_DIR/fafu_checkin.log")" "$(cat "$CD_WORK/noprobe.before")"
   t_eq "只读：交给页面的日志尾部就是既有那一行" "$(cd_val "$f" log)" "[$WS_DATE 21:20:00] 既有的一行"
   t_eq "只读：输出里没有降权探测行" "$(grep -c '通知链路' "$f")" "0"
+  t_eq "只读：调试档下交出的档位就是 1" "$(cd_val "$f" debug)" "1"
 
   ws_run noprobe_status status
-  t_eq "只读：status 也没往日志里添行" \
+  t_eq "只读：status 也没往日志里添行（调试档）" \
     "$(cat "$WS_DIR/fafu_checkin.log")" "$(cat "$CD_WORK/noprobe.before")"
 
+  # 换到默认档（手改配置文件 = 与页面保存同一条路）：同样一行都不许添
+  printf 'NOTIFY=1\nDEBUG=0\n' > "$WS_DIR/fafu-checkin.conf"
+  ws_run noprobe_webstate_off webstate
+  f="$CD_WORK/ws_noprobe_webstate_off.out"
+  t_eq "只读：默认档下交出的档位就是 0" "$(cd_val "$f" debug)" "0"
+  ws_run noprobe_status_off status
+  t_eq "只读：默认档下 webstate 与 status 都没往日志里添行" \
+    "$(cat "$WS_DIR/fafu_checkin.log")" "$(cat "$CD_WORK/noprobe.before")"
+
+  # 对照回到调试档：探测那行属于降级清单，只有调试档才看得见（默认档那条不变量由
+  # 上面两条守住：它验的是「不添行」，不是「有行」）
+  printf 'NOTIFY=1\nDEBUG=1\n' > "$WS_DIR/fafu-checkin.conf"
   ws_run noprobe_notify notify
   t_ne "对照：notify 探了降权写法（替身确实拦得住）" "$(grep -c . "$WS_DIR/bin/su.calls")" "0"
   t_eq "对照：notify 的探测结果写进日志（恰好一行）" \
@@ -856,14 +876,15 @@ cd_case_webstate_token() {
 # 十一、写入子命令 setconfig：配置写入的唯一校验闸门
 #
 # 缝：在**临时模块副本**上驱动真实入口与真实处理函数（不替换记录桩），断言 stdout
-# 回显、返回码，以及副本里那份配置文件的逐字节内容。「一次给全量六项」是页面实际的
+# 回显、返回码，以及副本里那份配置文件的逐字节内容。「一次给全量七项」是页面实际的
 # 调用形态，故基准用例从它出发；部分给也必须能用。
 # ============================================================
 
-# 页面一次给全的六项（合法值）
-CD_SIX="KEEPALIVE=1 POLL_START=20:00 POLL_END=23:59 NOTIFY=1 NOTIFY_LEAD=5 NOTIFY_COOLDOWN=300"
+# 页面一次给全的七项（合法值）。档位也算一项：页面保存时与其余六项一起提交，
+# 于是「打开调试日志」走的是与手改配置文件同一条闸门，没有第二条生效路径。
+CD_SEVEN="KEEPALIVE=1 POLL_START=20:00 POLL_END=23:59 NOTIFY=1 NOTIFY_LEAD=5 NOTIFY_COOLDOWN=300 DEBUG=1"
 
-# 基准配置：八项全是非默认值；轮询止 20:00 让「起点单独改晚」有得可越。
+# 基准配置：九项全是非默认值；轮询止 20:00 让「起点单独改晚」有得可越。
 # 全程只读**这一份文件**判定写入是否发生（生效值留在进程里，跨进程看的就是它）。
 CD_BASE='KEEPALIVE=0
 POLL_START=06:30
@@ -872,7 +893,8 @@ NOTIFY=0
 NOTIFY_LEAD=0
 NOTIFY_COOLDOWN=60
 KA_START=09:00
-KA_END=18:30'
+KA_END=18:30
+DEBUG=1'
 
 # 在副本里跑一次真实入口的 setconfig；用法：cd_sc <副本> <前缀> [参数…]
 cd_sc() {
@@ -895,8 +917,8 @@ cd_case_setconfig_ok() {
   local d k
   cd_setup
   d=$(cd_sc_mod ok)
-  cd_sc "$d" ok $CD_SIX
-  t_eq "setconfig：合法的六项写入成功（返回 0）" "$(cat "$CD_WORK/ok.rc")" "0"
+  cd_sc "$d" ok $CD_SEVEN
+  t_eq "setconfig：合法的七项写入成功（返回 0）" "$(cat "$CD_WORK/ok.rc")" "0"
   # 回显：页面按 key=value 逐行解析，故每项都要是刚写进去的那个值
   t_eq "setconfig：回显 KEEPALIVE"             "$(cd_val "$CD_WORK/ok.out" KEEPALIVE)" "1"
   t_eq "setconfig：回显 POLL_START"            "$(cd_val "$CD_WORK/ok.out" POLL_START)" "20:00"
@@ -904,20 +926,28 @@ cd_case_setconfig_ok() {
   t_eq "setconfig：回显 NOTIFY"                "$(cd_val "$CD_WORK/ok.out" NOTIFY)" "1"
   t_eq "setconfig：回显 NOTIFY_LEAD"           "$(cd_val "$CD_WORK/ok.out" NOTIFY_LEAD)" "5"
   t_eq "setconfig：回显 NOTIFY_COOLDOWN"       "$(cd_val "$CD_WORK/ok.out" NOTIFY_COOLDOWN)" "300"
+  t_eq "setconfig：回显 DEBUG（档位往返一致）"  "$(cd_val "$CD_WORK/ok.out" DEBUG)" "1"
   # 回显的是**全部键**的生效值（含页面没给、只由文件承载的保活时段）
-  t_eq "setconfig：回显八行（全部登记键的生效值）" "$(grep -c . "$CD_WORK/ok.out")" "8"
+  t_eq "setconfig：回显九行（全部登记键的生效值）" "$(grep -c . "$CD_WORK/ok.out")" "9"
   # 回显与落盘一致：页面据此确认「真的进去了」
-  for k in KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN KA_START KA_END; do
+  for k in KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN KA_START KA_END DEBUG; do
     t_eq "setconfig：回显的 $k 与落盘文件一致" \
       "$(cd_val "$CD_WORK/ok.out" "$k")" "$(cd_val "$d/fafu-checkin.conf" "$k")"
   done
-  # 落盘：按登记顺序整份重写，六项是新值、保活时段沿用当前生效值
+  # 落盘：按登记顺序整份重写，七项是新值、保活时段沿用当前生效值
   t_eq "setconfig：落盘按登记顺序整份重写" "$(cat "$d/fafu-checkin.conf" | tr '\n' '|')" \
-    "KEEPALIVE=1|POLL_START=20:00|POLL_END=23:59|NOTIFY=1|NOTIFY_LEAD=5|NOTIFY_COOLDOWN=300|KA_START=09:00|KA_END=18:30|"
+    "KEEPALIVE=1|POLL_START=20:00|POLL_END=23:59|NOTIFY=1|NOTIFY_LEAD=5|NOTIFY_COOLDOWN=300|KA_START=09:00|KA_END=18:30|DEBUG=1|"
   t_eq "setconfig：写入成功时不打噪音" "$(wc -c < "$CD_WORK/ok.err" | tr -dc '0-9')" "0"
+
+  # 档位关掉：同一条闸门、同一条命令，落盘与生效值一起回到 0（页面「关掉调试」那一跳）
+  cd_sc "$d" ok_off KEEPALIVE=1 POLL_START=20:00 POLL_END=23:59 NOTIFY=1 \
+                   NOTIFY_LEAD=5 NOTIFY_COOLDOWN=300 DEBUG=0
+  t_eq "setconfig：档位关掉时返回 0" "$(cat "$CD_WORK/ok_off.rc")" "0"
+  t_eq "setconfig：档位关掉落盘为 0" "$(cd_val "$d/fafu-checkin.conf" DEBUG)" "0"
+  t_eq "setconfig：档位关掉回显也是 0" "$(cd_val "$CD_WORK/ok_off.out" DEBUG)" "0"
 }
 
-# 页面一次给全六项是调用约定，但闸门不该因此只在「给全」时才可用
+# 页面一次给全七项是调用约定，但闸门不该因此只在「给全」时才可用
 cd_case_setconfig_partial() {
   local d
   cd_setup
@@ -927,7 +957,8 @@ cd_case_setconfig_partial() {
   t_eq "setconfig：给了的项落盘" "$(cd_val "$d/fafu-checkin.conf" NOTIFY_COOLDOWN)" "600"
   t_eq "setconfig：没给的项沿用当前生效值" "$(cd_val "$d/fafu-checkin.conf" POLL_START)" "06:30"
   t_eq "setconfig：没给的项不退回默认值" "$(cd_val "$d/fafu-checkin.conf" KEEPALIVE)" "0"
-  t_eq "setconfig：回显仍是全部键的生效值" "$(grep -c . "$CD_WORK/partial.out")" "8"
+  t_eq "setconfig：没给档位时沿用当前生效值" "$(cd_val "$d/fafu-checkin.conf" DEBUG)" "1"
+  t_eq "setconfig：回显仍是全部键的生效值" "$(grep -c . "$CD_WORK/partial.out")" "9"
 }
 
 # 非法值逐类各一条：非 0 退出 + 可读原因 + 配置文件逐字节未变
@@ -952,12 +983,15 @@ cd_case_setconfig_reject() {
   sc_bad leadalpha NOTIFY_LEAD=abc
   sc_bad leadover  NOTIFY_LEAD=99999
   sc_bad switch7   KEEPALIVE=7
+  sc_bad debug2    DEBUG=2
   sc_bad unknown   FOO=1
   # 只接受登记表里的精确键名：同一批里合法与非法混着给，整批都不落盘
   sc_bad lowercase keepalive=1
   sc_bad mixed     POLL_START=05:00 KEEPALIVE=7
   t_has "setconfig 拒绝（时刻越界）：原因里点明键名" "$CD_WORK/badtime.err" "POLL_START"
   t_has "setconfig 拒绝（时刻越界）：原因里带上被拒的值" "$CD_WORK/badtime.err" "25:00"
+  t_has "setconfig 拒绝（档位越界）：原因里点明键名" "$CD_WORK/debug2.err" "DEBUG"
+  t_has "setconfig 拒绝（档位越界）：原因说的是只收 0 或 1" "$CD_WORK/debug2.err" "只能填 0 或 1"
   t_has "setconfig 拒绝（未知键）：原因里点明那个键" "$CD_WORK/unknown.err" "FOO"
   t_has "setconfig 拒绝（键名大小写不符）：原因里点明那个键" "$CD_WORK/lowercase.err" "keepalive"
   t_has "setconfig 拒绝（跨午夜）：原因里说清起止的约束" "$CD_WORK/midnight.err" "早于"
@@ -982,14 +1016,14 @@ POLL_START=06:30
 POLL_END=20:00
 FOO=bar
 CONF
-  cd_sc "$d" rewrite $CD_SIX
+  cd_sc "$d" rewrite $CD_SEVEN
   t_eq "setconfig：写入成功（返回 0）" "$(cat "$CD_WORK/rewrite.rc")" "0"
-  t_eq "setconfig：重写后恰好八行（登记键各一行）" "$(grep -c . "$d/fafu-checkin.conf")" "8"
+  t_eq "setconfig：重写后恰好九行（登记键各一行）" "$(grep -c . "$d/fafu-checkin.conf")" "9"
   t_eq "setconfig：重写后没有注释行" "$(grep -c '^#' "$d/fafu-checkin.conf")" "0"
   t_eq "setconfig：重写后没有表外的键" "$(grep -c '^FOO=' "$d/fafu-checkin.conf")" "0"
   t_eq "setconfig：未提到的键补的是默认值" "$(cd_val "$d/fafu-checkin.conf" KA_END)" "21:25"
   t_eq "setconfig：重写后按登记顺序整份落盘" "$(cat "$d/fafu-checkin.conf" | tr '\n' '|')" \
-    "KEEPALIVE=1|POLL_START=20:00|POLL_END=23:59|NOTIFY=1|NOTIFY_LEAD=5|NOTIFY_COOLDOWN=300|KA_START=07:00|KA_END=21:25|"
+    "KEEPALIVE=1|POLL_START=20:00|POLL_END=23:59|NOTIFY=1|NOTIFY_LEAD=5|NOTIFY_COOLDOWN=300|KA_START=07:00|KA_END=21:25|DEBUG=1|"
 }
 
 # 校验先于落盘：带 shell 元字符的值一个字节都不该进配置文件，更不该被执行

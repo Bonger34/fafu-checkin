@@ -286,7 +286,7 @@ for _wm in 419 420 1284 1285 1286 1290; do
 done
 printf 'min_at_1285=%s\n' "$(ka_at 1285; now_minutes)"
 # 换一份配置（保活时段 08:00–20:00，走真实的配置文件与加载函数）：同一批边界随之平移
-printf 'KA_START=08:00\nKA_END=20:00\n' > mod/fafu-checkin.conf
+printf 'KA_START=08:00\nKA_END=20:00\nDEBUG=1\n' > mod/fafu-checkin.conf
 cfg_load
 for _wm in 419 479 480 1199 1200; do
   ka_at "$_wm"
@@ -691,7 +691,10 @@ ka_th_setup() {
   t_stage_module "$KA_WORK/mod" >/dev/null
   t_bb_wrap "$KA_WORK/bin/bb" >/dev/null
   ka_epoch                     # KA_EPOCH = 夹具日期那一天的零点（用真实 busybox 取）
-  printf 'NOTIFY=0\n' > "$KA_WORK/mod/fafu-checkin.conf"
+  # 夹具档位：本套件断言的是**完整**的日志行为（有哪些行、行数多少），故夹具把调试档
+  # 打开——档位本身与降噪由 poll 套件那条真入口对照守着。写在 cfg_load 之前（入口读的
+  # 就是这份文件），不写成加载之后再改变量。
+  printf 'NOTIFY=0\nDEBUG=1\n' > "$KA_WORK/mod/fafu-checkin.conf"
   printf '%s\n' "$KA_TH_PLAN" > "$KA_WORK/ctl/plan"
   printf '%s 07:00\n' "$KA_TH_DATE" > "$KA_WORK/ctl/date"
   : > "$KA_WORK/ctl/sleeps"

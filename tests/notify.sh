@@ -34,6 +34,10 @@ nt_setup() { # $1=驱动名（决定工作目录）
   : > "$NT_WORK/ctl/su/sent"
   t_bb_wrap "$NT_WORK/bin/bb" >/dev/null
   nt_stub_write "$NT_WORK/bin/su"
+  # 夹具配置文件：本套件断言的是**完整**的日志行为，故夹具把调试档打开
+  # （档位本身与降噪由 poll 套件那条真入口对照守着）。由 nt_env 里的 cfg_load 读成生效值，
+  # 与入口同一时序：先落文件、再由配置层覆盖默认值。
+  printf 'DEBUG=1\n' > "$NT_WORK/mod/fafu-checkin.conf"
   nt_env
 }
 
@@ -100,6 +104,8 @@ SU_BIN='$NT_WORK/bin/su'
 PL=20261001
 export SU_BIN PL
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
+# 与入口同一时序：各层就位之后再加载配置（夹具那份文件负责档位等生效值）
+cfg_load
 ENV
   [ "$1" = "noprobe" ] || printf 'probe_su   # 与入口一致：先探一次，notify 才有 SU_MODE\n' >> "$NT_WORK/_env.sh"
 }
@@ -723,7 +729,7 @@ DRIVER
 
   # 轮询范围止早于 23:00 → 目标时刻跟着提前
   nt_setup notask-early
-  printf 'POLL_END=22:15\n' > "$NT_WORK/mod/fafu-checkin.conf"
+  printf 'POLL_END=22:15\nDEBUG=1\n' > "$NT_WORK/mod/fafu-checkin.conf"
   nt_run notask_early <<'DRIVER'
 cfg_load
 nt_send() { printf '%s\n' "$_NT_TITLE|$_NT_TEXT" >> "$T_WORK/sent.log"; }

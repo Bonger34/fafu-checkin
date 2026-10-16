@@ -118,6 +118,11 @@ sg_setup() { # $1=驱动名（决定工作目录）
   t_curl_stub "$SG_WORK/bin/curl" "$SG_WORK/ctl" >/dev/null
   printf '200\n' > "$SG_WORK/ctl/http"   # 替身 http_post 记下的状态码（默认 2xx）
   : > "$SG_WORK/ctl/hdr"                 # 这一次的响应头原文（-D 落点形状）；缺省「没给头」
+  # 夹具配置文件：本套件钉的是日志**文案**（含被降级的那些行），故夹具把调试档打开，
+  # 断言测的仍是完整行为。由 sg_env 里的 cfg_load 读成生效值——与入口同一时序
+  # （先落文件、再由配置层覆盖加载时那个默认值，写成环境变量会被默认值盖掉）。
+  # 档位本身与默认档少写哪几行由 poll 套件那条真入口对照守着。
+  printf 'DEBUG=1\n' > "$SG_WORK/mod/fafu-checkin.conf"
   sg_epoch
   sg_at 1411        # 默认 23:31（窗口外）；每条用例都会显式拨钟
 }
@@ -159,6 +164,8 @@ export BB_OVERRIDE CURL_BIN MOCK_DATE_CTL MOCK_WGET_DIR MOCK_DEVICE_DIR MOCK_RAN
 export MODDIR LD_DIR PL NOTIFY SU_MODE SLEEP_OVERRIDE
 export SG_EPOCH SG_NOW_S
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
+# 与入口同一时序：各层就位之后再加载配置（夹具那份文件负责档位等生效值）
+cfg_load
 
 # 拔钟：墙钟由 mock 承接，%s 由这里的 EPOCH 承接（签到判定读的就是它）
 sg_at() {
