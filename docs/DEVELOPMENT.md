@@ -683,6 +683,47 @@ ls -tr "$LD" | while read f; do cat "$LD/$f"; done \
   （不代入页面默认值）、分发路径会给以换行收尾的输出补一个空行（故空行一律跳过）、
   `ksu.exec` 的回调参数与显式 `cwd` 的约定、以及「前端这次校验只为止损，脚本侧仍是唯一闸门」。
 
+### 2.1.3 页面视觉口径（`webroot/index.html`）
+
+**视觉参照是小米 HyperOS 的设计语言**（社区实现为 [Miuix](https://compose-miuix-ui.github.io/miuix/zh_CN/)，
+Kotlin / Compose Multiplatform 的库）。本页面**不引入它的任何代码**——那是移动端 UI 库，
+与网页无关；这里只照它的颜色系统与组件形状用 CSS 复刻。取值来自 Miuix 官方「颜色系统」页
+与源码（`Switch.kt` / `Card.kt` / `Component.kt` / `TextStyles.kt`）：
+
+| 用途 | 浅色 | 深色 | 依据 |
+|---|---|---|---|
+| 页面底 / 卡片 | `#fff` | `#242424` / `#2d2d2d` | `background` / `surfaceContainerHighest` |
+| 主色（开关开态、按钮、聚焦描边） | `#3482FF` | `#277AF7` | `primary` |
+| 正文 / 行摘要 / 分组小标题 | `#000` / `60%` 黑 / `#8c93b0` | `#e6e6e6` / `55%` 白 / `#787e96` | `onBackground` / `onSurfaceVariantSummary` / `onBackgroundVariant` |
+| 分隔线 | `#e0e0e0` | `#393939` | `dividerLine`（**0.75px**） |
+| 开关关态轨道 / 输入框底 | `#e6e6e6` / `#f0f0f0` | `#505050` / `#434343` | `secondary` / `secondaryContainer` |
+| 卡片圆角 | 16px | 16px | `CardDefaults.CornerRadius` |
+| 开关 | 轨道 49×28、滑块 20px、位移 4px→25px、**开态滑块无阴影** | 同左 | `Switch.kt` 的 `Modifier.size(49.dp, 28.dp)` 与 20.dp 滑块 |
+| 按钮 / 输入框 | 最小高 40、圆角 16；输入框聚焦 **2px `primary` 描边** | 同左 | `Button.kt` / `TextField.kt` |
+
+**三处有意偏离 Miuix，改动时不要「修回去」**：
+
+1. **不复刻 squircle 圆角**，统一 `border-radius:16px`。Miuix 用三次贝塞尔路径
+   （`SquircleDefaults.Extension = 1.1`、控制点比 `SQUIRCLE_CONTROL = 0.643`），CSS 无等价物；
+   `corner-shape:squircle` 要 Chromium 139+，而管理器 WebView 版本不可控，`clip-path` 又会
+   连焦点框与描边一起剪掉。16px 尺度上肉眼差异极小，不值得换这些代价。
+2. **不外链也不内嵌字体**：官方 Web demo 用 MiSans 的 CDN，与「零外部引用 + 离线可用」直接冲突；
+   内嵌 woff2 会让单文件从 20 多 KB 涨到数百 KB。改用系统字体栈——HyperOS 上 `system-ui`
+   本来就解析到 MiSans，「像不像」在这个仓库里靠的是颜色与形状，不是字体文件。
+3. **正文行高 1.5**（Miuix `paragraph` 是 1.2em），日志 `pre` 保持 12px 等宽：中文可读性
+   与「一屏看更多行」优先于逐字复刻。
+
+**配色只有一处真源**：`:root` 里那组自定义属性，深色在同一处整段覆盖。改配色只改那里，
+不要在规则里写死颜色值。
+
+**反馈分层的落点**：瞬时进展走底部 `#snack`（3.2 秒自动收，新一轮操作前先收掉上一条，
+避免「正在保存…」与结果同屏滞留）；**要留痕的结果走 `#msg` 常驻**——
+保存被拒绝的原因、校验失败、桥接不可用都属于这一类，做成会消失的浮层等于把
+「旧值保持不变」这个关键事实藏起来。
+
+**高级区每次打开都回到折叠态**（`#f_adv` 的 `aria-expanded` + `#adv_panel` 的 `hidden`）：
+不做记忆——「上次点开过」会让同一个页面在不同时候长得不一样，而这个差异无法向使用者解释。
+
 ### 2.2 运行时行为
 
 **子命令分发与命令表**（`lib/commands.sh`）：
@@ -1533,6 +1574,10 @@ sh build.sh                                 # 构建（含产物文件核对）
   （`id="f_debug"` 与它的开关形状、`<b>调试日志</b>`、`id="h_debug"` / `id="s_debug"`、
   `key: 'DEBUG', field: 'debug'` 那张表）钉的是「控件在不在、两张表对不对得上」，
   **值本身由 `tests/commands.sh` 在真入口上断言**——页面不自带默认值。
+  **视觉口径只有两条被机械守住**：零外部引用（`build.sh` + `ext_url_hits`，
+  另有反向样本自证）与「开关仍是 `.sw` 那种 checkbox 形状」（上面那三条接线断言的前提）。
+  配色、圆角、字号、行高**没有回归测试**——改 CSS 后要按 §5.5 在 412×915 下出浅色 / 深色截图
+  看一眼，机械断言在这里给不了保障。
 
 **写含中文的日志断言时注意**：本机（Windows + zh_CN.UTF-8）的 busybox `grep` 匹配不上
 多字节字符，`grep 中文` 恒为 0 处（实测）。`tests/keepalive.sh` 因此把这类断言拆成两步：
@@ -1742,6 +1787,33 @@ nohup sh /sdcard/Download/device-smoke.sh > /sdcard/Download/fafu-smoke.log 2>&1
 - **Doze 投递延迟**：未实测。若熄屏下延迟超过 10 分钟，「主窗口还剩 30 分钟」那条的
   实际到达时刻需要重算。
 - 熄屏时段刷新「全程无感」：未专门观察。
+
+---
+
+### 5.5 页面视觉走查（改 CSS 之后）
+
+**本机也能看**——不需要手机、不需要 root：页面只依赖 `window.ksu.exec` 一个外部接口，
+在桌面浏览器里给它装一个假桥就能把状态填满（`file://` 直接打开只会看到「请在管理器里打开」的横幅，
+那不是坏了，是设计如此）。
+
+1. 用 Playwright / 任意浏览器开发者工具，在**页面脚本执行之前**注入 `window.ksu`。
+   **假桥的回调是「挂在 window 上的名字」而不是函数**——`ksu.exec(line, opts, cb)` 里的 `cb`
+   是字符串，必须写成 `window[cb](0, out, '')`；写成 `cb(0, …)` 会报 `TypeError: cb is not a function`，
+   页面于是永远停在「读取中…」（这个坑踩过一次，症状极具迷惑性：布局全对、状态全是「—」）。
+2. 视口 **412×915**、`prefers-color-scheme` 分别设 `light` / `dark`，各看一眼；
+   **用视口截图而不是整页截图**——`#snack` 是 `position:fixed`，整页拼接时会重复出现，
+   看着像「提示没消失」。
+3. 要看的四处：首屏运行状态（七项是否都有值）、配置区的「轮询范围」一行（窄屏下两个输入框
+   应一致地折到标题块下方占满一行）、高级区展开、以及一次**被拒绝**的保存（原因必须常驻在
+   `#msg` 里、底部提示必须已经收掉）。
+4. 数值可机核（Playwright 取计算样式）：开关轨道 `49×28`、滑块 `20px`、
+   输入框聚焦 `2px rgb(52,130,255)`、卡片 `border-radius:16px` 且 `border-width:0` / `box-shadow:none`。
+
+**只有真机能验的**：滚动手感、系统字体（HyperOS 上 `system-ui` 解析到 MiSans）的实际观感、
+刘海安全区（`env(safe-area-inset-*)` 在桌面浏览器恒为 0）、以及管理器 WebView 对
+`.75px` 边框与 `env()` 的支持程度。真机走查照 §5.4 的清单走，**页面这一项看四件事**：
+① 打开即见运行状态且无横向滚动；② 高级区默认折起来、点一下展开；③ 开关点击有位移过渡、
+   无闪烁；④ 保存一次合法值（页面上回显新值）与一次非法值（当场拒绝、旧值不变）。
 
 ---
 

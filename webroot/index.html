@@ -6,18 +6,20 @@
 <meta name="color-scheme" content="light dark">
 <title>服服签到 · 配置</title>
 <style>
-/* 配色只在这一处定义：浅色打底，深色整段覆盖。跟随系统，不做手动切换。 */
+/* 配色取自 Miuix 颜色系统（HyperOS 风），只在这一处定义：浅色打底，深色整段覆盖。 */
 :root{
   color-scheme:light dark;
-  --bg:#f2f4f7; --card:#fff; --fg:#1b1f24; --muted:#667085; --line:#e4e7ec;
-  --accent:#2f6fed; --ok:#0f7b52; --bad:#b42318; --warn:#b54708;
-  --input:#fff; --chip:#eef2f6; --shadow:0 1px 3px rgba(16,24,40,.14);
+  --bg:#fff; --card:#fff; --fg:#000; --soft:rgba(0,0,0,.6); --muted:#8c93b0;
+  --line:#e0e0e0; --primary:#3482FF; --accent:#1a6ae0; --track:#e6e6e6;
+  --chip:#f0f0f0; --ok:#0f7b52; --bad:#e94634; --warn:#b54708;
+  --dark:#1a1a1a; --on-dark:#f0f0f0;
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --bg:#0f1216; --card:#191d23; --fg:#e7eaee; --muted:#98a2b3; --line:#2a3038;
-    --accent:#7aa2f7; --ok:#3ddc97; --bad:#ff8a80; --warn:#f5b544;
-    --input:#12161b; --chip:#222831; --shadow:0 1px 3px rgba(0,0,0,.5);
+    --bg:#242424; --card:#2d2d2d; --fg:#e6e6e6; --soft:rgba(255,255,255,.55); --muted:#787e96;
+    --line:#393939; --primary:#277AF7; --accent:#5d9bff; --track:#505050;
+    --chip:#434343; --ok:#3ddc97; --bad:#f12522; --warn:#f5b544;
+    --dark:#1a1a1a; --on-dark:#f0f0f0;
   }
 }
 *{box-sizing:border-box}
@@ -25,58 +27,87 @@ html,body{margin:0}
 body{
   background:var(--bg); color:var(--fg);
   font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;
-  font-size:15px; line-height:1.6;
+  font-size:17px; line-height:1.5;
 }
 /* 刘海屏：安全区用 CSS 原生 env()，配 viewport-fit=cover 才会给出非零值 */
 .wrap{
   max-width:660px; margin:0 auto;
   padding:calc(14px + env(safe-area-inset-top,0px)) calc(14px + env(safe-area-inset-right,0px)) calc(28px + env(safe-area-inset-bottom,0px)) calc(14px + env(safe-area-inset-left,0px));
 }
-h1{font-size:19px; margin:0 0 2px}
-.sub{color:var(--muted); font-size:13px; margin:0 0 14px}
-.card{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:6px 14px; margin:0 0 14px}
+h1{font-size:20px; margin:0 0 2px}
+.sub{color:var(--soft); font-size:14px; margin:0 0 14px}
+.card{background:var(--card); border-radius:16px; padding:16px; margin:0 0 12px}
 .card h2{display:flex; align-items:center; justify-content:space-between; gap:10px;
-  font-size:13px; letter-spacing:.05em; color:var(--muted); margin:12px 0 2px; font-weight:600}
-.row{display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:11px 0}
-.row + .row{border-top:1px solid var(--line)}
-.row .txt{flex:1 1 190px; min-width:0}
-.row .txt b{display:block; font-weight:600}
-.row .txt small{display:block; color:var(--muted); font-size:12px}
+  font-size:14px; color:var(--muted); margin:0 0 4px; font-weight:500}
+.row{display:flex; flex-wrap:wrap; align-items:center; gap:12px; min-height:56px; padding:10px 0}
+.row + .row{border-top:.75px solid var(--line)}
+.row .txt{flex:1 1 160px; min-width:0}
+.row .txt b{display:block; font-size:17px; font-weight:500}
+.row .txt small{display:block; color:var(--soft); font-size:14px; margin-top:2px}
 .eff{color:var(--accent) !important}
-input[type=text]{
-  flex:0 0 auto; width:92px; padding:8px 10px; text-align:center;
-  background:var(--input); color:var(--fg); border:1px solid var(--line); border-radius:9px;
-  font-family:inherit; font-size:15px;
-}
-input[type=text]:focus{outline:2px solid var(--accent); outline-offset:1px}
-input.bad{border-color:var(--bad)}
-.sep{color:var(--muted)}
-.sw{appearance:none; -webkit-appearance:none; flex:0 0 auto; width:48px; height:28px; margin:0;
-  border:1px solid var(--line); border-radius:999px; background:var(--chip); position:relative; cursor:pointer}
-.sw::after{content:""; position:absolute; top:2px; left:2px; width:22px; height:22px; border-radius:50%;
-  background:#fff; box-shadow:var(--shadow); transition:transform .15s ease}
-.sw:checked{background:var(--accent); border-color:var(--accent)}
-.sw:checked::after{transform:translateX(22px)}
-.sw:disabled{opacity:.5}
-.tip{border-left:3px solid var(--accent); background:var(--chip); border-radius:8px;
-  padding:10px 12px; margin:10px 0 2px; font-size:13px}
-.actions{display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin:12px 0 0}
-button{font-family:inherit; font-size:15px; font-weight:600; padding:11px 24px; border-radius:10px;
-  border:1px solid transparent; background:var(--accent); color:#fff}
+.field{flex:0 0 auto; width:104px; padding:9px 12px; text-align:center;
+  background:var(--chip); color:var(--fg); border:2px solid transparent; border-radius:16px;
+  font-family:inherit; font-size:17px; transition:border-color .15s ease}
+.field:focus{border-color:var(--primary); outline:none}
+.field.bad{border-color:var(--bad)}
+.range{display:flex; align-items:center; gap:8px}
+/* 窄屏放不下时，「起 ~ 止」两个输入框一致地折到标题块下方占满一行 */
+@media (max-width:460px){ .row > .range{flex:1 1 100%} }
+.range .sep{color:var(--soft)}
+button{font-family:inherit; font-size:17px; font-weight:500; padding:10px 18px; border:0;
+  border-radius:16px; background:var(--primary); color:#fff; cursor:pointer; min-height:40px;
+  transition:background-color .15s ease}
 button:disabled{opacity:.55}
-button.ghost{background:transparent; color:var(--accent); border-color:var(--line);
-  font-size:13px; font-weight:500; padding:5px 12px}
-#msg{margin:10px 0 8px; font-size:13px; min-height:21px}
-#msg.ok{color:var(--ok)} #msg.bad{color:var(--bad)} #msg.busy{color:var(--muted)}
-.banner{border:1px solid var(--line); border-left:4px solid var(--warn); background:var(--card);
-  border-radius:12px; padding:12px 14px; margin:0 0 14px; font-size:13px}
-dl.status{display:grid; grid-template-columns:auto 1fr; gap:7px 14px; margin:6px 0 12px; font-size:14px}
-dl.status dt{color:var(--muted)}
-dl.status dd{margin:0}
-pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0 0 12px;
-  font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-all; max-height:170px; overflow:auto;
+button.ghost{background:var(--chip); color:var(--accent); border:0; font-size:14px;
+  font-weight:500; padding:6px 14px; min-height:0}
+.sw{appearance:none; -webkit-appearance:none; flex:0 0 auto; width:49px; height:28px; margin:0;
+  border:0; border-radius:999px; background:var(--track); position:relative; cursor:pointer;
+  transition:background-color .18s cubic-bezier(.2,.8,.2,1)}
+.sw::after{content:""; position:absolute; top:4px; left:4px; width:20px; height:20px; border-radius:50%;
+  background:#fff; transition:transform .18s cubic-bezier(.2,.8,.2,1), background-color .18s}
+.sw:checked{background:var(--primary)}
+.sw:checked::after{transform:translateX(21px)}
+.sw:disabled{opacity:.5}
+label.row{cursor:pointer}
+.tip{border-left:3px solid var(--primary); background:var(--chip); border-radius:12px;
+  padding:10px 12px; margin:10px 0 2px; font-size:14px}
+.actions{display:block}
+.actions .sep{display:block; color:var(--soft); font-size:14px; margin:8px 0 0}
+button.adv{display:flex; align-items:center; gap:12px; width:100%; min-height:56px; padding:10px 0;
+  text-align:left; background:none; color:var(--fg); border-radius:12px}
+button.adv:hover{background:none}
+button.adv:disabled{opacity:1}
+button.adv .txt{flex:1 1 auto; min-width:0}
+button.adv .txt b{display:block; font-size:17px; font-weight:500}
+button.adv .txt small{display:block; color:var(--soft); font-size:14px; margin-top:2px}
+button.adv .caret{flex:0 0 auto; color:var(--muted); transition:transform .18s cubic-bezier(.2,.8,.2,1)}
+button.adv[aria-expanded=true] .caret{transform:rotate(180deg)}
+.panel{margin-top:4px}
+[hidden]{display:none !important}
+#msg{margin:8px 0 0; font-size:14px}
+#msg.ok{color:var(--ok)} #msg.bad{color:var(--bad)} #msg.busy{color:var(--soft)}
+#snack{position:fixed; left:12px; right:12px; bottom:calc(14px + env(safe-area-inset-bottom,0px));
+  margin:0 auto; max-width:420px; padding:12px 14px; border-radius:16px;
+  background:var(--dark); color:var(--on-dark); font-size:14px; line-height:1.4;
+  box-shadow:0 4px 10px rgba(0,0,0,.1); opacity:0; transform:translateY(8px);
+  transition:opacity .2s ease, transform .2s ease; pointer-events:none; z-index:9}
+#snack.on{opacity:1; transform:none}
+.banner{background:var(--card); border-radius:16px; border-left:4px solid var(--bad);
+  padding:14px 16px; margin:0 0 12px; font-size:14px}
+dl.status{margin:0}
+dl.status .row{display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 12px; min-height:0; padding:9px 0}
+dl.status dt{flex:0 0 auto; color:var(--fg); font-size:17px}
+dl.status dd{flex:1 1 55%; margin:0; text-align:right; color:var(--soft); font-size:15px;
+  overflow-wrap:anywhere}
+pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
+  font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-all; max-height:190px; overflow:auto;
   font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-.last{color:var(--muted); font-size:12px; margin:0 0 10px; word-break:break-all}
+.logs-head{display:flex; align-items:center; justify-content:space-between; gap:10px; margin:0 0 8px}
+.logs-head h2{margin:0}
+.last{color:var(--soft); font-size:12px; margin:8px 0 0; word-break:break-all}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none !important}
+}
 </style>
 </head>
 <body>
@@ -88,21 +119,34 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
 
   <main id="app" hidden>
     <section class="card">
-      <h2>主界面</h2>
+      <h2>运行状态</h2>
+      <dl class="status">
+        <div class="row"><dt>服务开关</dt><dd id="s_service">—</dd></div>
+        <div class="row"><dt>今日签到</dt><dd id="s_sign">—</dd></div>
+        <div class="row"><dt>今日保活</dt><dd id="s_ka">—</dd></div>
+        <div class="row"><dt>最近保活</dt><dd id="s_kalast">—</dd></div>
+        <div class="row"><dt>登录状态</dt><dd id="s_token">—</dd></div>
+        <div class="row"><dt>调试日志</dt><dd id="s_debug">—</dd></div>
+        <div class="row"><dt>模块版本</dt><dd id="s_ver">—</dd></div>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>配置</h2>
 
       <div class="row">
         <div class="txt"><b>服务开关</b><small id="h_service">当前：读取中…</small></div>
         <input class="sw" type="checkbox" id="f_service" aria-label="服务开关">
       </div>
 
-      <div class="row">
-        <div class="txt">
+      <label class="row">
+        <span class="txt">
           <b>保活开关</b>
           <small>关闭后白天不再保活（白天不会为了刷新登录状态而短暂弹出打卡页），只保留轮询范围内的自动签到。</small>
           <small class="eff" id="h_keepalive">当前生效值：读取中…</small>
-        </div>
+        </span>
         <input class="sw" type="checkbox" id="f_keepalive" aria-label="保活开关">
-      </div>
+      </label>
 
       <div class="row">
         <div class="txt">
@@ -110,51 +154,21 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
           <small>从这一刻开始去查看今晚的任务，最晚查到这一刻。这不是签到时段——签到窗口由服务端任务数据决定。</small>
           <small class="eff" id="h_poll">当前生效值：读取中…</small>
         </div>
-        <input type="text" id="f_poll_start" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="轮询范围起">
-        <span class="sep">~</span>
-        <input type="text" id="f_poll_end" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="轮询范围止">
+        <span class="range">
+          <input class="field" type="text" id="f_poll_start" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="轮询范围起">
+          <span class="sep" aria-hidden="true">~</span>
+          <input class="field" type="text" id="f_poll_end" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="轮询范围止">
+        </span>
       </div>
 
-      <div class="row">
-        <div class="txt">
+      <label class="row">
+        <span class="txt">
           <b>通知开关</b>
           <small>关闭后零通知（同时也就不再需要降权调用、不再写通知标记）。</small>
           <small class="eff" id="h_notify">当前生效值：读取中…</small>
-        </div>
+        </span>
         <input class="sw" type="checkbox" id="f_notify" aria-label="通知开关">
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>高级</h2>
-      <p class="tip">轮询范围要覆盖你学校发布任务的时间。范围之外本模块不会去查看任务，设窄了就会错过自动签到；兜底是到点仍未取得今晚任务时给你发一条提醒，收到后手动打开 App 签一下仍来得及——所以设窄的代价是「收到提醒、自己补救」，而不是静默漏签。</p>
-
-      <div class="row">
-        <div class="txt">
-          <b>预警提前量</b>
-          <small>亮屏时打开打卡页之前先弹一条提醒，并留出这么多秒给你读完；0 表示不加延时。</small>
-          <small class="eff" id="h_lead">当前生效值：读取中…</small>
-        </div>
-        <input type="text" id="f_lead" inputmode="numeric" maxlength="3" placeholder="秒" aria-label="预警提前量（秒）">
-      </div>
-
-      <div class="row">
-        <div class="txt">
-          <b>通知冷却</b>
-          <small>同类打扰型通知的最小间隔秒数；调小更容易被连续提醒，调大更清静。</small>
-          <small class="eff" id="h_cooldown">当前生效值：读取中…</small>
-        </div>
-        <input type="text" id="f_cooldown" inputmode="numeric" maxlength="6" placeholder="秒" aria-label="通知冷却（秒）">
-      </div>
-
-      <div class="row">
-        <div class="txt">
-          <b>调试日志</b>
-          <small>打开后把分钟级重复的行（每次轮询的时段判定、每次提交的完整现场等）也写进日志，排障时用；关着时日志只留结果与原因。两个档位的文案完全一样，区别只是写不写。</small>
-          <small class="eff" id="h_debug">当前生效值：读取中…</small>
-        </div>
-        <input class="sw" type="checkbox" id="f_debug" aria-label="调试日志">
-      </div>
+      </label>
     </section>
 
     <section class="card">
@@ -166,22 +180,57 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
     </section>
 
     <section class="card">
-      <h2>运行状态 <button class="ghost" type="button" id="refresh">刷新</button></h2>
-      <dl class="status">
-        <dt>服务开关</dt><dd id="s_service">—</dd>
-        <dt>今日签到</dt><dd id="s_sign">—</dd>
-        <dt>今日保活</dt><dd id="s_ka">—</dd>
-        <dt>最近保活</dt><dd id="s_kalast">—</dd>
-        <dt>登录状态</dt><dd id="s_token">—</dd>
-        <dt>调试日志</dt><dd id="s_debug">—</dd>
-        <dt>模块版本</dt><dd id="s_ver">—</dd>
-      </dl>
-      <h2>最近日志</h2>
+      <button class="adv" type="button" id="f_adv" aria-expanded="false" aria-controls="adv_panel">
+        <span class="txt"><b>高级</b><small>预警提前量 · 通知冷却 · 调试日志</small></span>
+        <svg class="caret" width="12" height="8" viewBox="0 0 12 8" aria-hidden="true" focusable="false">
+          <path d="M1 1.5 6 6.5 11 1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
+
+      <div class="panel" id="adv_panel" hidden>
+        <p class="tip">轮询范围要覆盖你学校发布任务的时间。范围之外本模块不会去查看任务，设窄了就会错过自动签到；兜底是到点仍未取得今晚任务时给你发一条提醒，收到后手动打开 App 签一下仍来得及——所以设窄的代价是「收到提醒、自己补救」，而不是静默漏签。</p>
+
+        <div class="row">
+          <div class="txt">
+            <b>预警提前量</b>
+            <small>亮屏时打开打卡页之前先弹一条提醒，并留出这么多秒给你读完；0 表示不加延时。</small>
+            <small class="eff" id="h_lead">当前生效值：读取中…</small>
+          </div>
+          <input class="field" type="text" id="f_lead" inputmode="numeric" maxlength="3" placeholder="秒" aria-label="预警提前量（秒）">
+        </div>
+
+        <div class="row">
+          <div class="txt">
+            <b>通知冷却</b>
+            <small>同类打扰型通知的最小间隔秒数；调小更容易被连续提醒，调大更清静。</small>
+            <small class="eff" id="h_cooldown">当前生效值：读取中…</small>
+          </div>
+          <input class="field" type="text" id="f_cooldown" inputmode="numeric" maxlength="6" placeholder="秒" aria-label="通知冷却（秒）">
+        </div>
+
+        <label class="row">
+          <span class="txt">
+            <b>调试日志</b>
+            <small>打开后把分钟级重复的行（每次轮询的时段判定、每次提交的完整现场等）也写进日志，排障时用；关着时日志只留结果与原因。两个档位的文案完全一样，区别只是写不写。</small>
+            <small class="eff" id="h_debug">当前生效值：读取中…</small>
+          </span>
+          <input class="sw" type="checkbox" id="f_debug" aria-label="调试日志">
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="logs-head">
+        <h2>最近日志</h2>
+        <button class="ghost" type="button" id="refresh">刷新</button>
+      </div>
       <pre class="logs" id="s_log">—</pre>
       <p class="last" id="s_last">最近一次命令：—</p>
     </section>
   </main>
 </div>
+
+<div id="snack" role="status" aria-live="polite"></div>
 
 <script>
 (function () {
@@ -203,6 +252,7 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
   var eff = {};   /* 上一次从 webstate 读到的七项生效值（空串 = 脚本没给这一项） */
   var st  = {};   /* webstate 的完整读数 */
   var seq = 0;    /* 回调名后缀：每次调用取一个，避免同名覆盖 */
+  var snackTimer = 0;   /* 底部提示的定时器；连发时把上一条顶掉 */
 
   function el(id) { return document.getElementById(id); }
   function setText(id, s) { el(id).textContent = s; }
@@ -341,12 +391,25 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
     m.className = kind || '';
     m.textContent = text;
   }
+  /* 瞬时进展走底部提示（会自己消失）；要留痕的结果一律用 note() 常驻在保存区 */
+  function snack(text) {
+    var s = el('snack');
+    s.textContent = text;
+    s.classList.add('on');
+    if (snackTimer) { clearTimeout(snackTimer); }
+    snackTimer = setTimeout(function () { hideSnack(); }, 3200);
+  }
+  /* 新一轮操作开始时先收掉上一条：否则「正在保存…」会与结果同屏滞留 */
+  function hideSnack() {
+    if (snackTimer) { clearTimeout(snackTimer); snackTimer = 0; }
+    el('snack').classList.remove('on');
+  }
   function setBusy(b) {
     el('save').disabled = b;
     el('save').textContent = b ? '保存中…' : '保存';
   }
   function clearBad() {
-    var all = document.querySelectorAll('input.bad'), i;
+    var all = document.querySelectorAll('.bad'), i;
     for (i = 0; i < all.length; i++) all[i].classList.remove('bad');
   }
 
@@ -375,6 +438,7 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
 
   function showProblem(p) {
     clearBad();
+    hideSnack();
     el(p.id).classList.add('bad');
     note('❌ ' + p.text + '　未提交，生效值仍是 ' + effSummary(), 'bad');
   }
@@ -390,12 +454,14 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
     if (p) { showProblem(p); return; }
     clearBad();
     setBusy(true);
-    note('正在保存…', 'busy');
+    note('');
+    snack('正在保存…');
     var line = 'setconfig';
     for (var i = 0; i < CFG.length; i++) line += ' ' + CFG[i].key + '=' + v[CFG[i].key];
     script(line).then(function (r) {
       if (r.errno !== 0) {
         /* 闸门拒绝：生效值不动，页面继续显示旧值，原因照原样给出 */
+        hideSnack();
         note('❌ 保存被拒绝：' + reason(r) + '　未写入，生效值仍是 ' + effSummary(), 'bad');
         setBusy(false);
         return null;
@@ -403,6 +469,7 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
       var wasOff = st.service === 'off';
       return restart().then(function (ok) {
         return refreshState().then(function () {
+          hideSnack();
           note('✅ 配置已保存并生效：' + effSummary() +
             (wasOff ? '　服务处于停用态，守护进程不会启动'
                     : (ok ? '　守护进程已按新配置重启' : '　守护进程重启未成功，改动将在下次启动时生效')), 'ok');
@@ -410,6 +477,7 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
         });
       });
     }).catch(function (e) {
+      hideSnack();
       setBusy(false);
       note('❌ 出错了：' + (e && e.message ? e.message : e), 'bad');
     });
@@ -418,7 +486,8 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
   function onServiceToggle() {
     var box = el('f_service'), want = box.checked;
     box.disabled = true;
-    note('正在' + (want ? '启用' : '停用') + '服务…', 'busy');
+    note('');
+    snack('正在' + (want ? '启用' : '停用') + '服务…');
     script(want ? 'enable' : 'disable').then(function (r) {
       box.disabled = false;
       if (r.errno !== 0) {
@@ -427,18 +496,25 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
         return;
       }
       var tail = firstLine(r.stdout);
-      refreshState().then(function () {
-        note('✅ ' + (tail || (want ? '服务已启用' : '服务已停用')), 'ok');
-      });
+      snack('✅ ' + (tail || (want ? '服务已启用' : '服务已停用')));
+      refreshState();
     });
+  }
+
+  /* 高级区每次打开都回到折叠态：不做记忆，免得「上次点开过」变成一个无法解释的差异 */
+  function onAdvToggle() {
+    var btn = el('f_adv'), panel = el('adv_panel'), open = btn.getAttribute('aria-expanded') !== 'true';
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    panel.hidden = !open;
   }
 
   function bind() {
     el('save').addEventListener('click', onSave);
     el('f_service').addEventListener('change', onServiceToggle);
+    el('f_adv').addEventListener('click', onAdvToggle);
     el('refresh').addEventListener('click', function () {
-      note('正在刷新状态…', 'busy');
-      refreshState().then(function () { note('状态已刷新。', ''); });
+      snack('正在刷新状态…');
+      refreshState().then(function () { snack('状态已刷新。'); });
     });
     /* 失焦时就地校验：非法值让输入框变红并给出规则，保存时再拦一次 */
     var ids = ['f_poll_start', 'f_poll_end', 'f_lead', 'f_cooldown'];
@@ -463,11 +539,12 @@ pre.logs{background:var(--chip); border-radius:10px; padding:10px 12px; margin:0
     el('app').hidden = false;
     bind();
     setBusy(true);
-    note('正在读取生效值…', 'busy');
+    note('');
+    snack('正在读取生效值…');
     refreshState().then(function (got) {
       setBusy(false);
-      note(got ? '已读取当前生效值；改完点「保存」即生效。'
-               : '读取失败：脚本没有返回状态（点「刷新」重试）。', got ? '' : 'bad');
+      if (!got) { note('❌ 读取失败：脚本没有返回状态（点「刷新」重试）。', 'bad'); }
+      else { snack('已读取当前生效值；改完点「保存」即生效。'); }
     }).catch(function (e) {
       setBusy(false);
       note('❌ 读取失败：' + (e && e.message ? e.message : e), 'bad');
