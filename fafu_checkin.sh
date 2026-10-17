@@ -69,14 +69,12 @@ cmd_start() {
     update_desc
     exit 0
   fi
-  if [ -f "$PIDF" ]; then
-    oldpid=$("$BB" cat "$PIDF" 2>/dev/null)
-    if [ -n "$oldpid" ] && [ -d "/proc/$oldpid" ] && \
-       "$BB" grep -qa 'fafu_checkin' "/proc/$oldpid/cmdline" 2>/dev/null; then
-      log "已有实例(PID $oldpid)在运行，退出"
-      echo "服务已在运行 (PID $oldpid)"
-      exit 0
-    fi
+  # 单实例判定与 status / webstate 共用同一条判据（state 层的 daemon_pid）
+  oldpid=$(daemon_pid)
+  if [ -n "$oldpid" ]; then
+    log "已有实例(PID $oldpid)在运行，退出"
+    echo "服务已在运行 (PID $oldpid)"
+    exit 0
   fi
   export FAFU_DAEMON=1 FAFU_SU_MODE="$SU_MODE"   # 探测结果随环境传给守护进程
   "$BB" nohup sh "$SELF" start </dev/null >/dev/null 2>&1 &

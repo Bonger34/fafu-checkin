@@ -175,7 +175,7 @@ BEFORE_KA=$(ka_count)
 run status
 STATUS_OUT="$OUT_LAST"
 has "$STATUS_OUT" "开关:" "status：有开关状态"
-has "$STATUS_OUT" "服务:" "status：有服务状态"
+has "$STATUS_OUT" "守护进程:" "status：有守护进程状态"
 has "$STATUS_OUT" "描述:" "status：有描述预览"
 expect "$STATUS_OUT" "token: 有效" "status：token 可用"
 forbid "$STATUS_OUT" "未找到（应用未安装或未登录过）" "status：没有落到「未找到 token」"
@@ -187,7 +187,7 @@ forbid "$STATUS_OUT" "未找到（应用未安装或未登录过）" "status：�
 PROBE_BEFORE=$(probe_count)
 run webstate
 WS_OUT="$OUT_LAST"
-for k in service sign_state sign_time ka_ok ka_fail ka_last ka_last_result token_state version keepalive poll_start poll_end notify notify_lead notify_cooldown; do
+for k in service daemon sign_state sign_time ka_ok ka_fail ka_last ka_last_result token_state version keepalive poll_start poll_end notify notify_lead notify_cooldown; do
   case "$WS_OUT" in
     *"$k="*) : ;;
     *) bad "webstate：缺少字段 $k" ;;
@@ -245,7 +245,8 @@ else
 fi
 SAVE_OUT=$(sh "$E" status 2>&1)
 has "$SAVE_OUT" "开关: 🟢 已启用" "收尾：开关是「已启用」"
-expect "$SAVE_OUT" "服务: 运行中" "收尾：守护进程在跑"
+expect "$SAVE_OUT" "守护进程: ✅ 运行中" "收尾：守护进程在跑"
+forbid "$SAVE_OUT" "开关已启用但守护进程不在" "收尾：没有出现「开关与进程矛盾」的报警"
 
 sect "4 · 动态描述"
 DESC_NOW=$(desc_line "$SAVE_OUT")

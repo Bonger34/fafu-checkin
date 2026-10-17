@@ -75,6 +75,8 @@ button.ghost:active{background:var(--line)}
 label.row{cursor:pointer}
 .tip{border-left:3px solid var(--primary); background:var(--chip); border-radius:12px;
   padding:10px 12px; margin:10px 0 2px; font-size:14px}
+/* 报警态的提示条：与开关矛盾时用，配色只换左边框，不引入新的底色 */
+.tip.warn{border-left-color:var(--bad)}
 .actions{display:block}
 .act-note{display:block; color:var(--soft); font-size:14px; margin:8px 0 0}
 button.adv{display:flex; align-items:center; gap:12px; width:100%; min-height:56px; padding:10px 0;
@@ -130,8 +132,10 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
   <main id="app" hidden>
     <section class="card">
       <h2>运行状态</h2>
+      <p class="tip warn" id="daemonwarn" hidden>⚠️ 开关是启用的，但守护进程没在跑：现在不会自动签到，重启手机可恢复。</p>
       <dl class="status">
         <div class="row"><dt>服务开关</dt><dd id="s_service">—</dd></div>
+        <div class="row"><dt>守护进程</dt><dd id="s_daemon">—</dd></div>
         <div class="row"><dt>今日签到</dt><dd id="s_sign">—</dd></div>
         <div class="row"><dt>今日保活</dt><dd id="s_ka">—</dd></div>
         <div class="row"><dt>最近保活</dt><dd id="s_kalast">—</dd></div>
@@ -368,6 +372,10 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     el('f_service').checked = st.service === 'on';
     setText('s_service', svc);
     setText('h_service', '当前：' + svc + ' · 点一下立即生效，与模块卡片的操作按钮是同一个开关');
+    setText('s_daemon', st.daemon === 'running' ? '✅ 运行中'
+      : (st.daemon === 'stopped' ? '❌ 未运行' : '未知'));
+    /* 只有「开关说该跑、进程却不在」才报警：正常态与停用态都不该出现这一条 */
+    el('daemonwarn').hidden = !(st.service === 'on' && st.daemon === 'stopped');
 
     setText('s_sign', st.sign_state ? (st.sign_state + (st.sign_time ? ' · ' + st.sign_time : '')) : '今天还没有记录');
     setText('s_ka', (st.ka_ok === '' || st.ka_ok == null) && (st.ka_fail === '' || st.ka_fail == null)

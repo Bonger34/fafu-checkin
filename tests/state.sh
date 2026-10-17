@@ -49,9 +49,10 @@ T_ROOT='$T_ROOT'
 T_WORK='$ST_WORK'
 MODDIR='$ST_MODDIR'
 BB_OVERRIDE='$ST_BB'
+PROC_ROOT='./proc'          # 进程存活判据的注入点：用例自己造「进程表里有没有这个号」
 MOCK_DATE_CTL='$ST_CLOCK'
 KSUD=''                     # 走非 KernelSU 回退路径（写入改写 module.prop）
-export MODDIR BB_OVERRIDE MOCK_DATE_CTL KSUD
+export MODDIR BB_OVERRIDE PROC_ROOT MOCK_DATE_CTL KSUD
 for _f in $TEST_LIB_FILES; do . "\$T_ROOT/\$_f"; done
 ENV
 }
@@ -121,6 +122,45 @@ DRIVER
   t_eq "启用后 svc_is_disabled 为假" "$(st_val "$d" d2)" "no"
   t_eq "开关文件内容为 enabled + 换行（格式不变）" "$(st_val "$d" fmt2)" "enabled|"
   t_eq "开关写入不留临时文件" "$(st_val "$d" tmpleft)" "0"
+}
+
+# ============================================================
+# 一·二、服务进程存活判据（status / webstate / 入口共用这一条）
+# ============================================================
+
+st_case_daemon_pid() {
+  local d
+  st_setup
+  st_write_env
+  st_run dp <<'DRIVER'
+{
+  # 进程表由用例自己造：PROC_ROOT 指向工作目录，「有没有这个进程」就是可控输入。
+  # 一条 argv 按 NUL 分隔，与内核给出的 cmdline 同形
+  noseg() { printf '%s' "$1" | tr ' ' '\000'; }
+  printf 'nofile=%s\n' "$(daemon_pid)"
+  printf '7654321\n' > "$PIDF"
+  printf 'dead=%s\n'   "$(daemon_pid)"
+  mkdir -p "$PROC_ROOT/4242"
+  noseg 'sh /data/adb/modules/fafu-checkin/fafu_checkin.sh start' > "$PROC_ROOT/4242/cmdline"
+  printf '4242\n' > "$PIDF"
+  printf 'alive=%s\n'  "$(daemon_pid)"
+  mkdir -p "$PROC_ROOT/4243"
+  noseg 'sh /system/bin/pm list' > "$PROC_ROOT/4243/cmdline"
+  printf '4243\n' > "$PIDF"
+  printf 'reused=%s\n' "$(daemon_pid)"
+  mkdir -p "$PROC_ROOT/4244"
+  : > "$PROC_ROOT/4244/cmdline"
+  printf '4244\n' > "$PIDF"
+  printf 'zombie=%s\n' "$(daemon_pid)"
+} > "$T_WORK/dp.txt"
+DRIVER
+
+  d="$ST_WORK/dp.txt"
+  t_eq "没有 PID 文件：读不出进程" "$(st_val "$d" nofile)" ""
+  t_eq "PID 早已不在：读不出进程" "$(st_val "$d" dead)" ""
+  t_eq "活着且 cmdline 是本模块：报出 PID" "$(st_val "$d" alive)" "4242"
+  t_eq "PID 被别的进程占着：不认（cmdline 对不上）" "$(st_val "$d" reused)" ""
+  t_eq "僵尸进程（/proc 在、cmdline 空）：不认" "$(st_val "$d" zombie)" ""
 }
 
 # ============================================================
@@ -778,6 +818,7 @@ st_case_ownership() {
 # ---- 注册（顺序即执行顺序） ----
 
 t_case "state · 开关状态" st_case_switch
+t_case "state · 守护进程存活判据" st_case_daemon_pid
 t_case "state · 签到记录（含旧文件兼容）" st_case_sign
 t_case "state · 保活统计与跨日归零" st_case_keepalive_daily
 t_case "state · 保活统计文件格式" st_case_keepalive_format
