@@ -395,7 +395,10 @@ cd_case_entry_shape() {
   t_hasnt "入口不再内联用法文本" "$entry" 'echo "用法: sh $SELF ['
   t_has "入口经 cmd_dispatch 分发" "$entry" 'cmd_dispatch "$CMD"'
   t_has "入口用 cmd_known 认子命令" "$entry" 'cmd_known "$CMD"'
-  t_has "入口保留了后台化（nohup）" "$entry" 'nohup sh "$SELF" start'
+  # 后台化：优先换会话（setsid），没有该 applet 时退回 nohup——两条路径都必须还在，
+  # 否则从管理器页面保存后启动的守护进程会随 WebUI 关闭一起消失。
+  t_has "入口：优先用 setsid 起新会话" "$entry" 'setsid sh "$SELF" start'
+  t_has "入口：setsid 不可用时退回 nohup" "$entry" 'nohup sh "$SELF" start'
   t_has "入口保留了单实例判定" "$entry" '已有实例(PID $oldpid)在运行，退出'
   t_has "入口保留了守护主循环" "$entry" 'while true; do'
   # 装配阶段的那一次探测（启动路径与手动子命令共用）：守护进程是入口派生出来再 exec

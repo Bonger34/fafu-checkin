@@ -79,7 +79,13 @@ cmd_start() {
     fi
   fi
   export FAFU_DAEMON=1 FAFU_SU_MODE="$SU_MODE"   # 探测结果随环境传给守护进程
-  "$BB" nohup sh "$SELF" start </dev/null >/dev/null 2>&1 &
+  # 从管理器页面启动的守护进程若留在调用者会话里，WebUI 一关会被一起带走（症状：保活
+  # 统计停在启动那一拍、token 到期）。有 setsid 就换一个新会话，没有则退回 nohup。
+  if "$BB" setsid true 2>/dev/null; then
+    "$BB" setsid sh "$SELF" start </dev/null >/dev/null 2>&1 &
+  else
+    "$BB" nohup sh "$SELF" start </dev/null >/dev/null 2>&1 &
+  fi
   echo "服务已启动"
   exit 0
 }
