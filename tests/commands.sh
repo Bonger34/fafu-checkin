@@ -616,7 +616,7 @@ ws_run() { # $1=名字（输出文件的后缀） [$2=子命令，默认 webstat
   (
     cd "$WS_DIR" || exit 1
     BB_OVERRIDE="$CD_WORK/bin/bb" MOCK_DATE_CTL='./ctl/date' LD_DIR="${WS_LD:-./ctl/ld}" \
-      SU_BIN="$WS_DIR/bin/su" \
+      PROC_ROOT='./ctl/proc' SU_BIN="$WS_DIR/bin/su" \
       $(t_sh) ./fafu_checkin.sh "${2:-webstate}"
   ) > "$CD_WORK/ws_$name.out" 2> "$CD_WORK/ws_$name.err"
   rc=$?
@@ -629,7 +629,7 @@ ws_run() { # $1=名字（输出文件的后缀） [$2=子命令，默认 webstat
 
 # 输出里出现的键名（去重排序）：字段齐全与键名逐字一致都靠它
 ws_keys() { grep -o '^[a-z_]*' "$1" | sort -u | tr '\n' ' '; }
-WS_KEYS="debug ka_fail ka_last ka_last_result ka_ok keepalive log notify notify_cooldown notify_lead poll_end poll_start service sign_state sign_time token_state version "
+WS_KEYS="daemon debug ka_fail ka_last ka_last_result ka_ok keepalive log notify notify_cooldown notify_lead poll_end poll_start service sign_state sign_time token_state version "
 
 # 输出里「既不是 键=值、也不是空行」的行数。空行要排除：分发路径会给任何以换行收尾的
 # 输出补一个空行（status 子命令同样如此），那不是命令自己吐出来的东西。
@@ -649,6 +649,7 @@ cd_case_webstate_fields() {
 
   t_eq "只读子命令：返回码恒为 0" "$(cat "$CD_WORK/ws_fields.rc")" "0"
   t_eq "服务开关：停用语义取反成 on" "$(cd_val "$f" service)" "on"
+  t_eq "守护进程：没有 PID 文件时报未运行" "$(cd_val "$f" daemon)" "stopped"
   t_eq "今日签到状态：中文文本" "$(cd_val "$f" sign_state)" "已签到"
   t_eq "今日签到时间" "$(cd_val "$f" sign_time)" "21:30"
   t_eq "今日保活成功数" "$(cd_val "$f" ka_ok)" "3"
@@ -690,6 +691,36 @@ cd_case_webstate_fields() {
   t_eq "只读：签到记录文件逐字未变" "$(cat "$WS_DIR/fafu_checkin.status" | tr '\n' '|')" \
     "sign_date=$WS_DATE|sign_time=21:30|sign_kind=normal|"
   t_eq "只读：不留临时文件" "$(ls "$WS_DIR" | grep -c '\.tmp$')" "0"
+}
+
+# 守护进程那一列：与 status 的「守护进程」行同源（都走 state 层的 daemon_pid），
+# 故这里只钉 webstate 这一面；判据内部的两条边界（PID 被回收、僵尸进程）由 state 套件钉住。
+cd_case_webstate_daemon() {
+  local f
+  ws_setup
+  ws_switch enabled
+  mkdir -p "$WS_DIR/ctl/proc/4242" "$WS_DIR/ctl/proc/4243"
+  printf 'sh /data/adb/modules/fafu-checkin/fafu_checkin.sh start' | tr ' ' '\000' \
+    > "$WS_DIR/ctl/proc/4242/cmdline"
+  printf 'sh /system/bin/pm list' | tr ' ' '\000' > "$WS_DIR/ctl/proc/4243/cmdline"
+
+  printf '4242\n' > "$WS_DIR/.fafu_checkin.pid"
+  ws_run daemon_on
+  f="$CD_WORK/ws_daemon_on.out"
+  t_eq "PID 指向活着的本模块进程：daemon=running" "$(cd_val "$f" daemon)" "running"
+
+  printf '4243\n' > "$WS_DIR/.fafu_checkin.pid"
+  ws_run daemon_reused
+  f="$CD_WORK/ws_daemon_reused.out"
+  t_eq "PID 被别的进程占着：daemon=stopped" "$(cd_val "$f" daemon)" "stopped"
+
+  # 开关与进程是两个维度：停用但进程还在时，daemon 照实报，不被开关覆盖
+  printf '4242\n' > "$WS_DIR/.fafu_checkin.pid"
+  ws_switch disabled
+  ws_run daemon_off
+  f="$CD_WORK/ws_daemon_off.out"
+  t_eq "开关停用而进程还在：daemon 照实报 running" "$(cd_val "$f" daemon)" "running"
+  t_eq "同一个夹具里开关仍是 off（两个维度互不覆盖）" "$(cd_val "$f" service)" "off"
 }
 
 # 配置项生效值必须来自真实的那份配置文件：页面显示的六项就是从这里读的，
@@ -1210,6 +1241,7 @@ t_case "commands · 子命令之后的参数原样交给处理函数" cd_case_di
 t_case "commands · 入口把子命令之后的参数传进分发" cd_case_entry_argv
 t_case "commands · 记录桩看得见处理函数收到的参数" cd_case_stub_argv
 t_case "commands · webstate 输出页面可解析的状态" cd_case_webstate_fields
+t_case "commands · webstate 的守护进程字段" cd_case_webstate_daemon
 t_case "commands · webstate 的签到状态从记录里读" cd_case_webstate_sign
 t_case "commands · webstate 的登录状态只报有效性" cd_case_webstate_token
 t_case "commands · webstate 给出配置项的生效值" cd_case_webstate_config

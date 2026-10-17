@@ -51,6 +51,22 @@ svc_set() { # $1=enabled|disabled
   printf '%s\n' "$1" | write_atomic "$STATE"
 }
 
+# ---- 服务进程 ----
+# 进程存活判据：/proc 之外没有可靠来源，故根目录做成注入点（测试据此造「有 / 没有这个进程」）。
+PROC_ROOT="${PROC_ROOT:-/proc}"
+
+# 守护进程的 PID：PID 文件里那个号对应的进程还活着、且确实是本模块的守护进程才输出，否则输出空。
+# 四处共用这一条判据：status 的「守护进程」行、webstate 的 daemon=、start 的单实例判定、stop 的目标。
+# 不只看 /proc 目录：PID 会被回收，僵尸进程也留着 /proc 条目——那样读出来的「运行中」是假的。
+daemon_pid() {
+  local pid
+  pid=$("$BB" cat "$PIDF" 2>/dev/null)
+  [ -n "$pid" ] || return 0
+  [ -d "$PROC_ROOT/$pid" ] || return 0
+  "$BB" cat "$PROC_ROOT/$pid/cmdline" 2>/dev/null | "$BB" grep -qa 'fafu_checkin' || return 0
+  printf '%s' "$pid"
+}
+
 # ---- 签到记录（用于动态描述） ----
 sign_get() { # $1=键名（sign_date / sign_time / sign_kind）
   kv_get "$STATUS" "$1"

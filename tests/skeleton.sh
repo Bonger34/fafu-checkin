@@ -395,6 +395,9 @@ sk_case_entry_dispatch() {
   t_has "status：打印标题" "$SK_WORK/status.out" "====== 数字FAFU 晚查寝自动签到 ======"
   t_has "status：从模块元数据读到版本" "$SK_WORK/status.out" "版本: v"
   t_has "status：默认开关为已启用" "$SK_WORK/status.out" "开关: 🟢 已启用"
+  t_has "status：进程不在时报守护进程未运行" "$SK_WORK/status.out" "守护进程: ❌ 未运行"
+  t_has "status：开关与进程矛盾时给后果与恢复办法" "$SK_WORK/status.out" \
+    "⚠️ 开关已启用但守护进程不在"
   t_has "status：能生成动态描述" "$SK_WORK/status.out" "描述: 🟢 已启用"
   t_has "status：显示调试日志档位（没有配置文件 = 默认档）" "$SK_WORK/status.out" \
     "调试日志: 已关闭"
@@ -424,6 +427,7 @@ sk_case_entry_switch_file() {
   rc=$?
   t_eq "停用态：status 正常退出" "$rc" 0
   t_has "停用态：status 报告已停用" "$SK_WORK/off.out" "开关: ⏸ 已停用"
+  t_hasnt "停用态：不报矛盾（停用本就该没有进程）" "$SK_WORK/off.out" "开关已启用但守护进程不在"
   t_has "停用态：描述也显示已停用" "$SK_WORK/off.out" "描述: ⏸ 已停用"
 
   printf 'enabled\n' > "$stat"
@@ -535,6 +539,12 @@ sk_package_static() {
   t_has_re "页面：底部提示是独立的 live region 节点" "$page" \
     'id="snack" role="status" aria-live="polite"'
   t_has "页面：留痕结果仍走 #msg" "$page" 'id="msg"'
+  # 守护进程这一行：显示位读 webstate 的 daemon 字段，提示条只在「开关开 + 进程不在」时出现
+  t_has "页面：运行状态区有守护进程显示位" "$page" 'id="s_daemon"'
+  t_has_re "页面：守护进程显示位读 webstate 的 daemon 字段" "$page" "s_daemon.*\.daemon"
+  t_has_re "页面：矛盾提示条默认隐藏" "$page" 'id="daemonwarn" hidden'
+  t_has_re "页面：矛盾提示由开关启用与 daemon=stopped 共同触发" "$page" \
+    "daemonwarn.*daemon === 'stopped'"
 }
 
 # 判据自证：ext_url_hits 必须真的会命中，否则「页面零命中」只是恒真的摆设。

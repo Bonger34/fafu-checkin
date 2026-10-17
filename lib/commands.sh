@@ -183,15 +183,14 @@ cmd_status() {
   echo "====== 数字FAFU 晚查寝自动签到 ======"
   [ -n "$VER" ] && echo "版本: $VER"
   if svc_is_disabled; then echo "开关: ⏸ 已停用"; else echo "开关: 🟢 已启用"; fi
-  if [ -f "$PIDF" ]; then
-    pid=$("$BB" cat "$PIDF" 2>/dev/null)
-    if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
-      echo "服务: 运行中 (PID $pid)"
-    else
-      echo "服务: 未运行"
-    fi
+  # 开关读的是意愿（状态文件），这一行读的是实况（PID 文件 + cmdline）；两者不一致才要报警，
+  # 因为那等于「到点不会签到」，不是一条能被略过的普通信息。
+  pid=$(daemon_pid)
+  if [ -n "$pid" ]; then
+    echo "守护进程: ✅ 运行中 (PID $pid)"
   else
-    echo "服务: 未运行"
+    echo "守护进程: ❌ 未运行"
+    svc_is_disabled || echo "⚠️ 开关已启用但守护进程不在：现在不会自动签到；重启手机可恢复（或运行 start）"
   fi
   ka_last=$(ka_last_time)
   if [ -z "$ka_last" ]; then
@@ -230,6 +229,12 @@ cmd_webstate() {
   # 开关：状态层是「停用」语义，这里取反成 on / off
   if svc_is_disabled; then sw=off; else sw=on; fi
   printf 'service=%s\n' "$sw"
+  # 进程活着没有：页面据此显示「运行中 / 未运行」，并在与开关矛盾时给出后果提示
+  if [ -n "$(daemon_pid)" ]; then
+    printf 'daemon=running\n'
+  else
+    printf 'daemon=stopped\n'
+  fi
   # 今日签到状态与时间：记录不是今天的就按「今天没有记录」给空值（页面问的是今天）
   state=""; tm=""
   if [ "$(sign_get sign_date)" = "$(today)" ]; then
@@ -289,22 +294,22 @@ cmd_setconfig() { # $1…=「键=值」
   cfg_write "$@"
 }
 
+# 只杀「确实还是本模块守护进程」的那个号：PID 会被回收，照 PID 文件直杀可能误杀别人的进程
 cmd_stop() {
-  if [ -f "$PIDF" ]; then
-    pid=$("$BB" cat "$PIDF" 2>/dev/null)
-    if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
-      kill "$pid" 2>/dev/null
-      sleep 1
-      [ -d "/proc/$pid" ] && kill -9 "$pid" 2>/dev/null
-      log "守护进程已停止 (PID $pid)"
-      echo "已停止 (PID $pid)"
-    else
-      echo "服务未在运行（清理残留 PID 文件）"
-    fi
-    rm -f "$PIDF"
+  local pid
+  pid=$(daemon_pid)
+  if [ -n "$pid" ]; then
+    kill "$pid" 2>/dev/null
+    sleep 1
+    [ -d "$PROC_ROOT/$pid" ] && kill -9 "$pid" 2>/dev/null
+    log "守护进程已停止 (PID $pid)"
+    echo "已停止 (PID $pid)"
+  elif [ -f "$PIDF" ]; then
+    echo "服务未在运行（清理残留 PID 文件）"
   else
     echo "服务未在运行"
   fi
+  rm -f "$PIDF"
 }
 
 cmd_enable() {
