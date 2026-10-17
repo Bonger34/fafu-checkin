@@ -823,7 +823,7 @@ TIER_SU
   chmod +x "$POLL_WORK/bin/su" 2>/dev/null || true
   # 轮内等待时的两件事（真实时间线上它们本来就是等出来的）：
   #   第 1 次等待 —— 应用数据目录就绪（ld.ready → ld）
-  #   第 2 次等待 —— 刷新采样读到换新后的 token（ld/000002.ldb 比 000001 新）
+  #   第 2 次等待 —— 刷新采样读到换新后的 token（ld/000002.ldb，mtime 由下面钉死）
   cat >> "$POLL_WORK/mod/lib/commands.sh" <<'INJECT'
 
 # ---- 断言注入（只存在于断言的副本里）：轮内等待期间的环境变化 ----
@@ -833,6 +833,10 @@ poll_wait_hook() {
     mv ld.ready ld 2>/dev/null
   elif [ "$_n" -eq 2 ]; then
     printf 'j\000"token":"2_BEEF"\000j' > ld/000002.ldb
+    # 两个文件常落在同一秒内，而 ls -tr 对同 mtime 的项按名字倒序排、tail 取回的是旧的
+    # 000001。故把 mtime 钉死：让「新的那个确实更新」成为前置条件，而不是运气。
+    "$BB" touch -t 202001010000 ld/000001.ldb 2>/dev/null
+    "$BB" touch -t 202101010000 ld/000002.ldb 2>/dev/null
   fi
   return 0
 }
