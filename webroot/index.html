@@ -10,15 +10,15 @@
 :root{
   color-scheme:light dark;
   --bg:#fff; --card:#fff; --fg:#000; --soft:rgba(0,0,0,.6); --muted:#8c93b0;
-  --line:#e0e0e0; --primary:#3482FF; --accent:#1a6ae0; --track:#e6e6e6;
-  --chip:#f0f0f0; --ok:#0f7b52; --bad:#e94634; --warn:#b54708;
-  --dark:#1a1a1a; --on-dark:#f0f0f0;
+  --line:#e0e0e0; --primary:#3482FF; --accent:#1a6ae0; --track:#e6e6e6; --press:rgba(52,130,255,.85);
+  --chip:#f0f0f0; --ok:#0f7b52; --bad:#e94634; --white:#fff; --shadow:0 4px 10px rgba(0,0,0,.1);
+  --tap:36px; --dark:#1a1a1a; --on-dark:#f0f0f0;
 }
 @media (prefers-color-scheme:dark){
   :root{
     --bg:#242424; --card:#2d2d2d; --fg:#e6e6e6; --soft:rgba(255,255,255,.55); --muted:#787e96;
-    --line:#393939; --primary:#277AF7; --accent:#5d9bff; --track:#505050;
-    --chip:#434343; --ok:#3ddc97; --bad:#f12522; --warn:#f5b544;
+    --line:#393939; --primary:#277AF7; --accent:#5d9bff; --track:#505050; --press:rgba(39,122,247,.85);
+    --chip:#434343; --ok:#3ddc97; --bad:#f12522; --white:#fff; --shadow:0 4px 10px rgba(0,0,0,.1);
     --dark:#1a1a1a; --on-dark:#f0f0f0;
   }
 }
@@ -53,18 +53,22 @@ h1{font-size:20px; margin:0 0 2px}
 .range{display:flex; align-items:center; gap:8px}
 /* 窄屏放不下时，「起 ~ 止」两个输入框一致地折到标题块下方占满一行 */
 @media (max-width:460px){ .row > .range{flex:1 1 100%} }
-.range .sep{color:var(--soft)}
+.tilde{color:var(--soft)}
+/* 圆角 16 / 最小高 40 只约束主按钮与输入框；小号次级按钮按内容高度走 */
 button{font-family:inherit; font-size:17px; font-weight:500; padding:10px 18px; border:0;
-  border-radius:16px; background:var(--primary); color:#fff; cursor:pointer; min-height:40px;
+  border-radius:16px; background:var(--primary); color:var(--white); cursor:pointer; min-height:40px;
   transition:background-color .15s ease}
 button:disabled{opacity:.55}
+/* 按下态：叠一层主色（Miuix 用纯色叠加，不缩放） */
+button:active{background:var(--press)}
 button.ghost{background:var(--chip); color:var(--accent); border:0; font-size:14px;
-  font-weight:500; padding:6px 14px; min-height:0}
+  font-weight:500; padding:6px 14px; min-height:var(--tap)}
+button.ghost:active{background:var(--line)}
 .sw{appearance:none; -webkit-appearance:none; flex:0 0 auto; width:49px; height:28px; margin:0;
   border:0; border-radius:999px; background:var(--track); position:relative; cursor:pointer;
   transition:background-color .18s cubic-bezier(.2,.8,.2,1)}
 .sw::after{content:""; position:absolute; top:4px; left:4px; width:20px; height:20px; border-radius:50%;
-  background:#fff; transition:transform .18s cubic-bezier(.2,.8,.2,1), background-color .18s}
+  background:var(--white); transition:transform .18s cubic-bezier(.2,.8,.2,1), background-color .18s}
 .sw:checked{background:var(--primary)}
 .sw:checked::after{transform:translateX(21px)}
 .sw:disabled{opacity:.5}
@@ -72,24 +76,30 @@ label.row{cursor:pointer}
 .tip{border-left:3px solid var(--primary); background:var(--chip); border-radius:12px;
   padding:10px 12px; margin:10px 0 2px; font-size:14px}
 .actions{display:block}
-.actions .sep{display:block; color:var(--soft); font-size:14px; margin:8px 0 0}
+.act-note{display:block; color:var(--soft); font-size:14px; margin:8px 0 0}
 button.adv{display:flex; align-items:center; gap:12px; width:100%; min-height:56px; padding:10px 0;
   text-align:left; background:none; color:var(--fg); border-radius:12px}
-button.adv:hover{background:none}
-button.adv:disabled{opacity:1}
+button.adv:active{background:none}
 button.adv .txt{flex:1 1 auto; min-width:0}
 button.adv .txt b{display:block; font-size:17px; font-weight:500}
 button.adv .txt small{display:block; color:var(--soft); font-size:14px; margin-top:2px}
-button.adv .caret{flex:0 0 auto; color:var(--muted); transition:transform .18s cubic-bezier(.2,.8,.2,1)}
+/* 展开标记：纯 CSS 三角（不引任何图标资产），展开时翻转 */
+button.adv .caret{flex:0 0 auto; width:0; height:0; margin-top:-3px;
+  border-left:5px solid transparent; border-right:5px solid transparent; border-top:6px solid var(--muted);
+  transition:transform .18s cubic-bezier(.2,.8,.2,1)}
 button.adv[aria-expanded=true] .caret{transform:rotate(180deg)}
-.panel{margin-top:4px}
+/* 折叠用 max-height 过渡（不能用 display/hidden，那样没有高度动画） */
+.panel{max-height:0; margin-top:0; overflow:hidden; visibility:hidden;
+  transition:max-height .22s cubic-bezier(.2,.8,.2,1), visibility 0s linear .22s}
+.panel.on{visibility:visible; transition:max-height .22s cubic-bezier(.2,.8,.2,1), visibility 0s}
+.panel-in{padding-top:4px}
 [hidden]{display:none !important}
 #msg{margin:8px 0 0; font-size:14px}
 #msg.ok{color:var(--ok)} #msg.bad{color:var(--bad)} #msg.busy{color:var(--soft)}
 #snack{position:fixed; left:12px; right:12px; bottom:calc(14px + env(safe-area-inset-bottom,0px));
   margin:0 auto; max-width:420px; padding:12px 14px; border-radius:16px;
   background:var(--dark); color:var(--on-dark); font-size:14px; line-height:1.4;
-  box-shadow:0 4px 10px rgba(0,0,0,.1); opacity:0; transform:translateY(8px);
+  box-shadow:var(--shadow); opacity:0; transform:translateY(8px);
   transition:opacity .2s ease, transform .2s ease; pointer-events:none; z-index:9}
 #snack.on{opacity:1; transform:none}
 .banner{background:var(--card); border-radius:16px; border-left:4px solid var(--bad);
@@ -156,7 +166,7 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
         </div>
         <span class="range">
           <input class="field" type="text" id="f_poll_start" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="轮询范围起">
-          <span class="sep" aria-hidden="true">~</span>
+          <span class="tilde" aria-hidden="true">~</span>
           <input class="field" type="text" id="f_poll_end" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="轮询范围止">
         </span>
       </div>
@@ -174,7 +184,7 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     <section class="card">
       <div class="actions">
         <button type="button" id="save">保存</button>
-        <span class="sep">保存成功后会自动重启后台服务，新配置立刻生效。</span>
+        <span class="act-note">保存成功后会自动重启后台服务，新配置立刻生效。</span>
       </div>
       <p id="msg"></p>
     </section>
@@ -182,12 +192,11 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     <section class="card">
       <button class="adv" type="button" id="f_adv" aria-expanded="false" aria-controls="adv_panel">
         <span class="txt"><b>高级</b><small>预警提前量 · 通知冷却 · 调试日志</small></span>
-        <svg class="caret" width="12" height="8" viewBox="0 0 12 8" aria-hidden="true" focusable="false">
-          <path d="M1 1.5 6 6.5 11 1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-        </svg>
+        <span class="caret" aria-hidden="true"></span>
       </button>
 
-      <div class="panel" id="adv_panel" hidden>
+      <div class="panel" id="adv_panel" aria-hidden="true">
+        <div class="panel-in">
         <p class="tip">轮询范围要覆盖你学校发布任务的时间。范围之外本模块不会去查看任务，设窄了就会错过自动签到；兜底是到点仍未取得今晚任务时给你发一条提醒，收到后手动打开 App 签一下仍来得及——所以设窄的代价是「收到提醒、自己补救」，而不是静默漏签。</p>
 
         <div class="row">
@@ -216,6 +225,7 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
           </span>
           <input class="sw" type="checkbox" id="f_debug" aria-label="调试日志">
         </label>
+        </div>
       </div>
     </section>
 
@@ -408,8 +418,9 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     el('save').disabled = b;
     el('save').textContent = b ? '保存中…' : '保存';
   }
+  /* 只清表单控件上的标记：不能写成 .bad，否则会连带清掉 #msg 的拒绝提示配色 */
   function clearBad() {
-    var all = document.querySelectorAll('.bad'), i;
+    var all = document.querySelectorAll('.field.bad, .sw.bad'), i;
     for (i = 0; i < all.length; i++) all[i].classList.remove('bad');
   }
 
@@ -461,26 +472,29 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     script(line).then(function (r) {
       if (r.errno !== 0) {
         /* 闸门拒绝：生效值不动，页面继续显示旧值，原因照原样给出 */
-        hideSnack();
-        note('❌ 保存被拒绝：' + reason(r) + '　未写入，生效值仍是 ' + effSummary(), 'bad');
+        result('❌ 保存被拒绝：' + reason(r) + '　未写入，生效值仍是 ' + effSummary(), 'bad');
         setBusy(false);
         return null;
       }
       var wasOff = st.service === 'off';
       return restart().then(function (ok) {
         return refreshState().then(function () {
-          hideSnack();
-          note('✅ 配置已保存并生效：' + effSummary() +
+          result('✅ 配置已保存并生效：' + effSummary() +
             (wasOff ? '　服务处于停用态，守护进程不会启动'
                     : (ok ? '　守护进程已按新配置重启' : '　守护进程重启未成功，改动将在下次启动时生效')), 'ok');
           setBusy(false);
         });
       });
     }).catch(function (e) {
-      hideSnack();
       setBusy(false);
-      note('❌ 出错了：' + (e && e.message ? e.message : e), 'bad');
+      result('❌ 出错了：' + (e && e.message ? e.message : e), 'bad');
     });
+  }
+
+  /* 常驻结果与瞬时提示不同屏：落一条留痕结果之前，先收掉底部的进展浮层 */
+  function result(text, kind) {
+    hideSnack();
+    note(text, kind);
   }
 
   function onServiceToggle() {
@@ -492,7 +506,7 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
       box.disabled = false;
       if (r.errno !== 0) {
         box.checked = !want;   /* 切换失败：落盘状态没被改动 */
-        note('❌ 切换失败：' + reason(r) + '　服务仍是' + (want ? '停用' : '启用') + '态', 'bad');
+        result('❌ 切换失败：' + reason(r) + '　服务仍是' + (want ? '停用' : '启用') + '态', 'bad');
         return;
       }
       var tail = firstLine(r.stdout);
@@ -501,11 +515,21 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     });
   }
 
-  /* 高级区每次打开都回到折叠态：不做记忆，免得「上次点开过」变成一个无法解释的差异 */
+  /* 高级区每次打开都回到折叠态：不做记忆，免得「上次点开过」变成一个无法解释的差异。
+     用 max-height 过渡；收起时先落一帧当前高度作起点，否则高度没有可动画的两端。 */
   function onAdvToggle() {
     var btn = el('f_adv'), panel = el('adv_panel'), open = btn.getAttribute('aria-expanded') !== 'true';
+    if (open) {
+      panel.classList.add('on');
+      panel.style.maxHeight = panel.scrollHeight + 40 + 'px';
+    } else {
+      panel.style.maxHeight = panel.scrollHeight + 'px';
+      void panel.offsetHeight;
+      panel.style.maxHeight = '0px';
+      panel.classList.remove('on');
+    }
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    panel.hidden = !open;
+    panel.setAttribute('aria-hidden', open ? 'false' : 'true');
   }
 
   function bind() {
@@ -527,6 +551,7 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
   }
 
   function showNoBridge() {
+    /* 桥接不可用时不进 #msg：那时 #app 整块是 hidden 的，#msg 在隐藏容器里根本看不见 */
     var b = el('nobridge');
     b.hidden = false;
     b.innerHTML = '<b>这个页面要在 KernelSU 管理器里打开</b>' +
@@ -543,11 +568,11 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     snack('正在读取生效值…');
     refreshState().then(function (got) {
       setBusy(false);
-      if (!got) { note('❌ 读取失败：脚本没有返回状态（点「刷新」重试）。', 'bad'); }
+      if (!got) { result('❌ 读取失败：脚本没有返回状态（点「刷新」重试）。', 'bad'); }
       else { snack('已读取当前生效值；改完点「保存」即生效。'); }
     }).catch(function (e) {
       setBusy(false);
-      note('❌ 读取失败：' + (e && e.message ? e.message : e), 'bad');
+      result('❌ 读取失败：' + (e && e.message ? e.message : e), 'bad');
     });
   }
 

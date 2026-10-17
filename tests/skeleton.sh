@@ -519,6 +519,22 @@ sk_package_static() {
     "f_debug.*DEBUG"
   t_has_re "页面：运行状态区的 s_debug 读 webstate 的 debug 字段" "$page" \
     "s_debug.*\.debug"
+
+  # 折叠与提示这两处只锚**结构与关系**，不抄尺寸/颜色字面量：
+  # 视觉数值靠浏览器里取计算样式核对，写进断言只会随每次调样式变红。
+  # 折叠：按钮声明了展开态与它控制的容器，容器自身带着可访问性标记。
+  t_has_re "页面：高级区是「可展开按钮 + 受控容器」" "$page" \
+    'aria-expanded="false" aria-controls="adv_panel"'
+  t_has "页面：受控容器的 id 就是被声明的那个" "$page" 'id="adv_panel"'
+  t_has_re "页面：容器收起时对被辅助技术隐藏" "$page" \
+    'id="adv_panel" aria-hidden="true"'
+  t_has_re "页面：展开/收起同时翻转 aria 两处状态" "$page" \
+    "aria-expanded.*open \? 'true' : 'false'"
+  # 提示：瞬时提示走独立节点（带 live region），与常驻结果位 #msg 分开——
+  # 两者合成一处就再也分不出「会消失」与「要留痕」。
+  t_has_re "页面：底部提示是独立的 live region 节点" "$page" \
+    'id="snack" role="status" aria-live="polite"'
+  t_has "页面：留痕结果仍走 #msg" "$page" 'id="msg"'
 }
 
 # 判据自证：ext_url_hits 必须真的会命中，否则「页面零命中」只是恒真的摆设。
