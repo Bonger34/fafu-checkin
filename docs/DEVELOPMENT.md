@@ -815,6 +815,27 @@ Kotlin / Compose Multiplatform 的库）。本页面**不引入它的任何代�
   不挡保活（签到办完了 token 照样要续期）。
 - 两个窗口端点都来自配置层，写法（范围、先后）由 `cfg_write` 的闸门校验；其余时间空转
 
+**守护进程的存活边界（#30）**：从管理器页面（WebUI 的 `ksu.exec`）起的进程，继承的是
+管理器 App 的 **cgroup 与进程组**。管理器一关，Android 会把那个 cgroup 连同里面的进程
+一起回收——进程被 SIGKILL，**日志里不会有任何退出行**，`status` 只会看到「未运行」。
+开机脚本由 init 拉起，不在 App 的 cgroup 里，所以「开机起的一直好用、页面起的一关就没」
+不是签到链路的毛病，而是启动上下文的差别。
+
+两道处理都由入口与 base 层承担：
+
+- `spawn_detached`（base）：优先 `setsid`（= 新会话 + 新进程组），再用 `nohup` 忽略挂断；
+  两者都没有时退回普通后台。管理器回收自己的进程组时因此带不走守护进程。
+- `cgroup_escape`（base，守护进程启动后的第一件事）：照 ksud 的 `switch_cgroups`，把自身
+  PID 写进 `/sys/fs/cgroup`、`/dev/memcg/apps`、`/acct`、`/dev/cg2_bpf` 各层的
+  `cgroup.procs`。清单里**第一个存在**的层级是主层级（v2 设备是 `/sys/fs/cgroup`，旧设备
+  是 `/dev/memcg/apps`），它写不进去就算失败，日志留一行「未能离开管理器 cgroup」；
+  不在 App cgroup 里（开机路径）返回 2，什么都不做、也不写日志。
+
+KernelSU 侧的证据：WebUI 的 `ksu.exec` 走 `ksud debug su` → `grant_root()`，这条路径不调
+`switch_cgroups()`；`su -c`（`root_shell()`）与模块「操作」按钮（`exec_script_with()`）
+都会调。故上游即便某天补上，模块自己也留这道兜底。`tests/daemon-detach.sh` 用假 cgroup 树
+钉住迁移，并在 Linux 上用 `ps -o sid` 钉住「守护进程 = 新会话首进程」（Windows 上跳过）。
+
 **保活**（`keepalive_ping`）：
 
 1. 调用 `sign_in/student/my/page`（rows=1）——成功即续期
@@ -1747,6 +1768,18 @@ nohup sh /sdcard/Download/device-smoke.sh > /sdcard/Download/fafu-smoke.log 2>&1
 > 「在本机就能观察到的那两件事」——冒烟前经 `setconfig` 打开调试档、退出时恢复成进脚本时的样子，
 > 用模块桩（把每次子命令调用按顺序记进文件）当观察面；第 6 节的键清单只能用静态锚点守着。
 
+**#30 的修复（守护进程脱离管理器 cgroup）要在真机上验**：装开发版 → 配置页保存一次
+（这会 stop + start）→ 先别关页面，在 root shell 里看：
+
+```sh
+pid=$(cat /data/adb/modules/fafu-checkin/.fafu_checkin.pid)
+cat /proc/$pid/cgroup              # 不应再有 /apps/ 段
+ps -o pid,sid,pgid,comm -p $pid    # sid / pgid 都应是它自己的 PID，不是管理器 shell 的
+```
+
+再关掉管理器（从最近任务里划掉），等 15 分钟看保活是否照常跳、`status` 的「守护进程」是否
+仍为运行中；日志里没有 `未能离开管理器 cgroup` 才说明这台 ROM 放行了迁移。
+
 **验证记录（2026-10-04，重构后的真机走查，`dev.4e1f8ae` + 两处修复）**：
 小米 13 Ultra / Android 17 / SDK 37，开发构建装一次后逐项走完。
 走查用的产物自报 `v1.2.0`（它就是重构后的那版代码）；此后 `module.prop` 升到 `v1.3.0`
@@ -1786,6 +1819,9 @@ nohup sh /sdcard/Download/device-smoke.sh > /sdcard/Download/fafu-smoke.log 2>&1
   两点如实标注：① 只改了「轮询范围起」这一项，**其余五项没有逐项改过**（脚本侧的
   `setconfig` 往返已由冒烟脚本第 6 步覆盖）；② 页面自身的 JS 仍**没有单元测试**，
   结论以这次真机走查为准。
+- **#30 的 cgroup 迁移真机尚未走查**：`tests/daemon-detach.sh` 证明的是「进程在 App cgroup
+  里时会去写各层 `cgroup.procs`」；Android 的 SELinux / 挂载是否放行、关掉管理器后进程是否真的
+  活过 15 分钟，要按本节上面那几行在设备上确认。
 - **「任务未发布」兜底提醒真机收到**：该提醒挂本地时钟、到 `min(轮询范围止, 23:00)` 才发，
   **未在真机上等到过一次**（需要一次「把轮询范围止设早于任务发布时间」的场景）。
   目前只能确认它进了通知事件表与去重标记，**送达靠目视**（`rc=0` 不作数，见 §2.1.1）。

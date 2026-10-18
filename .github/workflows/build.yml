@@ -2,9 +2,12 @@ name: Build
 
 # 自动构建开发版模块 zip，并作为 workflow artifact 提供下载（保留 90 天）。
 # 产物名带 commit 标识，可追溯；发布由维护者手动完成（见 README「开发与发布」）。
+# PR 也触发：真机验证要用的 dev 包由 CI 直接产出，不必再手动 workflow_dispatch。
+# PR 上构建的是 head 提交（不是 GitHub 的合并提交），产物名的短 SHA 因此就是分支上的那个。
 on:
   push:
     branches: [ main ]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -16,10 +19,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # PR 上按 head 仓库 + head 提交检出；push / 手动触发沿用默认值
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: 获取短 SHA
         id: vars
-        run: echo "short_sha=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: echo "short_sha=$(printf '%s' "$SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - name: Shell 语法检查
         run: |
@@ -63,6 +72,9 @@ jobs:
         run: sh tools/run-tests.sh
 
       - name: 构建模块 zip（开发版）
+        env:
+          # 包名与包内版本串用同一个短 SHA；PR 上它是 head，不是 GitHub 的合并提交
+          DEV_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: sh build.sh dev
 
       - name: 上传构建产物

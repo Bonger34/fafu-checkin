@@ -53,8 +53,12 @@ fi
 
 MODE="$1"
 if [ "$MODE" = "dev" ]; then
-  SHA="${GITHUB_SHA:-}"
-  [ -n "$SHA" ] || SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+  # 短 SHA：DEV_SHA（CI 的 PR 构建显式传 head）> GITHUB_SHA（CI 的 main 构建）> 检出的提交
+  # （本地）。PR 事件里 GITHUB_SHA 是 GitHub 的合并提交，必须让 DEV_SHA 先手——否则 artifact
+  # 名（workflow 用 head 的短 SHA）与包内 version（合并提交的短 SHA）会对不上。
+  SHA="${DEV_SHA:-${GITHUB_SHA:-}}"
+  [ -n "$SHA" ] || SHA=$(git rev-parse HEAD 2>/dev/null || true)
+  [ -n "$SHA" ] || SHA=unknown
   SHA=$(printf '%s' "$SHA" | cut -c1-7)
   OUT="$ROOT/dist/fafu-checkin-${VER}-dev.${SHA}.zip"
 

@@ -41,6 +41,56 @@ today_tag() { _now +%Y%m%d; }                      # 20261003（通知 tag 与�
 # 当前时刻的「当日第几分钟」（0~1439）：窗口判定全部用它，避免各处自己拆时分。
 now_minutes() { hm_minutes "$(now_hm)"; }
 
+# ---- 进程：后台派生与 cgroup 归属 ----
+# 从管理器页面（WebUI）起的进程继承管理器的 App cgroup 与进程组；管理器一关，
+# Android 把这些一起回收，且不留退出日志。开机脚本由 init 起，不在 App cgroup 里。
+
+# 两条对策都照 ksud：换新会话（setsid）+ 把自身 PID 写进各层 cgroup 的根；
+# 清单顺序有意为之：第一个存在的是「主层级」= App cgroup 所在层，写不进去就算失败。
+CGROUP_ROOTS="${FAFU_CGROUP_ROOTS:-/sys/fs/cgroup /dev/memcg/apps /acct /dev/cg2_bpf}"
+CGROUP_SELF="${FAFU_CGROUP_SELF:-/proc/self/cgroup}"   # 注入点：断言用假文件
+
+# 派生一个活过调用者的后台进程：有 setsid 就换新会话（= 新进程组），再用 nohup 忽略挂断；
+# 两者都没有时退回普通后台。stdio 一律关掉，免得调用者的终端 / 管道被继承。
+# setsid 先跑一次 `true` 再信它：命令在 PATH 上、却可能因权限/环境跑不起来。
+spawn_detached() { # $1…=要执行的命令
+  if command -v setsid >/dev/null 2>&1 && setsid true 2>/dev/null; then
+    if command -v nohup >/dev/null 2>&1; then
+      nohup setsid "$@" </dev/null >/dev/null 2>&1 &
+    else
+      setsid "$@" </dev/null >/dev/null 2>&1 &
+    fi
+  elif command -v nohup >/dev/null 2>&1; then
+    nohup "$@" </dev/null >/dev/null 2>&1 &
+  else
+    "$@" </dev/null >/dev/null 2>&1 &
+  fi
+}
+
+# 当前进程是否还在 App 的 cgroup 里（Android 的路径形如 `0::/apps/uid_10234/pid_4242`；
+# 由 init 拉起的进程没有这一段）。
+cgroup_in_app() { "$BB" grep -q '/apps/' "$CGROUP_SELF" 2>/dev/null; }
+
+# 把进程迁到各层 cgroup 的根；$1=pid。
+# 返回 0=已迁出 / 1=该迁却迁不出去 / 2=不需要（本来就不在 App cgroup）。
+cgroup_escape() {
+  local root main main_ok
+  cgroup_in_app || return 2
+  main=""; main_ok=0
+  for root in $CGROUP_ROOTS; do
+    [ -e "$root/cgroup.procs" ] || continue
+    # 主层级 = 清单里第一个存在的那个（v2 设备是 /sys/fs/cgroup，老设备是 /dev/memcg/apps）；
+    # 旁路（acct / cg2_bpf）写成功不算迁出。
+    [ -n "$main" ] || main="$root"
+    if printf '%s' "$1" > "$root/cgroup.procs" 2>/dev/null && [ "$root" = "$main" ]; then
+      main_ok=1
+    fi
+  done
+  [ -n "$main" ] || return 1
+  [ "$main_ok" = "1" ] && return 0
+  return 1
+}
+
 # HH:MM → 当日第几分钟：配置里的钟点与「现在」的比较共用这一处换算。
 # 先去前导 0 再算（`$((08))` 会被当成八进制而报错）。
 hm_minutes() { # $1=HH:MM
