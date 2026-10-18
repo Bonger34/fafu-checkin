@@ -53,8 +53,13 @@ fi
 
 MODE="$1"
 if [ "$MODE" = "dev" ]; then
-  SHA="${GITHUB_SHA:-}"
-  [ -n "$SHA" ] || SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+  # 短 SHA：显式给的 DEV_SHA（CI 的 PR 构建用它把 head 传进来）> 检出的提交 > GITHUB_SHA。
+  # 不能用裸 GITHUB_SHA：PR 事件里它是 GitHub 的合并提交，与实际检出的 head 不是同一个，
+  # 包名与包内版本串就会对不上。
+  SHA="${DEV_SHA:-}"
+  [ -n "$SHA" ] || SHA=$(git rev-parse HEAD 2>/dev/null || true)
+  [ -n "$SHA" ] || SHA="${GITHUB_SHA:-}"
+  [ -n "$SHA" ] || SHA=unknown
   SHA=$(printf '%s' "$SHA" | cut -c1-7)
   OUT="$ROOT/dist/fafu-checkin-${VER}-dev.${SHA}.zip"
 

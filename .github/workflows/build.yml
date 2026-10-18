@@ -72,6 +72,9 @@ jobs:
         run: sh tools/run-tests.sh
 
       - name: 构建模块 zip（开发版）
+        env:
+          # 包名与包内版本串用同一个短 SHA；PR 上它是 head，不是 GitHub 的合并提交
+          DEV_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: sh build.sh dev
 
       - name: 上传构建产物
