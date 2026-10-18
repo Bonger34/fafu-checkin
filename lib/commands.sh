@@ -250,10 +250,10 @@ cmd_webstate() {
   printf 'version=%s\n' "$VER"
   # 配置项的**生效值**：页面要显示的就是这个（不是「刚填进去的值」）。
   # 与 cfg_* 读数同源，故页面不必自带一份键登记表——两份默认值必然漂移。
-  # debug= 排在配置项那一组的末尾（新增的键追加在组尾；页面按字段名取值，与顺序无关）。
-  printf 'keepalive=%s\npoll_start=%s\npoll_end=%s\nnotify=%s\nnotify_lead=%s\nnotify_cooldown=%s\ndebug=%s\n' \
+  # 字段顺序与配置层的键登记顺序一致；页面按字段名取值，与顺序无关。
+  printf 'keepalive=%s\npoll_start=%s\npoll_end=%s\nnotify=%s\nnotify_lead=%s\nnotify_cooldown=%s\nka_start=%s\nka_end=%s\ndebug=%s\n' \
     "$(cfg_keepalive)" "$(cfg_poll_start)" "$(cfg_poll_end)" "$(cfg_notify)" \
-    "$(cfg_notify_lead)" "$(cfg_notify_cooldown)" "$(cfg_debug)"
+    "$(cfg_notify_lead)" "$(cfg_notify_cooldown)" "$(cfg_ka_start)" "$(cfg_ka_end)" "$(cfg_debug)"
   _webstate_log
   return 0
 }

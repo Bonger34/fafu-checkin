@@ -1755,7 +1755,7 @@ nohup sh /sdcard/Download/device-smoke.sh > /sdcard/Download/fafu-smoke.log 2>&1
    窗口内等满仍无新记录算失败，窗口外等不到只记提醒（那是设计使然）
 6. 写入闸门往返：把当前生效值原样交给 `setconfig`（**不改变任何配置值**），断言它接受并回显
    同一套值——「校验先于落盘」这条链因此也在真机上走了一遍。键清单是
-   `KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN` 六项
+   `KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN KA_START KA_END` 八项
    **外加档位键 `DEBUG`**（它现在是在册键，且此刻生效的就是本次打开的那一档）；
    旧版模块的 `webstate` 里读不到 `debug=` 时**这一项不进清单**（同「读不到就不改」那条理由）
 

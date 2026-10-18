@@ -195,13 +195,26 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
 
     <section class="card">
       <button class="adv" type="button" id="f_adv" aria-expanded="false" aria-controls="adv_panel">
-        <span class="txt"><b>高级</b><small>预警提前量 · 通知冷却 · 调试日志</small></span>
+        <span class="txt"><b>高级</b><small>保活时段 · 预警提前量 · 通知冷却 · 调试日志</small></span>
         <span class="caret" aria-hidden="true"></span>
       </button>
 
       <div class="panel" id="adv_panel" aria-hidden="true">
         <div class="panel-in">
         <p class="tip">轮询范围要覆盖你学校发布任务的时间。范围之外本模块不会去查看任务，设窄了就会错过自动签到；兜底是到点仍未取得今晚任务时给你发一条提醒，收到后手动打开 App 签一下仍来得及——所以设窄的代价是「收到提醒、自己补救」，而不是静默漏签。</p>
+
+        <div class="row">
+          <div class="txt">
+            <b>保活时段</b>
+            <small>白天只在这个时段内刷新登录状态；到点即停（上界不含）。起必须早于止，不支持跨午夜。</small>
+            <small class="eff" id="h_ka">当前生效值：读取中…</small>
+          </div>
+          <span class="range">
+            <input class="field" type="text" id="f_ka_start" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="保活时段起">
+            <span class="tilde" aria-hidden="true">~</span>
+            <input class="field" type="text" id="f_ka_end" inputmode="numeric" maxlength="5" placeholder="HH:MM" aria-label="保活时段止">
+          </span>
+        </div>
 
         <div class="row">
           <div class="txt">
@@ -252,7 +265,7 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
 
   var MODDIR = '/data/adb/modules/fafu-checkin';
   var ENTRY  = MODDIR + '/fafu_checkin.sh';
-  /* 七项配置：写入用登记表里的键名，读取用 webstate 给的小写字段名（同源，故页面不自带默认值）。 */
+  /* 九项配置：写入用登记表里的键名，读取用 webstate 给的小写字段名（同源，故页面不自带默认值）。 */
   var CFG = [
     { key: 'KEEPALIVE',       field: 'keepalive' },
     { key: 'POLL_START',      field: 'poll_start' },
@@ -260,10 +273,12 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     { key: 'NOTIFY',          field: 'notify' },
     { key: 'NOTIFY_LEAD',     field: 'notify_lead',     min: 0, max: 600 },
     { key: 'NOTIFY_COOLDOWN', field: 'notify_cooldown', min: 0, max: 86400 },
+    { key: 'KA_START',        field: 'ka_start' },
+    { key: 'KA_END',          field: 'ka_end' },
     { key: 'DEBUG',           field: 'debug' }
   ];
 
-  var eff = {};   /* 上一次从 webstate 读到的七项生效值（空串 = 脚本没给这一项） */
+  var eff = {};   /* 上一次从 webstate 读到的九项生效值（空串 = 脚本没给这一项） */
   var st  = {};   /* webstate 的完整读数 */
   var seq = 0;    /* 回调名后缀：每次调用取一个，避免同名覆盖 */
   var snackTimer = 0;   /* 底部提示的定时器；连发时把上一条顶掉 */
@@ -346,9 +361,9 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
   function firstLine(s) { return String(s || '').split('\n')[0]; }
 
   function effSummary() {
-    return '保活 ' + onOff(eff.KEEPALIVE) + '、轮询 ' + eff.POLL_START + '~' + eff.POLL_END +
-      '、通知 ' + onOff(eff.NOTIFY) + '、预警 ' + eff.NOTIFY_LEAD + ' 秒、冷却 ' + eff.NOTIFY_COOLDOWN +
-      ' 秒、调试日志 ' + onOff(eff.DEBUG);
+    return '保活 ' + onOff(eff.KEEPALIVE) + '（' + eff.KA_START + '~' + eff.KA_END + '）、轮询 ' +
+      eff.POLL_START + '~' + eff.POLL_END + '、通知 ' + onOff(eff.NOTIFY) + '、预警 ' + eff.NOTIFY_LEAD +
+      ' 秒、冷却 ' + eff.NOTIFY_COOLDOWN + ' 秒、调试日志 ' + onOff(eff.DEBUG);
   }
 
   function renderForm() {
@@ -359,11 +374,14 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     el('f_poll_end').value = eff.POLL_END;
     el('f_lead').value = eff.NOTIFY_LEAD;
     el('f_cooldown').value = eff.NOTIFY_COOLDOWN;
+    el('f_ka_start').value = eff.KA_START;
+    el('f_ka_end').value = eff.KA_END;
     setText('h_keepalive', hint(eff.KEEPALIVE === '' ? '' : onOff(eff.KEEPALIVE)));
     setText('h_poll', hint(eff.POLL_START === '' || eff.POLL_END === '' ? '' : eff.POLL_START + ' ~ ' + eff.POLL_END));
     setText('h_notify', hint(eff.NOTIFY === '' ? '' : onOff(eff.NOTIFY)));
     setText('h_lead', hint(eff.NOTIFY_LEAD === '' ? '' : eff.NOTIFY_LEAD + ' 秒'));
     setText('h_cooldown', hint(eff.NOTIFY_COOLDOWN === '' ? '' : eff.NOTIFY_COOLDOWN + ' 秒'));
+    setText('h_ka', hint(eff.KA_START === '' || eff.KA_END === '' ? '' : eff.KA_START + ' ~ ' + eff.KA_END + '（上界不含）'));
     setText('h_debug', hint(eff.DEBUG === '' ? '' : onOff(eff.DEBUG)));
   }
 
@@ -440,6 +458,8 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
       NOTIFY: el('f_notify').checked ? '1' : '0',
       NOTIFY_LEAD: el('f_lead').value.trim(),
       NOTIFY_COOLDOWN: el('f_cooldown').value.trim(),
+      KA_START: el('f_ka_start').value.trim(),
+      KA_END: el('f_ka_end').value.trim(),
       DEBUG: el('f_debug').checked ? '1' : '0'
     };
   }
@@ -450,6 +470,9 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
     if (!isTime(v.POLL_START)) return { id: 'f_poll_start', text: '轮询范围起：只能填 HH:MM 形式的时刻，范围 00:00–23:59（' + nowText(v.POLL_START) + '）' };
     if (!isTime(v.POLL_END)) return { id: 'f_poll_end', text: '轮询范围止：只能填 HH:MM 形式的时刻，范围 00:00–23:59（' + nowText(v.POLL_END) + '）' };
     if (!orderOk(v.POLL_START, v.POLL_END)) return { id: 'f_poll_start', text: '轮询范围起（' + v.POLL_START + '）必须早于止（' + v.POLL_END + '），不支持跨午夜' };
+    if (!isTime(v.KA_START)) return { id: 'f_ka_start', text: '保活时段起：只能填 HH:MM 形式的时刻，范围 00:00–23:59（' + nowText(v.KA_START) + '）' };
+    if (!isTime(v.KA_END)) return { id: 'f_ka_end', text: '保活时段止：只能填 HH:MM 形式的时刻，范围 00:00–23:59（' + nowText(v.KA_END) + '）' };
+    if (!orderOk(v.KA_START, v.KA_END)) return { id: 'f_ka_start', text: '保活时段起（' + v.KA_START + '）必须早于止（' + v.KA_END + '），不支持跨午夜' };
     if (!inRange(v.NOTIFY_LEAD, lead.min, lead.max)) return { id: 'f_lead', text: '预警提前量：只能填 ' + lead.min + '–' + lead.max + ' 的整数秒（' + nowText(v.NOTIFY_LEAD) + '）' };
     if (!inRange(v.NOTIFY_COOLDOWN, cool.min, cool.max)) return { id: 'f_cooldown', text: '通知冷却：只能填 ' + cool.min + '–' + cool.max + ' 的整数秒（' + nowText(v.NOTIFY_COOLDOWN) + '）' };
     return null;
@@ -549,7 +572,7 @@ pre.logs{background:var(--chip); border-radius:16px; padding:12px; margin:0;
       refreshState().then(function () { snack('状态已刷新。'); });
     });
     /* 失焦时就地校验：非法值让输入框变红并给出规则，保存时再拦一次 */
-    var ids = ['f_poll_start', 'f_poll_end', 'f_lead', 'f_cooldown'];
+    var ids = ['f_poll_start', 'f_poll_end', 'f_ka_start', 'f_ka_end', 'f_lead', 'f_cooldown'];
     for (var i = 0; i < ids.length; i++) {
       el(ids[i]).addEventListener('change', function () {
         var p = checkForm(readForm());

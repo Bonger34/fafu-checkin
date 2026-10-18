@@ -524,6 +524,24 @@ sk_package_static() {
   t_has_re "页面：运行状态区的 s_debug 读 webstate 的 debug 字段" "$page" \
     "s_debug.*\.debug"
 
+  # 保活时段：高级区的一组起止时间，接线与轮询范围同形（控件 → 登记表 → 保存 → 回填）。
+  # 两条键都必须接到 webstate 的字段上，也不能只摆控件、保存时不带上。
+  t_has "页面：高级区有保活时段起输入" "$page" 'id="f_ka_start"'
+  t_has "页面：高级区有保活时段止输入" "$page" 'id="f_ka_end"'
+  t_has "页面：保活时段有生效值回填位" "$page" 'id="h_ka"'
+  t_has_re "页面：登记表里 KA_START 键对应 webstate 的 ka_start 字段" "$page" \
+    "key: 'KA_START',[ ]+field: 'ka_start'"
+  t_has_re "页面：登记表里 KA_END 键对应 webstate 的 ka_end 字段" "$page" \
+    "key: 'KA_END',[ ]+field: 'ka_end'"
+  t_has_re "页面：保存时把保活时段起取自输入框 f_ka_start" "$page" \
+    "^[[:space:]]*KA_START:.*f_ka_start"
+  t_has_re "页面：保存时把保活时段止取自输入框 f_ka_end" "$page" \
+    "^[[:space:]]*KA_END:.*f_ka_end"
+  t_has_re "页面：生效值回填写进 f_ka_start（值来自 webstate 的 KA_START 项）" "$page" \
+    "f_ka_start.*KA_START"
+  t_has_re "页面：保活时段起止与轮询范围同一套先后判定" "$page" \
+    "orderOk\(v\.KA_START, v\.KA_END\)"
+
   # 折叠与提示这两处只锚**结构与关系**，不抄尺寸/颜色字面量：
   # 视觉数值靠浏览器里取计算样式核对，写进断言只会随每次调样式变红。
   # 折叠：按钮声明了展开态与它控制的容器，容器自身带着可访问性标记。

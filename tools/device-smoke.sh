@@ -313,11 +313,13 @@ sect "6 · setconfig 往返（写入闸门；不改变任何配置值）"
 # **无副作用的往返**：把当前生效值原样交给写入闸门 → 断言它接受、并回显同一套值。
 # 校验先于落盘这条链因此也被真机走了一遍；失败时给出可读原因（这正是页面要显示的东西）。
 # 档位键（DEBUG）也在册，故一并进清单：它现在生效的就是 1（本脚本开头打开的那一档）。
+# 任何一项读不到都不进清单：旧版模块的 webstate 里没有新字段，塞一个空值进去会被闸门
+# 按「值不合法」拒掉，那会把「拿新脚本冒烟旧模块」误判成失败（与下面 DEBUG 同一条理由）。
 WS_KEYS=""
-for k in KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN; do
+for k in KEEPALIVE POLL_START POLL_END NOTIFY NOTIFY_LEAD NOTIFY_COOLDOWN KA_START KA_END; do
   v=$(printf '%s\n' "$WS_OUT" | sed -n "s/^$(printf '%s' "$k" | tr 'A-Z' 'a-z')=//p")
   [ -n "$v" ] || v=$(printf '%s\n' "$(sh "$E" webstate 2>/dev/null)" | sed -n "s/^$(printf '%s' "$k" | tr 'A-Z' 'a-z')=//p")
-  WS_KEYS="$WS_KEYS $k=$v"
+  [ -n "$v" ] && WS_KEYS="$WS_KEYS $k=$v"
 done
 # 档位键单列：旧版模块的 webstate 里没有 debug= 字段，读不到就不进清单——塞一个空值进去
 # 会被闸门按「未登记的配置键」拒掉，那会把「拿新脚本冒烟旧模块」误判成失败。
