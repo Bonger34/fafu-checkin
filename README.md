@@ -557,7 +557,7 @@ git commit -am "v1.1.7: ..."
 git push
 ```
 
-推送后 [`.github/workflows/build.yml`](.github/workflows/build.yml) 会自动构建，
+推送后 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 会先跑 check、再构建，
 产物在 Actions 运行页的 **Artifacts** 中下载（保留 90 天）。
 
 > **此时管理器还不会提示更新**：两个管理器都只按 `update.json` 里的 `versionCode`
@@ -606,10 +606,10 @@ git push
 
 **CI 职责划分**
 
-| 工作流 | 触发 | 职责 |
+| 工作流 / job | 触发 | 职责 |
 |---|---|---|
-| [build.yml](.github/workflows/build.yml) | push main / 手动 | 语法检查 + 元数据校验 + 构建 zip（产物供下载） |
-| [check.yml](.github/workflows/check.yml) | PR / 手动 | 语法检查 + 元数据校验（快速反馈） |
+| [ci.yml](.github/workflows/ci.yml) · `check` | PR / push main / 手动 | 语法检查 + 元数据校验 + 层序检查 + 全量断言（aarch64 busybox） |
+| [ci.yml](.github/workflows/ci.yml) · `build` | 同一次运行，`needs: check` | 构建 dev zip 并上传 artifact（产物供下载，保留 90 天） |
 
 ## ⚠️ 免责声明
 

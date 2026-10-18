@@ -1,34 +1,25 @@
-name: Build
+name: CI
 
-# 自动构建开发版模块 zip，并作为 workflow artifact 提供下载（保留 90 天）。
-# 产物名带 commit 标识，可追溯；发布由维护者手动完成（见 README「开发与发布」）。
-# PR 也触发：真机验证要用的 dev 包由 CI 直接产出，不必再手动 workflow_dispatch。
-# PR 上构建的是 head 提交（不是 GitHub 的合并提交），产物名的短 SHA 因此就是分支上的那个。
+# 一个 workflow 两个 job：check 只做校验，build 只出 dev 包。
+# build 用 needs 等 check 绿了再跑；断言因此只跑一遍，也不会给红提交出包。
+# 触发取原 Check 与 Build 的并集：PR、push main、手动。
 on:
+  pull_request:
   push:
     branches: [ main ]
-  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  check:
+    # aarch64：与设备同架构；busybox 用 KernelSU 同 commit 的 aarch64 构建。
+    # ubuntu-26.04-arm 是 public repo 的标准 runner；仓库转 private 时要换 larger runner 或自建。
+    runs-on: ubuntu-26.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # PR 上按 head 仓库 + head 提交检出；push / 手动触发沿用默认值
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: 获取短 SHA
-        id: vars
-        env:
-          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: echo "short_sha=$(printf '%s' "$SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - name: Shell 语法检查
         run: |
@@ -49,16 +40,16 @@ jobs:
         run: python3 scripts/check_metadata.py
 
       # 断言里的 mock 时间源需要一个真实 busybox 承接其余 applet。
-      # 用 **KernelSU 随附的那一份**（设备上的 /data/adb/ksu/bin/busybox 就是它）：
+      # 用 **KernelSU 随附的那一份**（设备上的 /data/adb/ksu/bin/busybox 同架构）：
       # 开发与生产同一份构建，busybox 的能力差异（可选特性、applet 支持）才会在 CI
-      # 暴露，而不是刷机之后才发现。x86_64 那份是静态 ELF，ubuntu 上可直接跑；
+      # 暴露，而不是刷机之后才发现。aarch64 那份是静态 ELF，ubuntu 26.04 arm64 上可直接跑；
       # 按 commit 钉住，上游一改不会让基线悄悄漂移。
       # **文件名必须正好是 `busybox`**：它按 argv[0] 分派 applet，改个名字就全废了。
-      - name: 准备 busybox（与设备同一份构建：KernelSU 随附）
+      - name: 准备 busybox（与设备同架构：KernelSU aarch64）
         run: |
-          curl -fsSL --retry 3 -o /usr/local/bin/busybox \
-            https://raw.githubusercontent.com/tiann/KernelSU/40e8fb7616bfd875babb45364f5262657538327a/userspace/ksud/bin/x86_64/busybox
-          chmod +x /usr/local/bin/busybox
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/busybox" \
+            https://raw.githubusercontent.com/tiann/KernelSU/40e8fb7616bfd875babb45364f5262657538327a/userspace/ksud/bin/aarch64/busybox
+          sudo install -m 0755 "$RUNNER_TEMP/busybox" /usr/local/bin/busybox
           /usr/local/bin/busybox | head -n1
           # 把这份 busybox 的可选能力打进日志：`%N` 编没编进去直接决定「耗时」是毫秒还是秒，
           # 这种差异要看得见，不靠猜。
@@ -70,6 +61,25 @@ jobs:
 
       - name: 运行断言（不需要手机 / root / 网络）
         run: sh tools/run-tests.sh
+
+  build:
+    # 打包与架构无关：build.sh 只依赖 zip/unzip，产物是 shell 脚本 + 页面。
+    # 与 check 同用 26.04 arm64，少一个环境变量；26.04 arm64 镜像自带 zip/unzip。
+    needs: check
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # PR 上按 head 仓库 + head 提交检出；push / 手动触发沿用默认值
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: 获取短 SHA
+        id: vars
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: echo "short_sha=$(printf '%s' "$SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - name: 构建模块 zip（开发版）
         env:

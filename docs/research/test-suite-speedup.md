@@ -29,7 +29,7 @@
 - `T_RUN` 用 here-doc 喂 `while read` 循环（注释里明确写了「用管道会让 `while` 落进子 shell，计数丢失」）。见 [harness.sh](tests/harness.sh)。
 - 每个用例的工作目录大多自带名字（`$T_WORK_ROOT/notify-<驱动>`、`$T_WORK_ROOT/poll-<name>`、`$T_WORK_ROOT/signin-<1>`），但存在**固定名**的共享目录：`$T_WORK_ROOT/api`、`/config`、`/device`、`/commands`、`/headers`、`/keepalive`、`/layer-order`、`/skeleton`、`/state`（9 个），以及 `harness.sh` 里 `_t_grep_count` 写死的两个共享临时文件 `$T_WORK_ROOT/.grep.tmp` 与 `$T_WORK_ROOT/.grep.n`。
 - `tests/harness.sh` 的注释记录了一个本机硬约束：**本机 busybox（Windows 版）在「嵌套命令替换」下会直接栈溢出崩掉**，所以 `_t_grep_count` 才改成「写文件」而不是 `$( ) + 管道`。这条约束会限制第 4 节的改写空间。
-- CI：`ubuntu-latest` + 系统 `sh`，applet 由 KernelSU 随附的 x86_64 busybox 承接（按 commit 钉住），见 [.github/workflows/check.yml](.github/workflows/check.yml)。
+- CI：`ubuntu-26.04-arm` + 系统 `sh`，applet 由 KernelSU 随附的 aarch64 busybox 承接（按 commit 钉住），见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
 **本机实测**（本次研究期间，`tools/busybox/busybox.exe`，20 次平均）：
 
@@ -171,7 +171,7 @@
    PATH=$(pwd)/bbdir bbdir/sh      # 让 $PATH 只暴露 busybox 内建命令
    ```
    → [BusyBox FAQ — Installing Busybox](https://busybox.net/FAQ.html)
-   与本仓库的关系：`.github/workflows/check.yml` 里那句注释「**文件名必须正好是 `busybox`**：它按 argv[0] 分派 applet」正是这条官方行为的直接后果。
+   与本仓库的关系：`.github/workflows/ci.yml` 里那句注释「**文件名必须正好是 `busybox`**：它按 argv[0] 分派 applet」正是这条官方行为的直接后果。
 
 2. **`FEATURE_SH_STANDALONE` + `FEATURE_SH_NOFORK` 才是「shell 里不 fork」的开关**。BusyBox 源码树一手文档 `docs/nofork_noexec.txt`；
    → [busybox/docs/nofork_noexec.txt（上游镜像源码树）](https://raw.githubusercontent.com/mirror/busybox/master/docs/nofork_noexec.txt)
@@ -339,13 +339,13 @@ GNU make 的 `Parallel Output` 与 GNU parallel 的 xargs 差异清单覆盖了*
 4. **Docker Desktop for Windows**：官方文档是 [Install Docker Desktop on Windows — Docker Docs](https://docs.docker.com/desktop/setup/install/windows-install/)。
    **本次研究的限制**：docs.docker.com 的 HTML 页面主体是 JS 渲染，`web_fetch` 拿到的是脚本而非正文；本机 PowerShell/curl 因安全上下文问题无法建立 TLS 连接（`SEC_E_NO_CREDENTIALS`），因此**未能读到该页的「System requirements」正文**。可确认的只有：该页存在、它是 Docker 官方安装文档；其 Windows 版要求 WSL2 后端或 Hyper-V 后端、安装需管理员权限。
    → **需要读者自行在该页核对**「WSL 2 backend / Hyper-V backend 的具体前置条件（虚拟化、内存、磁盘）」后再落地。
-   **推断**：Docker Desktop 对本仓库的价值低于 WSL2（多一层容器，测试还要挂载仓库；且 CI 是 `ubuntu-latest`，与容器行为一致性并不比 WSL2 更高）。建议把 Docker 作为「需要隔离环境跑 CI 复现」的备选，而不是本机提速首选。
+   **推断**：Docker Desktop 对本仓库的价值低于 WSL2（多一层容器，测试还要挂载仓库；且 CI 是 Linux，与容器行为一致性并不比 WSL2 更高）。建议把 Docker 作为「需要隔离环境跑 CI 复现」的备选，而不是本机提速首选。
 
 ---
 
 ## 七、可执行结论清单
 
-每条一行：结论 → 来源 → 本机适用性。**「本机」= Windows 宿主机；「CI」= ubuntu-latest**。
+每条一行：结论 → 来源 → 本机适用性。**「本机」= Windows 宿主机；「CI」= Linux（研究时为 ubuntu-latest）**。
 
 | # | 结论 | 来源 | 适用性 |
 | --- | --- | --- | --- |
@@ -371,7 +371,7 @@ GNU make 的 `Parallel Output` 与 GNU parallel 的 xargs 差异清单覆盖了*
 | 20 | 并行化本仓库必须先修两处共享状态：① `_t_grep_count` 写死的 `$T_WORK_ROOT/.grep.tmp` / `.grep.n`（**已解决**：该函数改为内建读文件，不再落中间文件）；② `T_PASS/T_FAIL/T_SKIP` 只存在于单进程，必须改成「子进程各报各的、父进程汇总」——这一条仍待做。 | [harness.sh](tests/harness.sh)、[run-tests.sh](tools/run-tests.sh)（仓库代码；**无外部一手来源**，本节结论均为对代码结构的推断） | 两者 |
 | 21 | 并行的安全粒度是「**一个用例文件一个进程**」：9 个文件用的固定工作目录（`api/config/device/commands/headers/keepalive/layer-order/skeleton/state`）在文件内天然串行，故文件级并行不冲突；细到「用例级」就必须给这 9 个目录加唯一后缀。 | [harness.sh](tests/harness.sh)、`tests/*.sh`（仓库代码；**推断**） | 两者 |
 | 22 | **装上 WSL2 是官方支持的「回到原生 Linux 进程语义」的路**：`wsl --install`（管理员 PowerShell + **重启**），要求 Windows 10 2004+/Build 19041+ 或 Windows 11；WSL2 用真实 Linux 内核，官方称文件密集型操作明显更快。 | [Install WSL](https://learn.microsoft.com/en-us/windows/wsl/install)；[Manual installation steps](https://learn.microsoft.com/en-us/windows/wsl/install-manual)；[Comparing WSL Versions](https://learn.microsoft.com/en-us/windows/wsl/compare-versions) | 本机 |
-| 23 | **WSL2 是「一次性成本换持续收益」**：一次管理员权限 + 一次重启之后，第 2、11–14 条里所有 Windows 特有的额外开销（原生进程创建贵、模拟 fork 贵、杀软拦截）整体消失；且与 CI 的 `ubuntu-latest` 环境更接近。 | 组合同上三条 + [Git for Windows](https://gitforwindows.org/windows-vs-linux-fork-and-exec-semantics.html)（**推断**：这是本文最强的提速建议） | 本机 |
+| 23 | **WSL2 是「一次性成本换持续收益」**：一次管理员权限 + 一次重启之后，第 2、11–14 条里所有 Windows 特有的额外开销（原生进程创建贵、模拟 fork 贵、杀软拦截）整体消失；且与 CI 的 Linux 环境更接近。 | 组合同上三条 + [Git for Windows](https://gitforwindows.org/windows-vs-linux-fork-and-exec-semantics.html)（**推断**：这是本文最强的提速建议） | 本机 |
 | 24 | Docker Desktop 官方安装文档在 [docs.docker.com](https://docs.docker.com/desktop/setup/install/windows-install/)；但**其正文（System requirements / WSL 2 backend vs Hyper-V backend 的具体前置条件）本次未读到**，需自行核对。**推断**：对本仓库收益低于 WSL2。 | [Install Docker Desktop on Windows — Docker Docs](https://docs.docker.com/desktop/setup/install/windows-install/)（仅能确认页面存在） | 本机 |
 
 ### 明确「未找到一手来源」的清单（汇总）

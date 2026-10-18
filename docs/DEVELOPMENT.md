@@ -1319,8 +1319,8 @@ sh build.sh                                 # 构建（含产物文件核对）
   ——产物里逐个层文件与页面入口、以及三条「构建必须失败」的反向，故它少的不止那 1 项），
   此时报 1641 项（另记跳过 1 项）；**本机（Windows）于 2026-10-16 实测到这一组数字**
   （1641 通过 / 0 失败 / 跳过 1 项）。
-  **CI（ubuntu + 设备同款 busybox）上的数字还没跟着更新**：上一轮记为 1436 项
-  （提交 `1fd9d1c`，Build 工作流，那时本机基线是 1410），与本机的差是「跳过的那 19 项 +
+  **CI（ubuntu 26.04 arm64 + 设备同架构 busybox）上的数字还没跟着更新**：上一轮记为 1436 项
+  （提交 `1fd9d1c`，当时的 Build 工作流，那时本机基线是 1410），与本机的差是「跳过的那 19 项 +
   本机读不到的一份 7 项」= 26 项；本轮改动后应以 CI 实跑为准，别直接照搬本机数。
   那一趟同时把本机跑不了的「打包产物校验」跑绿了（产物 17 个文件，含全部层文件与页面入口）；
   跑得更快用 **`sh tools/run-tests.sh -j N`**（也可设 `TEST_JOBS`）：一次并行 N 个用例文件，
@@ -1392,11 +1392,12 @@ sh build.sh                                 # 构建（含产物文件核对）
   ——`</dev/null` 这类写法本身由静态命令位判据钉住；
 - mock 替身需要一个**真实 busybox** 承接其余 applet：本机把它放到 `tools/busybox/`
   （该目录不入库）或用 `TEST_BUSYBOX=<路径>` 指定；CI 用 **KernelSU 随附的那一份**
-  （`userspace/ksud/bin/x86_64/busybox`，静态 ELF；设备上的 `/data/adb/ksu/bin/busybox`
-  就是它，按 commit 钉住），于是 **CI 与设备同一份构建**——busybox 的能力差异（可选特性、
-  applet 支持）在 CI 就暴露，而不是刷机之后才发现；CI 那一步还会把 `date +%s%3N` 的
-  实际输出打进日志，能力差异看得见、不靠猜。三者统一由 `tools/lib.sh` 的 `find_busybox` 定位。
-  **本机（Windows）与 CI 用的不是同一份二进制**（设备那份是 aarch64 ELF，本机跑不了），
+  （`userspace/ksud/bin/aarch64/busybox`，静态 ELF；设备上的 `/data/adb/ksu/bin/busybox`
+  也是 aarch64，CI 按 KernelSU commit 钉住），于是 **CI 与设备同架构**——busybox 的能力差异
+  （可选特性、applet 支持）在 CI 就暴露，而不是刷机之后才发现；CI 那一步还会把
+  `date +%s%3N` 的实际输出打进日志，能力差异看得见、不靠猜。三者统一由 `tools/lib.sh`
+  的 `find_busybox` 定位。**本机（Windows）与 CI 仍不是同一份二进制**（本机是
+  `busybox.exe`，CI 是 aarch64 ELF；设备那份还带 Android 内核 / SELinux 差异），
   所以代码里**不得依赖 busybox 的可选特性**：`%N` 未编译时 `date +%s%3N` 会把 `%3N`
   原样吐出，耗时因此以 `/proc/uptime` 兜底（见 §3.5「耗时」）。
   **也不要拿 applet 去解析结构化文本**：设备那份 busybox 的 `grep -oE` 与 `sed` 在
