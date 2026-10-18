@@ -1768,6 +1768,11 @@ nohup sh /sdcard/Download/device-smoke.sh > /sdcard/Download/fafu-smoke.log 2>&1
 > 「在本机就能观察到的那两件事」——冒烟前经 `setconfig` 打开调试档、退出时恢复成进脚本时的样子，
 > 用模块桩（把每次子命令调用按顺序记进文件）当观察面；第 6 节的键清单只能用静态锚点守着。
 
+**要求人做真机验证时，先出 dev 包**：PR 分支只跑 `Check`（不构建），`Build` 只在 `main` 或
+手动 `workflow_dispatch` 触发。用 `gh workflow run build.yml --ref <分支>` 触发，等 Build
+成功，把 artifact（`fafu-checkin-dev-<short-sha>`）或下载后的 zip 一并交出——只给分支 / PR
+链接，等于没有可装的产物。
+
 **#30 的修复（守护进程脱离管理器 cgroup）要在真机上验**：装开发版 → 配置页保存一次
 （这会 stop + start）→ 先别关页面，在 root shell 里看：
 
