@@ -395,7 +395,8 @@ cd_case_entry_shape() {
   t_hasnt "入口不再内联用法文本" "$entry" 'echo "用法: sh $SELF ['
   t_has "入口经 cmd_dispatch 分发" "$entry" 'cmd_dispatch "$CMD"'
   t_has "入口用 cmd_known 认子命令" "$entry" 'cmd_known "$CMD"'
-  t_has "入口保留了后台化（nohup）" "$entry" 'nohup sh "$SELF" start'
+  t_has "入口把守护进程派生交给 spawn_detached（换会话 + 挂断保护）" "$entry" \
+    'spawn_detached sh "$SELF" start'
   t_has "入口保留了单实例判定" "$entry" '已有实例(PID $oldpid)在运行，退出'
   t_has "入口保留了守护主循环" "$entry" 'while true; do'
   # 装配阶段的那一次探测（启动路径与手动子命令共用）：守护进程是入口派生出来再 exec
@@ -438,9 +439,9 @@ DRIVER
 # 八、降权探测：启动路径与手动子命令共用同一次探测结果
 # ============================================================
 
-# 守护进程是入口 `nohup` 派生出来、再 exec 一次自己的后台进程；它继承的是入口的环境，
-# 自己不再探（probe_su 里的 FAFU_SU_MODE 分支就是为这条继承链准备的）。所以那一次探测
-# 必须发生在派生**之前**——否则 daemon 的 SU_MODE 为空，而空的 SU_MODE 会让 notify()
+# 守护进程是入口经 `spawn_detached` 派生出来、再 exec 一次自己的后台进程；它继承的是入口
+# 的环境，自己不再探（probe_su 里的 FAFU_SU_MODE 分支就是为这条继承链准备的）。所以那一次
+# 探测必须发生在派生**之前**——否则 daemon 的 SU_MODE 为空，而空的 SU_MODE 会让 notify()
 # 直接返回：自动签到那几条通知静默消失，日志里也没有任何报错。
 #
 # 判据是静态的：source 整个入口这条路走不通（入口里 `SELF="$0"` 是无条件赋值，source 时

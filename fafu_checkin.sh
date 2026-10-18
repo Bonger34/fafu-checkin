@@ -77,7 +77,9 @@ cmd_start() {
     exit 0
   fi
   export FAFU_DAEMON=1 FAFU_SU_MODE="$SU_MODE"   # 探测结果随环境传给守护进程
-  "$BB" nohup sh "$SELF" start </dev/null >/dev/null 2>&1 &
+  # 换会话 + 忽略挂断再派生：管理器回收自己的进程组时带不走守护进程（cgroup 那一半在
+  # 守护进程启动时自己迁，见下面的 cgroup_escape）。
+  spawn_detached sh "$SELF" start
   echo "服务已启动"
   exit 0
 }
@@ -85,6 +87,17 @@ cmd_start() {
 [ -z "$FAFU_DAEMON" ] && cmd_start
 
 # ---- 守护主循环 ----
+# 先脱离管理器的 cgroup 再写 PID / 日志：从配置页启动的进程继承的是管理器 App 的 cgroup，
+# 页面 / 管理器一关会被连 cgroup 一起回收，日志里不会留下任何退出行（#30）。
+# 开机脚本那条路径本来就不在 App cgroup 里（返回 2），不写日志。
+cgroup_escape $$; _fafu_cg=$?
+if [ "$_fafu_cg" = "1" ]; then
+  log "⚠️ 未能离开管理器 cgroup：从配置页启动的进程可能随页面关闭被系统回收"
+elif [ "$_fafu_cg" = "0" ]; then
+  logd "已离开管理器 cgroup"
+fi
+unset _fafu_cg
+
 echo $$ > "$PIDF"
 log "===== 服务启动 (PID $$) 版本=${VER:-未知} wget_timeout=[${WGET_T:-无}] notify=[${SU_MODE:-不可用}] ====="
 
