@@ -31,7 +31,7 @@ jobs:
     # 与 check 同 runner：26.04 arm64 镜像自带 Info-ZIP 的 zip / unzip（build.sh 的前置）
     runs-on: ubuntu-26.04-arm
     steps:
-      - name: Checkout
+      - name: Checkout（待发布的树）
         uses: actions/checkout@v4
         with:
           # 手动补跑时检出指定的 tag；tag 推送时 github.ref 就是它
@@ -39,8 +39,19 @@ jobs:
           # 取全历史，校验脚本要读 tag 对象本身（轻量 tag 与带注释 tag 的类型不同）
           fetch-depth: 0
 
+      # 发布工具（校验脚本）跟着**工作流所在的提交**走，不跟着 tag 走：
+      # 否则一旦守卫晚于 tag 提交（本次 v1.3.1 就是这样），tag 里根本没有它；
+      # 而且改守卫时不必为此重建 tag。构建仍只针对待发布的那棵树。
+      - name: Checkout（发布工具）
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+
       - name: 校验发布前置条件
-        run: python3 scripts/check_release.py "${{ inputs.tag || github.ref_name }}"
+        run: python3 .release-tools/scripts/check_release.py "${TARGET_TAG}" --root .
+        env:
+          TARGET_TAG: ${{ inputs.tag || github.ref_name }}
 
       - name: 构建模块 zip（发布版）
         # 不带参数 = 发布模式：包内版本串与 module.prop 逐字一致、保留 updateJson。
