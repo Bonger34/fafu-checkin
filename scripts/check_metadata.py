@@ -22,6 +22,11 @@ def load_props() -> dict:
 
 
 def main() -> int:
+    # 与 check_release.py 同一口径：输出固定 UTF-8，否则 Windows 控制台按 GBK 编码时
+    # 这行里的 ✅ 会直接抛 UnicodeEncodeError，本机调试看不到结论。
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
     props = load_props()
 
     # module.prop 约束

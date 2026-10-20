@@ -1296,6 +1296,7 @@ sh $M/fafu_checkin.sh once         # 手动签到检查（幂等）
 ```sh
 sh -n *.sh lib/*.sh tools/*.sh tests/*.sh   # 语法（入口 + 库层 + 工具 + 断言）
 python3 scripts/check_metadata.py           # 元数据
+python3 scripts/check_release.py v1.1.7     # 发布前置条件（tag 之前自查；CI 出包前也会跑）
 sh tools/check-layer-order.sh               # 层序守卫（清单取自入口的 FAFU_LAYERS）
 sh tools/run-tests.sh                       # 全部断言
 sh tools/run-tests.sh ^layer                # 只跑某个套件（^ 前缀匹配）
@@ -1304,21 +1305,23 @@ sh build.sh                                 # 构建（含产物文件核对）
 
 **断言总入口 `tools/run-tests.sh`**（`tests/` 下的用例文件；harness 见 `tests/harness.sh`）：
 
-- 基线：**1641 项**（本机实测、日志分级五个代码票与它们的收口审查修复全部落地后的数：
+- 基线：**1654 项**（分项：`release` 13 项为本轮新增，其余 1641 项是 2026-10-16 本机实测、
+  日志分级五个代码票与它们的收口审查修复全部落地后的数：
   `api` 148 + `commands` 264 + `config` 159 + `device` 50 + `device-smoke` 9 + `headers` 61 +
-  `keepalive` 125 + `layer` 39 + `notify` 153 + `poll` 128 + `signin` 239（四份：`signin-query` 50 /
+  `keepalive` 125 + `layer` 39 + `notify` 153 + `poll` 128 + `release` 13 + `signin` 239（四份：`signin-query` 50 /
   `signin-refresh` 24 / `signin-remind` 49 / `signin-submit` 116）+ `skeleton` 109 + `state` 129；
   desc 层的断言在 `state` 那一份里，不另计一份），
   改动后应保持全绿；任一项失败时脚本以非 0 退出；迁移前草稿版的计数（文档写的 92、提交记录里的 95/100）
   都不可靠——那版测试里有一个 `for` 循环因缺换行整段没执行、断言函数复用变量把部分结果静默覆盖；
-  拆层前实测为 115 项。**这次按实测逐项重列，分项与 `合计` 行对得上**（逐项相加 = 1641）；
+  拆层前实测为 115 项。**这次按实测逐项重列，分项与 `合计` 行对得上**（逐项相加 = 1654）；
   上一版的旧分项表没有跟着几轮改动更新，已作废。**改动套件后请连同这张分项表一起更新，
   别只改总数**——分项对不上时，总数就只是个没人能核的数字。
   本机（Windows）没有 `zip`/`unzip` 时，`skeleton` 里真打 zip 与产物核对那一段会**跳过**
   （计数上记为 `跳过 1 项`，不计入通过，避免「本机没跑」被读成「已验证」；那一段本身是 **19 项**
   ——产物里逐个层文件与页面入口、以及三条「构建必须失败」的反向，故它少的不止那 1 项），
-  此时报 1641 项（另记跳过 1 项）；**本机（Windows）于 2026-10-16 实测到这一组数字**
-  （1641 通过 / 0 失败 / 跳过 1 项）。
+  此时报 1654 项（另记跳过 1 项）。**2026-10-16 实测过 1641 项那一组**
+  （1641 通过 / 0 失败 / 跳过 1 项）；**2026-10-20 新增 `release` 13 项**（单独实测全绿；其余套件
+  那一轮没有改动，计数不变），故基线按 1641 + 13 计。
   **CI（ubuntu 26.04 arm64 + 设备同架构 busybox）上的数字还没跟着更新**：上一轮记为 1436 项
   （提交 `1fd9d1c`，当时的 Build 工作流，那时本机基线是 1410），与本机的差是「跳过的那 19 项 +
   本机读不到的一份 7 项」= 26 项；本轮改动后应以 CI 实跑为准，别直接照搬本机数。
@@ -1889,7 +1892,12 @@ ps -o pid,sid,pgid,comm -p $pid    # sid / pgid 都应是它自己的 PID，不�
 
 ## 六、维护约定
 
-- **发布**：手动流程——CI 只构建（产物见 Actions artifact），Release 由维护者手动创建；
+- **发布**：推 `v*` tag 触发 [release-build.yml](../.github/workflows/release-build.yml) 出发布包
+  ——先 `needs: check` 跑完整断言，再 `sh build.sh`（发布模式），只上传 artifact，
+  **不建 Release、不碰 `update.json`**；Release 与发布说明仍由维护者手动创建与撰写。
+  打包前的四条守卫在 `scripts/check_release.py`：tag 与 `module.prop` 的 `version` 一致、
+  tag 带注释、`versionCode` 严格大于已发布的、CHANGELOG 有对应小节；
+  `tests/release.sh` 为每一条钉了负向用例。本地 `sh build.sh` 降为离线兜底（需 Info-ZIP 的 zip/unzip）。
   发布说明以 [CHANGELOG.md](../CHANGELOG.md) 对应小节为唯一来源（发布时从该小节取出）。
   **顺序上有一条硬约束：Release 与它的 zip 资源必须先存在，最后才同步 `update.json`。**
   两个管理器都只按 `update.json` 的 `versionCode` 判定更新（KernelSU：`versionCode <= 已装` 即跳过、

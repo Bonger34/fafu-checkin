@@ -525,13 +525,14 @@ sh build.sh dev      # 开发构建 → dist/fafu-checkin-<版本>-dev.<commit>.
 
 | 命令 | 产物名 | 用途 |
 |---|---|---|
-| `sh build.sh` | `fafu-checkin-<版本>.zip` | **发布**（文件名与 `update.json` 的 `zipUrl` 对应） |
+| `sh build.sh` | `fafu-checkin-<版本>.zip` | **发布**（推 tag 时由 CI 跑；文件名与 `update.json` 的 `zipUrl` 对应） |
 | `sh build.sh dev` | `fafu-checkin-<版本>-dev.5c1a6a4.zip` | **日常测试**（带 commit 标识，可追溯） |
 
-CI 的自动构建使用 **dev 模式**：Actions 产物（artifact）名为 `fafu-checkin-dev-<短commit>`，
-里面的 zip 仍是 `fafu-checkin-<版本>-dev.<短commit>.zip`，便于在多次 push 之间区分；
-dev 版会移除 `module.prop` 的 `updateJson`（不参与管理器更新检测，避免开发版被提示升级到
-正式版）；正式发布时使用干净的发布构建产物。
+CI 有两种构建：PR / push main / 手动触发跑 **dev 模式**（artifact 名为 `fafu-checkin-dev-<短commit>`，
+里面的 zip 仍是 `fafu-checkin-<版本>-dev.<短commit>.zip`，便于在多次 push 之间区分）；
+推 `v*` tag 跑 **发布模式**（artifact 名为 `fafu-checkin-release-<tag>`，包内版本串与
+`module.prop` 逐字一致）。dev 版会移除 `module.prop` 的 `updateJson`
+（不参与管理器更新检测，避免开发版被提示升级到正式版）；发布模式保留它。
 
 ### 安装到设备
 
@@ -542,9 +543,9 @@ adb push dist/fafu-checkin-*.zip /sdcard/Download/
 
 或等待 CI 发布后在管理器内直接更新。
 
-### 发布新版本（手动发布）
+### 发布新版本
 
-自动化仅负责**构建**，发布由维护者手动执行（便于检查产物与说明）：
+CI 负责**出包**（推 tag 触发），Release 与 `update.json` 由维护者手动操作（便于检查产物与说明）：
 
 **1. 准备版本**
 
@@ -562,27 +563,40 @@ git push
 产物在 Actions 运行页的 **Artifacts** 中下载（保留 90 天）。
 
 > **此时管理器还不会提示更新**：两个管理器都只按 `update.json` 里的 `versionCode`
-> 判定（`module.prop` 只被本机读取，仓库里那份不会被拉取）。真正打开提示的是第 4 步。
+> 判定（`module.prop` 只被本机读取，仓库里那份不会被拉取）。真正打开提示的是第 5 步。
 
-**3. 出发布包并创建 Release**
-
-**发布包必须本地用 `sh build.sh` 出**（见「两种构建模式」）：CI 跑的是 dev 模式，
-包名与包内版本串都带 `-dev.<短 SHA>` 且移除了 `updateJson`，而发布产物的版本串要与
-`module.prop` **逐字一致**（`build.sh` 会硬校验这一条），拿 CI 产物当发布包会在那里失败。
+**3. 推 tag，CI 出发布包**
 
 ```sh
-sh build.sh          # → dist/fafu-checkin-v1.1.7.zip
-# tag 先本地建好并推上去：**必须是带注释的**（-a），与历史版本同形，
-# 注释就是发布标题——全部 v1.x 版本都这样，别建成轻量 tag
 git tag -a v1.1.7 -m "v1.1.7：一句话摘要"
 git push origin refs/tags/v1.1.7
-gh release create v1.1.7 ./dist/fafu-checkin-v1.1.7.zip \
+```
+
+推 tag 会触发 [`release-build.yml`](.github/workflows/release-build.yml)：先跑一遍完整
+check，再由 `sh build.sh`（发布模式）出包，产物在 Actions 运行页的 **Artifacts** 里，
+名字是 `fafu-checkin-release-v1.1.7`。失败或想重出，用该 workflow 的 **Run workflow**
+手动指定 tag 即可，不必删 tag 重推。
+
+打包前会先跑 `scripts/check_release.py` 的四条守卫，一条不过就当场红、不出包：
+
+- tag 与 `module.prop` 的 `version` 一致（否则包内版本串与 tag 对不上）
+- tag **带注释**（`git tag -a`；轻量 tag 直接拒绝）
+- `versionCode` **严格大于** `update.json` 里已发布的那个（忘了加 1 = 管理器看不到更新）
+- `CHANGELOG.md` 里有 `## v1.1.7` 小节（发布说明的唯一来源）
+
+**4. 用这个包创建 Release**
+
+```sh
+gh run download -n fafu-checkin-release-v1.1.7 -D dist-release
+gh release create v1.1.7 ./dist-release/fafu-checkin-v1.1.7.zip \
   --title "v1.1.7：一句话摘要" \
   --notes-file CHANGELOG_SECTION.md    # 内容取自 CHANGELOG 对应小节
 ```
 
-tag 要打在**步骤 2 那个已通过 CI 的提交**上（`git tag` 不带提交号即取当前 `HEAD`），
-这样包与 tag 指向的是同一份代码。
+> **别拿 PR / main 的 dev 包顶替**：那些包名与包内版本串都带 `-dev.<短 SHA>`，且移除了
+> `updateJson`，管理器不会把它当成正式版。
+> 本地 `sh build.sh` 仍可用，但只作离线兜底——本机需要 Info-ZIP 的 `zip` / `unzip`
+> （Windows 上 Git for Windows 并不带它们）。
 
 > **两个踩过的坑**：
 > ① `gh release create --verify-tag=false` 会**顺手建一个轻量 tag**，把标签约定搞乱
@@ -590,7 +604,7 @@ tag 要打在**步骤 2 那个已通过 CI 的提交**上（`git tag` 不带提�
 > ② **删掉远端 tag 会让 GitHub 把 Release 转成 draft**（更新源仍在，但管理器看不到更新）。
 >    真要重建 tag，删完必须 `gh release edit <tag> --draft=false` 把它发布回来。
 
-**4. 同步 update.json**（这一步才会让管理器开始提示更新）
+**5. 同步 update.json**（这一步才会让管理器开始提示更新）
 
 ```sh
 python3 scripts/sync_update_json.py v1.1.7 9 \
@@ -601,7 +615,7 @@ git push
 
 > **顺序不能颠倒**：`update.json` 的 `versionCode` 一旦大于用户已装版本，提示立刻出现；
 > 这一步必须排在 Release 与它的资源**都已经存在**之后，否则用户点更新只会拿到 404。
-> 第 3 步在任何顺序下都不会有这个问题。
+> 第 4 步在任何顺序下都不会有这个问题。
 >
 > 也可直接用 GitHub 网页手动编辑 `update.json`（仅需改 `version` / `versionCode` / `zipUrl` 三项）。
 
@@ -609,8 +623,12 @@ git push
 
 | 工作流 / job | 触发 | 职责 |
 |---|---|---|
-| [ci.yml](.github/workflows/ci.yml) · `check` | PR / push main / 手动 | 语法检查 + 元数据校验 + 层序检查 + 全量断言（aarch64 busybox） |
-| [ci.yml](.github/workflows/ci.yml) · `build` | 同一次运行，`needs: check` | 构建 dev zip 并上传 artifact（产物供下载，保留 90 天） |
+| [check.yml](.github/workflows/check.yml) · `check` | 被下面两个工作流调用（`workflow_call`） | 语法检查 + 元数据校验 + 层序检查 + 全量断言（aarch64 busybox） |
+| [ci.yml](.github/workflows/ci.yml) · `build` | PR / push main / 手动，`needs: check` | 构建 dev zip 并上传 artifact（产物供下载，保留 90 天） |
+| [release-build.yml](.github/workflows/release-build.yml) · `package` | 推 `v*` tag / 手动指定 tag，`needs: check` | 跑发布守卫 → `sh build.sh` 出发布包并上传 artifact（不建 Release） |
+
+两份 `check` 调用共用同一份实现，断言只有一处；`release-build.yml` 只出包，Release 与
+`update.json` 仍由人按上面的顺序操作。
 
 ## ⚠️ 免责声明
 

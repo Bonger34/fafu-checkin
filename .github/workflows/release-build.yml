@@ -1,0 +1,55 @@
+name: Release build
+
+# 发布包只由「定稿」触发：推一个 v* tag，或手动指定 tag 补跑。
+# 这里**只出包**——不建 Release、不碰 update.json：
+#   发布说明的标题仍要人来写，Release 与 update.json 的顺序约束也靠人守
+#   （详见 README「发布新版本」与 DEVELOPMENT 的维护约定）。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建的 tag（如 v1.3.1）'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# 同一个 tag 的两次构建不要互相取消：手动补跑时手上那份 artifact 可能正在下载
+concurrency:
+  group: release-build-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+
+  package:
+    needs: check
+    # 与 check 同 runner：26.04 arm64 镜像自带 Info-ZIP 的 zip / unzip（build.sh 的前置）
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 手动补跑时检出指定的 tag；tag 推送时 github.ref 就是它
+          ref: ${{ inputs.tag || github.ref }}
+          # 取全历史，校验脚本要读 tag 对象本身（轻量 tag 与带注释 tag 的类型不同）
+          fetch-depth: 0
+
+      - name: 校验发布前置条件
+        run: python3 scripts/check_release.py "${{ inputs.tag || github.ref_name }}"
+
+      - name: 构建模块 zip（发布版）
+        # 不带参数 = 发布模式：包内版本串与 module.prop 逐字一致、保留 updateJson。
+        # build.sh 自己会核对产物里的版本串，不一致当场失败。
+        run: sh build.sh
+
+      - name: 上传发布包
+        uses: actions/upload-artifact@v4
+        with:
+          name: fafu-checkin-release-${{ inputs.tag || github.ref_name }}
+          path: dist/*.zip
+          if-no-files-found: error

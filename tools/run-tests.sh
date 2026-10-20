@@ -93,7 +93,7 @@ run_sh() {
 # 顺序**短套件在前、长套件在后**：并行时按 JOBS 攒批（批内并发、批间串行），把短的排前面
 # 能让它们先占满早期批次、把并发的长套件挤进同一批同时起跑，关键路径才不被拖长。
 # 新增用例文件请按这个口径插进清单；没登记的会被下面的兜底扫描按文件名顺序补在末尾。
-SUITE_ORDER="layer-order.sh headers.sh device-smoke.sh skeleton.sh device.sh config.sh state.sh notify.sh
+SUITE_ORDER="layer-order.sh headers.sh device-smoke.sh release.sh skeleton.sh device.sh config.sh state.sh notify.sh
 keepalive.sh api.sh signin-query.sh signin-refresh.sh commands.sh daemon-detach.sh poll.sh
 signin-remind.sh signin-submit.sh"
 SUITES=""
